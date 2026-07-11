@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rexovas/session-protect/internal/plan"
 	"github.com/rexovas/session-protect/internal/targets"
@@ -29,6 +30,7 @@ type RepoStatus struct {
 	Clean      bool   `json:"clean"`
 	SizeBytes  int64  `json:"size_bytes"`
 	LastCommit string `json:"last_commit,omitempty"`
+	LastBackup string `json:"last_backup,omitempty"`
 }
 
 type TargetStatus struct {
@@ -38,6 +40,7 @@ type TargetStatus struct {
 	Mode         string `json:"mode"`
 	SizeBytes    int64  `json:"size_bytes"`
 	SessionCount int    `json:"session_count"`
+	LastModified string `json:"last_modified,omitempty"`
 	BackupRepo   string `json:"backup_repo,omitempty"`
 }
 
@@ -65,35 +68,11 @@ func Print(out io.Writer, asJSON bool) int {
 		return 0
 	}
 
-	fmt.Fprintln(out, "SessionProtect status")
+	fmt.Fprintln(out, "SessionProtect")
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Config:   %s\n", s.ConfigPath)
-	fmt.Fprintf(out, "Root:     %s\n", s.BackupRoot)
-	fmt.Fprintf(out, "Topology: %s\n\n", s.Topology)
-
-	fmt.Fprintln(out, "Repositories")
-	for _, repo := range s.Repos {
-		state := "missing"
-		if repo.Detected {
-			state = "detected"
-		}
-		clean := "unknown"
-		if repo.Detected {
-			clean = "dirty"
-			if repo.Clean {
-				clean = "clean"
-			}
-		}
-		fmt.Fprintf(out, "  %-8s %-8s %-7s %s\n", repo.Name, repo.Kind, state, repo.Path)
-		if repo.Detected {
-			fmt.Fprintf(out, "    size: %s\n", formatBytes(repo.SizeBytes))
-			fmt.Fprintf(out, "    git:  %s\n", clean)
-			if repo.LastCommit != "" {
-				fmt.Fprintf(out, "    last: %s\n", repo.LastCommit)
-			}
-		}
-	}
-	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Config      %s\n", s.ConfigPath)
+	fmt.Fprintf(out, "Root        %s\n", s.BackupRoot)
+	fmt.Fprintf(out, "Topology    %s\n\n", s.Topology)
 
 	fmt.Fprintln(out, "Targets")
 	for _, target := range s.Targets {
@@ -101,16 +80,34 @@ func Print(out io.Writer, asJSON bool) int {
 		if target.Detected {
 			state = "detected"
 		}
-		fmt.Fprintf(out, "  %-8s %-8s %s\n", target.Name, state, target.Source)
-		fmt.Fprintf(out, "    mode:     %s\n", target.Mode)
-		if target.Detected {
-			fmt.Fprintf(out, "    size:     %s\n", formatBytes(target.SizeBytes))
-			fmt.Fprintf(out, "    sessions: %d\n", target.SessionCount)
+		repo := findRepo(s.Repos, target.BackupRepo)
+		repoState := "missing"
+		if repo != nil && repo.Detected {
+			repoState = "clean"
+			if !repo.Clean {
+				repoState = "dirty"
+			}
 		}
-		if target.BackupRepo != "" {
-			fmt.Fprintf(out, "    backup:   %s\n", target.BackupRepo)
+		fmt.Fprintf(out, "  %-8s source:%-8s backup:%s\n", target.Name, state, repoState)
+		if target.LastModified != "" {
+			fmt.Fprintf(out, "    source modified  %s\n", target.LastModified)
+		}
+		if repo != nil && repo.LastBackup != "" {
+			fmt.Fprintf(out, "    last backup      %s\n", repo.LastBackup)
+		}
+		if target.Detected {
+			fmt.Fprintf(out, "    sessions         %d\n", target.SessionCount)
+			fmt.Fprintf(out, "    source size      %s\n", formatBytes(target.SizeBytes))
+		}
+		if repo != nil && repo.Detected {
+			fmt.Fprintf(out, "    backup size      %s\n", formatBytes(repo.SizeBytes))
+			fmt.Fprintf(out, "    backup path      %s\n", repo.Path)
+		} else if target.BackupRepo != "" {
+			fmt.Fprintf(out, "    backup path      %s\n", target.BackupRepo)
 		}
 	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Use `session-protect project status` for current-project session details.")
 
 	return 0
 }
@@ -136,6 +133,7 @@ func fillRepo(repo *RepoStatus) {
 	repo.SizeBytes = dirSize(repo.Path)
 	repo.Clean = gitClean(repo.Path)
 	repo.LastCommit = gitLastCommit(repo.Path)
+	repo.LastBackup = gitLastCommitDate(repo.Path)
 }
 
 func buildTargets(detected []targets.Target, repos []RepoStatus) []TargetStatus {
@@ -161,10 +159,20 @@ func buildTargets(detected []targets.Target, repos []RepoStatus) []TargetStatus 
 		if target.Detected {
 			status.SizeBytes = dirSize(target.Source)
 			status.SessionCount = sessionCount(target)
+			status.LastModified = formatTime(latestModTime(target.Source))
 		}
 		statuses = append(statuses, status)
 	}
 	return statuses
+}
+
+func findRepo(repos []RepoStatus, path string) *RepoStatus {
+	for i := range repos {
+		if repos[i].Path == path {
+			return &repos[i]
+		}
+	}
+	return nil
 }
 
 func sessionCount(target targets.Target) int {
@@ -210,6 +218,29 @@ func gitLastCommit(path string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func gitLastCommitDate(path string) string {
+	out, err := exec.Command("git", "-C", path, "log", "-1", "--format=%cI").Output()
+	if err != nil {
+		return ""
+	}
+	return formatRFC3339(strings.TrimSpace(string(out)))
+}
+
+func latestModTime(root string) time.Time {
+	var latest time.Time
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err == nil && info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+		return nil
+	})
+	return latest
+}
+
 func dirSize(root string) int64 {
 	var total int64
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
@@ -238,4 +269,19 @@ func formatBytes(size int64) string {
 		}
 	}
 	return fmt.Sprintf("%.1f PB", value/unit)
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+func formatRFC3339(value string) string {
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return value
+	}
+	return formatTime(t)
 }
