@@ -57,3 +57,33 @@ func TestUpdateCheckCommand(t *testing.T) {
 		t.Fatalf("expected update check output, got %q", stdout.String())
 	}
 }
+
+func TestStatusCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	code := Run([]string{"status"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "SessionProtect status") {
+		t.Fatalf("expected status output, got %q", stdout.String())
+	}
+}
+
+func TestStatusJSONCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	code := Run([]string{"status", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"backup_root"`) {
+		t.Fatalf("expected status json output, got %q", stdout.String())
+	}
+}

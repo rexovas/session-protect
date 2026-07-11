@@ -6,6 +6,7 @@ import (
 
 	"github.com/rexovas/session-protect/internal/doctor"
 	"github.com/rexovas/session-protect/internal/plan"
+	"github.com/rexovas/session-protect/internal/status"
 	"github.com/rexovas/session-protect/internal/update"
 	"github.com/rexovas/session-protect/internal/version"
 )
@@ -33,6 +34,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return doctor.Run(stdout)
 	case "plan":
 		return plan.Print(stdout, hasFlag(args[1:], "--json"))
+	case "status":
+		return status.Print(stdout, hasFlag(args[1:], "--json"))
 	case "update":
 		return update.Run(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
@@ -52,6 +55,7 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  session-protect version [--verbose]")
 	fmt.Fprintln(out, "  session-protect doctor")
 	fmt.Fprintln(out, "  session-protect plan [--json]")
+	fmt.Fprintln(out, "  session-protect status [--json]")
 	fmt.Fprintln(out, "  session-protect update [--check]")
 }
 

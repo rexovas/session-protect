@@ -9,6 +9,8 @@ go run ./cmd/session-protect version
 go run ./cmd/session-protect doctor
 go run ./cmd/session-protect plan
 go run ./cmd/session-protect plan --json
+go run ./cmd/session-protect status
+go run ./cmd/session-protect status --json
 ```
 
 Local dogfood install:
