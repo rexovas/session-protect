@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/session-protect/session-protect/internal/targets"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 type Check struct {

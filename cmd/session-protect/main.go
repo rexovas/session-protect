@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/session-protect/session-protect/internal/app"
+	"github.com/rexovas/session-protect/internal/app"
 )
 
 func main() {

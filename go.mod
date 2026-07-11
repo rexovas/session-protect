@@ -1,3 +1,3 @@
-module github.com/session-protect/session-protect
+module github.com/rexovas/session-protect
 
 go 1.26.4

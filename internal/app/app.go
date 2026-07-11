@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/session-protect/session-protect/internal/doctor"
-	"github.com/session-protect/session-protect/internal/plan"
-	"github.com/session-protect/session-protect/internal/update"
-	"github.com/session-protect/session-protect/internal/version"
+	"github.com/rexovas/session-protect/internal/doctor"
+	"github.com/rexovas/session-protect/internal/plan"
+	"github.com/rexovas/session-protect/internal/update"
+	"github.com/rexovas/session-protect/internal/version"
 )
 
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {

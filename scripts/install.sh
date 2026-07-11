@@ -64,12 +64,12 @@ date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 version="${SESSION_PROTECT_VERSION:-0.1.0}"
 
 ldflags=(
-  "-X github.com/session-protect/session-protect/internal/version.Version=$version"
-  "-X github.com/session-protect/session-protect/internal/version.Commit=$commit"
-  "-X github.com/session-protect/session-protect/internal/version.Date=$date"
-  "-X github.com/session-protect/session-protect/internal/version.Channel=source"
-  "-X github.com/session-protect/session-protect/internal/version.SourceDir=$source_dir"
-  "-X github.com/session-protect/session-protect/internal/version.InstallPrefix=$prefix"
+  "-X github.com/rexovas/session-protect/internal/version.Version=$version"
+  "-X github.com/rexovas/session-protect/internal/version.Commit=$commit"
+  "-X github.com/rexovas/session-protect/internal/version.Date=$date"
+  "-X github.com/rexovas/session-protect/internal/version.Channel=source"
+  "-X github.com/rexovas/session-protect/internal/version.SourceDir=$source_dir"
+  "-X github.com/rexovas/session-protect/internal/version.InstallPrefix=$prefix"
 )
 
 mkdir -p "$bin_dir" "$share_dir"

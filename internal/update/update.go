@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/session-protect/session-protect/internal/version"
+	"github.com/rexovas/session-protect/internal/version"
 )
 
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {

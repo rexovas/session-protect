@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/session-protect/session-protect/internal/targets"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 type Plan struct {
