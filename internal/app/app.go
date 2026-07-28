@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/doctor"
 	"github.com/rexovas/session-protect/internal/plan"
 	"github.com/rexovas/session-protect/internal/project"
@@ -19,6 +20,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "backup", "save":
+		return backup.Run(args[1:], stdout, stderr)
 	case "version":
 		if hasFlag(args[1:], "--verbose") {
 			fmt.Fprintf(stdout, "session-protect version %s\n", version.Version)
@@ -55,6 +58,8 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "SessionProtect")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  session-protect backup [claude|codex] [--dry-run] [--allow-unencrypted] [--json]")
+	fmt.Fprintln(out, "  session-protect save [claude|codex]   (alias for backup)")
 	fmt.Fprintln(out, "  session-protect version [--verbose]")
 	fmt.Fprintln(out, "  session-protect doctor")
 	fmt.Fprintln(out, "  session-protect plan [--json]")

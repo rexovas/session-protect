@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/plan"
 	"github.com/rexovas/session-protect/internal/targets"
 )
@@ -45,8 +46,12 @@ type TargetStatus struct {
 }
 
 func Build() Status {
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = config.Defaults()
+	}
 	p := plan.Build()
-	repos := detectRepos(p.BackupRoot)
+	repos := detectRepos(cfg)
 	return Status{
 		ConfigPath: p.ConfigPath,
 		BackupRoot: p.BackupRoot,
@@ -112,12 +117,14 @@ func Print(out io.Writer, asJSON bool) int {
 	return 0
 }
 
-func detectRepos(backupRoot string) []RepoStatus {
-	home, _ := os.UserHomeDir()
-	candidates := []RepoStatus{
-		{Name: "all", Kind: "planned", Path: filepath.Join(backupRoot, "all")},
-		{Name: "claude", Kind: "legacy", Path: filepath.Join(home, "SessionBackups", "claude")},
-		{Name: "codex", Kind: "legacy", Path: filepath.Join(home, "SessionBackups", "codex")},
+func detectRepos(cfg config.Config) []RepoStatus {
+	var candidates []RepoStatus
+	if cfg.Topology == "per-target" {
+		for _, name := range []string{"claude", "codex"} {
+			candidates = append(candidates, RepoStatus{Name: name, Kind: "managed", Path: filepath.Join(cfg.BackupRoot, name)})
+		}
+	} else {
+		candidates = append(candidates, RepoStatus{Name: "all", Kind: "managed", Path: filepath.Join(cfg.BackupRoot, "all")})
 	}
 	for i := range candidates {
 		fillRepo(&candidates[i])
@@ -137,24 +144,24 @@ func fillRepo(repo *RepoStatus) {
 }
 
 func buildTargets(detected []targets.Target, repos []RepoStatus) []TargetStatus {
-	backupByName := map[string]string{}
+	managedByName := map[string]string{}
 	for _, repo := range repos {
 		if repo.Detected {
-			backupByName[repo.Name] = repo.Path
+			managedByName[repo.Name] = repo.Path
 		}
 	}
 
 	statuses := make([]TargetStatus, 0, len(detected))
 	for _, target := range detected {
 		status := TargetStatus{
-			Name:       target.Name,
-			Source:     target.Source,
-			Detected:   target.Detected,
-			Mode:       target.Mode,
-			BackupRepo: backupByName[target.Name],
+			Name:     target.Name,
+			Source:   target.Source,
+			Detected: target.Detected,
+			Mode:     target.Mode,
 		}
+		status.BackupRepo = managedByName[target.Name]
 		if status.BackupRepo == "" {
-			status.BackupRepo = backupByName["all"]
+			status.BackupRepo = managedByName["all"]
 		}
 		if target.Detected {
 			status.SizeBytes = dirSize(target.Source)

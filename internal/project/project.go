@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/rexovas/session-protect/internal/config"
 )
 
 type Status struct {
@@ -85,11 +87,15 @@ func Build(path string) (Status, error) {
 		return Status{}, err
 	}
 	home, _ := os.UserHomeDir()
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = config.Defaults()
+	}
 	return Status{
 		ProjectPath: projectPath,
 		Targets: []TargetStatus{
-			claudeStatus(home, projectPath),
-			codexStatus(home, projectPath),
+			claudeStatus(cfg, home, projectPath),
+			codexStatus(cfg, home, projectPath),
 		},
 	}, nil
 }
@@ -151,17 +157,22 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  session-protect project status [path] [--json]")
 }
 
-func claudeStatus(home string, projectPath string) TargetStatus {
+func claudeStatus(cfg config.Config, home string, projectPath string) TargetStatus {
 	slug := claudeProjectSlug(projectPath)
 	source := filepath.Join(home, ".claude", "projects", slug)
-	backup := filepath.Join(home, "SessionBackups", "claude", "projects", slug)
+	backup := backupDir(cfg, "claude", filepath.Join("projects", slug))
 	return compareTarget("claude", source, backup, listJSONL(source), listJSONL(backup))
 }
 
-func codexStatus(home string, projectPath string) TargetStatus {
+func codexStatus(cfg config.Config, home string, projectPath string) TargetStatus {
 	source := filepath.Join(home, ".codex", "sessions")
-	backup := filepath.Join(home, "SessionBackups", "codex", "codex-home", "sessions")
+	backup := backupDir(cfg, "codex", "sessions")
 	return compareTarget("codex", source, backup, codexSessions(source, projectPath), codexSessions(backup, projectPath))
+}
+
+func backupDir(cfg config.Config, target string, rel string) string {
+	repo, prefix := cfg.RepoFor(target)
+	return filepath.Join(repo, prefix, rel)
 }
 
 func compareTarget(name string, sourcePath string, backupPath string, sourceFiles []sessionFile, backupFiles []sessionFile) TargetStatus {
@@ -248,8 +259,18 @@ func normalizeProjectPath(path string) (string, error) {
 	return filepath.Clean(path), nil
 }
 
+// claudeProjectSlug mirrors Claude Code's project directory encoding: every
+// character outside [A-Za-z0-9] becomes "-", so "/a/b.c_d" -> "-a-b-c-d".
 func claudeProjectSlug(path string) string {
-	return strings.ReplaceAll(filepath.Clean(path), string(filepath.Separator), "-")
+	slug := []byte(filepath.Clean(path))
+	for i, c := range slug {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		default:
+			slug[i] = '-'
+		}
+	}
+	return string(slug)
 }
 
 func listJSONL(root string) []sessionFile {

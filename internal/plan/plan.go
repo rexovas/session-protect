@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 
+	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -15,15 +14,22 @@ type Plan struct {
 	BackupRoot string           `json:"backup_root"`
 	Topology   string           `json:"topology"`
 	Targets    []targets.Target `json:"targets"`
+	Warning    string           `json:"warning,omitempty"`
 }
 
 func Build() Plan {
-	home, _ := os.UserHomeDir()
+	cfg, err := config.Load()
+	warning := ""
+	if err != nil {
+		cfg = config.Defaults()
+		warning = fmt.Sprintf("config ignored: %v", err)
+	}
 	return Plan{
-		ConfigPath: filepath.Join(home, ".config", "session-protect", "config.toml"),
-		BackupRoot: defaultBackupRoot(home),
-		Topology:   "combined",
-		Targets:    targets.DetectAll(),
+		ConfigPath: cfg.ConfigPath,
+		BackupRoot: cfg.BackupRoot,
+		Topology:   cfg.Topology,
+		Targets:    cfg.ResolveTargets(),
+		Warning:    warning,
 	}
 }
 
@@ -41,7 +47,11 @@ func Print(out io.Writer, asJSON bool) int {
 
 	fmt.Fprintf(out, "Config:   %s\n", p.ConfigPath)
 	fmt.Fprintf(out, "Root:     %s\n", p.BackupRoot)
-	fmt.Fprintf(out, "Topology: %s\n\n", p.Topology)
+	fmt.Fprintf(out, "Topology: %s\n", p.Topology)
+	if p.Warning != "" {
+		fmt.Fprintf(out, "Warning:  %s\n", p.Warning)
+	}
+	fmt.Fprintln(out)
 
 	for _, target := range p.Targets {
 		state := "detected"
@@ -65,21 +75,4 @@ func Print(out io.Writer, asJSON bool) int {
 		fmt.Fprintln(out)
 	}
 	return 0
-}
-
-func defaultBackupRoot(home string) string {
-	switch runtimeGOOS() {
-	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "SessionProtect")
-	case "windows":
-		if local := os.Getenv("LOCALAPPDATA"); local != "" {
-			return filepath.Join(local, "SessionProtect")
-		}
-		return filepath.Join(home, "AppData", "Local", "SessionProtect")
-	default:
-		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-			return filepath.Join(xdg, "session-protect")
-		}
-		return filepath.Join(home, ".local", "share", "session-protect")
-	}
 }
