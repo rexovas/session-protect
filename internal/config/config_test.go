@@ -14,7 +14,7 @@ func TestDefaultsAreValid(t *testing.T) {
 	if cfg.Topology != "combined" {
 		t.Fatalf("default topology = %q", cfg.Topology)
 	}
-	if cfg.Encryption.Mode != "git-crypt" {
+	if cfg.Encryption.Mode != "none" {
 		t.Fatalf("default encryption = %q", cfg.Encryption.Mode)
 	}
 }

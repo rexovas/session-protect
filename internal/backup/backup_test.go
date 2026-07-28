@@ -2,11 +2,13 @@ package backup
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/encryption"
 )
 
 func writeFile(t *testing.T, path string, content string) {
@@ -51,7 +53,7 @@ func setupEnv(t *testing.T) (home string, cfg config.Config) {
 
 func TestDryRunWritesNothing(t *testing.T) {
 	home, cfg := setupEnv(t)
-	results, err := Execute(cfg, "", true, false)
+	results, err := Execute(cfg, Options{DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +73,7 @@ func TestDryRunWritesNothing(t *testing.T) {
 func TestBackupCommitsAndIsIdempotent(t *testing.T) {
 	home, cfg := setupEnv(t)
 
-	results, err := Execute(cfg, "", false, false)
+	results, err := Execute(cfg, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +103,7 @@ func TestBackupCommitsAndIsIdempotent(t *testing.T) {
 	}
 
 	// No changes: no new commit.
-	results, err = Execute(cfg, "", false, false)
+	results, err = Execute(cfg, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +118,7 @@ func TestBackupCommitsAndIsIdempotent(t *testing.T) {
 	if err := os.Remove(filepath.Join(home, ".claude", "projects", "-p-app", "s1.jsonl")); err != nil {
 		t.Fatal(err)
 	}
-	results, err = Execute(cfg, "claude", false, false)
+	results, err = Execute(cfg, Options{Target: "claude"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,23 +127,91 @@ func TestBackupCommitsAndIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestEncryptionFailsClosed(t *testing.T) {
-	home, cfg := setupEnv(t)
+func TestEncryptionFailsClosedOnPlainRepo(t *testing.T) {
+	_, cfg := setupEnv(t)
+
+	// Create a plain repo first, then demand encryption for it.
+	if _, err := Execute(cfg, Options{Target: "claude"}); err != nil {
+		t.Fatal(err)
+	}
 	cfg.Encryption.Mode = "git-crypt"
 
-	_, err := Execute(cfg, "claude", false, false)
+	_, err := Execute(cfg, Options{Target: "claude"})
 	if err == nil || !strings.Contains(err.Error(), "git-crypt") {
 		t.Fatalf("expected git-crypt fail-closed error, got %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(home, "root")); !os.IsNotExist(statErr) {
-		t.Fatal("failed encryption check must not create the backup root")
-	}
 
-	results, err := Execute(cfg, "claude", false, true)
+	results, err := Execute(cfg, Options{Target: "claude", AllowUnencrypted: true})
 	if err != nil {
 		t.Fatalf("--allow-unencrypted should proceed: %v", err)
 	}
-	if !results[0].Committed {
-		t.Fatalf("expected commit with --allow-unencrypted, got %+v", results)
+	if results[0].Skipped != "" {
+		t.Fatalf("expected claude to run, got %+v", results)
+	}
+}
+
+func TestGitCryptSetupOnFreshRepo(t *testing.T) {
+	if !encryption.Installed() {
+		t.Skip("git-crypt not installed")
+	}
+	home, cfg := setupEnv(t)
+	cfg.Encryption.Mode = "git-crypt"
+
+	results, err := Execute(cfg, Options{Target: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(home, "root", "all")
+	if results[0].KeyExported != cfg.Encryption.KeyPath {
+		t.Fatalf("expected key export path %q, got %+v", cfg.Encryption.KeyPath, results[0])
+	}
+	info, err := os.Stat(cfg.Encryption.KeyPath)
+	if err != nil {
+		t.Fatalf("recovery key missing: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("key permissions = %v, want 0600", info.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gitattributes")); err != nil {
+		t.Fatalf(".gitattributes missing: %v", err)
+	}
+
+	// Committed blobs must be ciphertext.
+	out, err := exec.Command("git", "-C", repo, "show", "HEAD:claude/history.jsonl").Output()
+	if err != nil {
+		t.Fatalf("git show: %v", err)
+	}
+	if !strings.HasPrefix(string(out), "\x00GITCRYPT") {
+		t.Fatalf("committed blob is not git-crypt encrypted: %q", out[:min(len(out), 16)])
+	}
+
+	// A second run must not re-export or fail on the now-unlocked repo.
+	results, err = Execute(cfg, Options{Target: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].KeyExported != "" {
+		t.Fatalf("unexpected re-export: %+v", results[0])
+	}
+}
+
+func TestSyncOnlyDoesNotCommit(t *testing.T) {
+	home, cfg := setupEnv(t)
+
+	results, err := Execute(cfg, Options{SyncOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(home, "root", "all")
+	for _, result := range results {
+		if result.Committed {
+			t.Fatalf("%s: sync must not commit", result.Target)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repo, "claude", "history.jsonl")); err != nil {
+		t.Fatalf("sync did not mirror files: %v", err)
+	}
+	if err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Run(); err == nil {
+		t.Fatal("sync created a commit")
 	}
 }

@@ -24,6 +24,9 @@ type Config struct {
 
 type Encryption struct {
 	Mode string `toml:"mode" json:"mode"` // git-crypt | none
+	// KeyPath is where the git-crypt recovery key is exported on first
+	// initialization and looked for by doctor.
+	KeyPath string `toml:"key_path" json:"key_path,omitempty"`
 }
 
 type TargetConfig struct {
@@ -58,6 +61,7 @@ func Load() (Config, error) {
 		return Defaults(), fmt.Errorf("parse %s: %w", cfg.ConfigPath, err)
 	}
 	cfg.BackupRoot = expandHome(cfg.BackupRoot)
+	cfg.Encryption.KeyPath = expandHome(cfg.Encryption.KeyPath)
 	for name, target := range cfg.Targets {
 		target.Source = expandHome(target.Source)
 		cfg.Targets[name] = target
@@ -74,8 +78,14 @@ func Defaults() Config {
 		ConfigPath: Path(),
 		BackupRoot: defaultBackupRoot(home),
 		Topology:   "combined",
-		Encryption: Encryption{Mode: "git-crypt"},
-		Targets:    map[string]TargetConfig{},
+		// Local backups default to unencrypted because they mirror data the
+		// agents already store unencrypted on the same disk. Encryption
+		// matters once backups leave the machine; git-crypt is opt-in.
+		Encryption: Encryption{
+			Mode:    "none",
+			KeyPath: filepath.Join(home, ".config", "session-protect", "git-crypt.key"),
+		},
+		Targets: map[string]TargetConfig{},
 	}
 }
 
