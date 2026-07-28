@@ -119,6 +119,7 @@ func Execute(cfg config.Config, opts Options) ([]Result, error) {
 
 	var results []Result
 	repos := map[string][]int{} // repo path -> indexes into results needing commit
+	stale := map[string][]string{}
 
 	for _, target := range selected {
 		repo, prefix := cfg.RepoFor(target.Name)
@@ -154,22 +155,40 @@ func Execute(cfg config.Config, opts Options) ([]Result, error) {
 		if err != nil {
 			return nil, fmt.Errorf("sync %s: %w", target.Name, err)
 		}
-		result.Added, result.Updated, result.Removed = sync.Added, sync.Updated, sync.Removed
+		result.Added, result.Updated = sync.Added, sync.Updated
 		if !opts.SyncOnly {
 			repos[repo] = append(repos[repo], len(results))
+			stale[repo] = append(stale[repo], gitrepo.Stale(repo, prefix, files)...)
 		}
 		results = append(results, result)
 	}
 
+	// Commit in two phases so a deleted file's final synced state is always
+	// in history before its removal is recorded: first the current working
+	// tree (including states mirrored earlier by realtime sync), then the
+	// deletions.
 	for repo, indexes := range repos {
 		scope := "all"
 		if len(indexes) == 1 {
 			scope = results[indexes[0]].Target
 		}
-		committed, err := gitrepo.Commit(repo, subject(scope), body(scope))
+		committed, err := gitrepo.Commit(repo, subject(scope, "backup"), body(scope, "backup"))
 		if err != nil {
 			return nil, fmt.Errorf("commit %s: %w", repo, err)
 		}
+
+		if paths := stale[repo]; len(paths) > 0 {
+			removed := gitrepo.RemoveFiles(repo, paths)
+			deletionsCommitted, err := gitrepo.Commit(repo, subject(scope, "backup-deletions"), body(scope, "backup-deletions"))
+			if err != nil {
+				return nil, fmt.Errorf("commit deletions %s: %w", repo, err)
+			}
+			committed = committed || deletionsCommitted
+			// Removals are repo-wide; report them on the first target sharing
+			// the repo to keep totals accurate.
+			results[indexes[0]].Removed = removed
+		}
+
 		head := gitrepo.Head(repo)
 		for _, i := range indexes {
 			results[i].Committed = committed
@@ -254,12 +273,12 @@ func printResults(out io.Writer, results []Result, opts Options) {
 	}
 }
 
-func subject(scope string) string {
-	return fmt.Sprintf("session-protect: manual %s backup %s", scope, time.Now().Format(time.RFC3339))
+func subject(scope string, action string) string {
+	return fmt.Sprintf("session-protect: manual %s %s %s", scope, action, time.Now().Format(time.RFC3339))
 }
 
-func body(scope string) string {
-	return fmt.Sprintf("action: backup\ntarget: %s\ntool-version: %s", scope, version.Version)
+func body(scope string, action string) string {
+	return fmt.Sprintf("action: %s\ntarget: %s\ntool-version: %s", action, scope, version.Version)
 }
 
 func usage(out io.Writer) {

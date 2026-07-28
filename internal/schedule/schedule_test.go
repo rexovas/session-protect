@@ -14,6 +14,7 @@ func TestPlist(t *testing.T) {
 		"<integer>12</integer>",
 		"<integer>30</integer>",
 		"<string>/tmp/backup.log</string>",
+		"<key>RunAtLoad</key>",
 	} {
 		if !strings.Contains(plist, want) {
 			t.Errorf("plist missing %s", want)

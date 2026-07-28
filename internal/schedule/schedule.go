@@ -152,6 +152,8 @@ func Plist(binary string, hour int, minute int, logPath string) string {
 		<key>Minute</key>
 		<integer>%d</integer>
 	</dict>
+	<key>RunAtLoad</key>
+	<true/>
 	<key>StandardOutPath</key>
 	<string>%s</string>
 	<key>StandardErrorPath</key>

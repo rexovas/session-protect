@@ -24,12 +24,16 @@ go run ./cmd/session-protect schedule install|status|uninstall
 ```
 
 `backup` mirrors each detected target's planned files into a local Git
-repository under the backup root and records one commit per run. Deleted
-sessions leave the working tree but remain recoverable from Git history.
-`save` is an alias for `backup`. `sync` mirrors without committing — a cheap
-operation suitable for high-frequency triggers such as agent hooks; history
-commits still come from `backup`. Backup and sync share a lock under the
-backup root; a concurrent `sync` exits quietly instead of failing.
+repository under the backup root. `save` is an alias for `backup`. `sync`
+mirrors without committing — a cheap operation suitable for high-frequency
+triggers such as agent hooks; history commits still come from `backup`.
+Backup and sync share a lock under the backup root; a concurrent `sync`
+exits quietly instead of failing.
+
+Deletions never lose data: `sync` never removes mirrored files, and `backup`
+commits the current working tree first, then records deletions in a separate
+follow-up commit — so a deleted session's final state is always in Git
+history before its removal is.
 
 Encryption is off by default: local backups mirror data the agents already
 store unencrypted on the same disk. Set `encryption.mode = "git-crypt"` to

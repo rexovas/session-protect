@@ -47,42 +47,16 @@ func IsGitCrypt(path string) bool {
 type SyncResult struct {
 	Added   int
 	Updated int
-	Removed int
 }
 
 // Sync mirrors the planned files into repo/prefix: copies new and changed
-// files (compared by size and mtime) and removes files under prefix that are
-// no longer planned, so pruned sessions land in git history rather than the
-// working tree. Source mtimes are preserved.
+// files (compared by size and mtime), preserving source mtimes. It never
+// removes anything — deletions are handled separately (see Stale and
+// RemoveFiles) so a file's final state can be committed before its removal
+// is recorded.
 func Sync(repo string, prefix string, files []fsplan.File) (SyncResult, error) {
 	var result SyncResult
 	root := filepath.Join(repo, filepath.FromSlash(prefix))
-
-	planned := make(map[string]fsplan.File, len(files))
-	for _, file := range files {
-		planned[file.Rel] = file
-	}
-
-	// Remove files that are no longer in the plan.
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
-			if entry != nil && entry.IsDir() && filepath.Base(path) == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		if _, ok := planned[filepath.ToSlash(rel)]; !ok {
-			if os.Remove(path) == nil {
-				result.Removed++
-			}
-		}
-		return nil
-	})
-
 	for _, file := range files {
 		dest := filepath.Join(root, filepath.FromSlash(file.Rel))
 		info, err := os.Stat(dest)
@@ -99,6 +73,56 @@ func Sync(repo string, prefix string, files []fsplan.File) (SyncResult, error) {
 		}
 	}
 	return result, nil
+}
+
+// Stale lists working-tree files under repo/prefix that are no longer in the
+// plan (deleted or pruned at the source).
+func Stale(repo string, prefix string, files []fsplan.File) []string {
+	root := filepath.Join(repo, filepath.FromSlash(prefix))
+	planned := make(map[string]bool, len(files))
+	for _, file := range files {
+		planned[file.Rel] = true
+	}
+
+	var stale []string
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if filepath.Base(path) == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		if !planned[filepath.ToSlash(rel)] {
+			stale = append(stale, path)
+		}
+		return nil
+	})
+	return stale
+}
+
+// RemoveFiles deletes the given files and prunes any directories left empty,
+// stopping at the repo root.
+func RemoveFiles(repo string, paths []string) int {
+	removed := 0
+	for _, path := range paths {
+		if os.Remove(path) != nil {
+			continue
+		}
+		removed++
+		for dir := filepath.Dir(path); dir != repo; dir = filepath.Dir(dir) {
+			if os.Remove(dir) != nil {
+				break // not empty (or root reached)
+			}
+		}
+	}
+	return removed
 }
 
 // Commit stages everything and commits with the given subject and body.

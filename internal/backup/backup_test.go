@@ -195,6 +195,56 @@ func TestGitCryptSetupOnFreshRepo(t *testing.T) {
 	}
 }
 
+func TestSyncNeverDeletesAndBackupCommitsFinalStateBeforeDeletion(t *testing.T) {
+	home, cfg := setupEnv(t)
+	repo := filepath.Join(home, "root", "all")
+	source := filepath.Join(home, ".claude", "projects", "-p-app", "s1.jsonl")
+	mirrored := filepath.Join(repo, "claude", "projects", "-p-app", "s1.jsonl")
+
+	// First backup commits the initial state, then the session grows and is
+	// mirrored by realtime sync — but not committed.
+	if _, err := Execute(cfg, Options{Target: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, source, "{\"final\":true}")
+	if _, err := Execute(cfg, Options{Target: "claude", SyncOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The source is deleted. Sync must NOT remove the mirrored copy.
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Execute(cfg, Options{Target: "claude", SyncOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mirrored); err != nil {
+		t.Fatal("sync deleted the mirrored copy of a deleted source file")
+	}
+
+	// Backup records the deletion, but only after committing the final state.
+	results, err := Execute(cfg, Options{Target: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Removed != 1 || !results[0].Committed {
+		t.Fatalf("expected committed deletion, got %+v", results[0])
+	}
+	if _, err := os.Stat(mirrored); !os.IsNotExist(err) {
+		t.Fatal("backup did not remove the deleted file from the working tree")
+	}
+
+	// The never-before-committed final state must be in the parent of the
+	// deletion commit.
+	out, err := exec.Command("git", "-C", repo, "show", "HEAD^:claude/projects/-p-app/s1.jsonl").Output()
+	if err != nil {
+		t.Fatalf("final state not recoverable from history: %v", err)
+	}
+	if string(out) != "{\"final\":true}" {
+		t.Fatalf("recovered %q, want final state", out)
+	}
+}
+
 func TestSyncOnlyDoesNotCommit(t *testing.T) {
 	home, cfg := setupEnv(t)
 
