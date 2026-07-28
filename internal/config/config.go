@@ -19,7 +19,13 @@ type Config struct {
 	Topology   string `toml:"topology" json:"topology"`
 
 	Encryption Encryption              `toml:"encryption" json:"encryption"`
+	Schedule   Schedule                `toml:"schedule" json:"schedule"`
 	Targets    map[string]TargetConfig `toml:"targets" json:"targets"`
+}
+
+type Schedule struct {
+	// Time is the local HH:MM at which the daily scheduled backup runs.
+	Time string `toml:"time" json:"time"`
 }
 
 type Encryption struct {
@@ -85,7 +91,8 @@ func Defaults() Config {
 			Mode:    "none",
 			KeyPath: filepath.Join(home, ".config", "session-protect", "git-crypt.key"),
 		},
-		Targets: map[string]TargetConfig{},
+		Schedule: Schedule{Time: "12:00"},
+		Targets:  map[string]TargetConfig{},
 	}
 }
 
@@ -138,7 +145,21 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("invalid encryption.mode %q (want git-crypt or none)", c.Encryption.Mode)
 	}
+	if _, _, err := c.Schedule.Clock(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// Clock parses the schedule time into hour and minute.
+func (s Schedule) Clock() (hour int, minute int, err error) {
+	if _, scanErr := fmt.Sscanf(s.Time, "%d:%d", &hour, &minute); scanErr != nil {
+		return 0, 0, fmt.Errorf("invalid schedule.time %q (want HH:MM)", s.Time)
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, 0, fmt.Errorf("invalid schedule.time %q (want HH:MM)", s.Time)
+	}
+	return hour, minute, nil
 }
 
 func defaultBackupRoot(home string) string {

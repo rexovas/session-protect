@@ -18,6 +18,9 @@ go run ./cmd/session-protect backup --dry-run
 go run ./cmd/session-protect backup [claude|codex] [--json]
 go run ./cmd/session-protect save
 go run ./cmd/session-protect sync [claude|codex]
+go run ./cmd/session-protect restore --dry-run
+go run ./cmd/session-protect restore [--target claude|codex] [--project PATH] [--session ID] [--yes]
+go run ./cmd/session-protect schedule install|status|uninstall
 ```
 
 `backup` mirrors each detected target's planned files into a local Git
@@ -36,6 +39,17 @@ and exports a recovery key to `encryption.key_path` (default
 destination that already exists unencrypted fails closed under git-crypt mode
 unless `--allow-unencrypted` is passed.
 
+`restore` brings backed-up session files for a project back into the live
+agent directories. By default it restores only sessions missing from the live
+source; `--session ID` targets one session, and replacing a live file
+requires `--overwrite`, which first saves a timestamped safety copy under the
+backup root. `--dry-run` previews; without `--yes` a confirmation is asked.
+Every restore is appended to `restore.log` in the backup root.
+
+`schedule install` sets up a daily backup (macOS LaunchAgent, user-scoped, no
+sudo) at the time given by `schedule.time` (default 12:00), logging to
+`~/Library/Logs/session-protect/backup.log`.
+
 Configuration is read from `~/.config/session-protect/config.toml`
 (override with `SESSION_PROTECT_CONFIG`). All settings are optional:
 
@@ -46,6 +60,9 @@ topology = "combined" # combined | per-target
 [encryption]
 mode = "none" # none | git-crypt
 key_path = "~/.config/session-protect/git-crypt.key"
+
+[schedule]
+time = "12:00" # local HH:MM for the daily scheduled backup
 
 [targets.claude]
 enabled = true
