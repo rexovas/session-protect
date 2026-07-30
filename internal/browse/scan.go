@@ -18,6 +18,7 @@ import (
 type Session struct {
 	Target         string
 	ID             string
+	Title          string // first prompt of the session, from agent history
 	State          string // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE
 	Modified       time.Time
 	BackupModified time.Time
@@ -50,8 +51,12 @@ func Scan(cfg config.Config) []*Project {
 	scanClaude(cfg, byPath)
 	scanCodex(cfg, byPath)
 
+	titles := historyTitles()
 	projects := make([]*Project, 0, len(byPath))
 	for _, project := range byPath {
+		for i := range project.Sessions {
+			project.Sessions[i].Title = titles[project.Sessions[i].ID]
+		}
 		sort.Slice(project.Sessions, func(i, j int) bool {
 			return newest(project.Sessions[i]).After(newest(project.Sessions[j]))
 		})
@@ -280,6 +285,49 @@ func listCodex(root string) []fileInfo {
 		return nil
 	})
 	return files
+}
+
+// historyTitles maps session ids to the first prompt recorded for them in the
+// agents' history files — a cheap title source that avoids opening every
+// session file.
+func historyTitles() map[string]string {
+	titles := map[string]string{}
+	claude := targets.DetectClaude()
+	codex := targets.DetectCodex()
+	for _, path := range []string{
+		filepath.Join(claude.Source, "history.jsonl"),
+		filepath.Join(codex.Source, "history.jsonl"),
+	} {
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+		for scanner.Scan() {
+			var entry struct {
+				Display    string `json:"display"`
+				SessionID  string `json:"sessionId"`
+				Text       string `json:"text"`
+				SessionID2 string `json:"session_id"`
+			}
+			if json.Unmarshal(scanner.Bytes(), &entry) != nil {
+				continue
+			}
+			id, text := entry.SessionID, entry.Display
+			if id == "" {
+				id, text = entry.SessionID2, entry.Text
+			}
+			if id == "" || text == "" {
+				continue
+			}
+			if _, seen := titles[id]; !seen {
+				titles[id] = strings.Join(strings.Fields(text), " ")
+			}
+		}
+		file.Close()
+	}
+	return titles
 }
 
 // codexMeta pulls the session id and working directory from the first lines

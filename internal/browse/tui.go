@@ -162,11 +162,16 @@ func (m model) View() string {
 
 func (m model) projectsView() string {
 	var b strings.Builder
-	title := fmt.Sprintf("SessionProtect — Projects (%d)", len(m.projects))
-	b.WriteString(styleHeader.Render(title) + "\n")
+	title := fmt.Sprintf("Session Explorer — Projects (%d)", len(m.projects))
+	legend := styleDim.Render("  ") + styleOK.Render("●") + styleDim.Render(" <1h  ") +
+		styleStale.Render("●") + styleDim.Render(" today  ") + styleDim.Render("○ older")
+	b.WriteString(styleHeader.Render(title) + legend + "\n")
 	b.WriteString(styleDim.Render(strings.Repeat("─", min(m.width, 120))) + "\n")
 
-	page := m.pageSize()
+	b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %9s  %8s  %-16s%s",
+		"PROJECT", "SESSIONS", "SIZE", "LAST ACTIVITY", " BACKUP")) + "\n")
+
+	page := m.pageSize() - 1
 	end := min(len(m.projects), m.offset+page)
 	for i := m.offset; i < end; i++ {
 		b.WriteString(m.projectRow(m.projects[i], i == m.cursor) + "\n")
@@ -199,7 +204,7 @@ func (m model) projectRow(project *Project, active bool) string {
 	}
 
 	row := fmt.Sprintf(" %s %-38s  %s  %8s  %-16s%s",
-		glyphStyle.Render(glyph), name, counts, formatBytes(project.SizeBytes), ago(project.Latest), health)
+		glyphStyle.Render(glyph), name, fmt.Sprintf("%9s", counts), formatBytes(project.SizeBytes), ago(project.Latest), health)
 	if active {
 		return styleCursor.Render(row)
 	}
@@ -209,11 +214,14 @@ func (m model) projectRow(project *Project, active bool) string {
 func (m model) sessionsView() string {
 	var b strings.Builder
 	project := m.selected
-	title := fmt.Sprintf("SessionProtect — %s (%d sessions)", displayName(project.Path), len(project.Sessions))
+	title := fmt.Sprintf("Session Explorer — %s (%d sessions)", displayName(project.Path), len(project.Sessions))
 	b.WriteString(styleHeader.Render(title) + "\n")
 	b.WriteString(styleDim.Render(truncate(project.Path, m.width)) + "\n")
 
-	page := m.pageSize() - 1
+	b.WriteString(styleDim.Render(fmt.Sprintf(" %-11s  %-36s %-7s %-10s %8s  %-12s %s",
+		"STATE", "TITLE", "AGENT", "SESSION", "SIZE", "MODIFIED", "BACKED UP")) + "\n")
+
+	page := m.pageSize() - 2
 	end := min(len(project.Sessions), m.sOffset+page)
 	for i := m.sOffset; i < end; i++ {
 		b.WriteString(m.sessionRow(project.Sessions[i], i == m.sCursor) + "\n")
@@ -225,9 +233,17 @@ func (m model) sessionsView() string {
 
 func (m model) sessionRow(session Session, active bool) string {
 	state, style := sessionState(session.State)
-	row := fmt.Sprintf(" %s  %-7s %-14s %8s  %-16s %s",
-		style.Render(state), session.Target, shortID(session.ID),
-		formatBytes(session.Size), ago(newest(session)), styleDim.Render(truncate(filepath.Base(pathOf(session)), 30)))
+	backedUp := ago(session.BackupModified)
+	if session.BackupModified.IsZero() {
+		backedUp = "never"
+	}
+	title := fmt.Sprintf("%-36s", truncate(session.Title, 36))
+	if session.Title == "" {
+		title = styleDim.Render(fmt.Sprintf("%-36s", "(not set)"))
+	}
+	row := fmt.Sprintf(" %s  %s %-7s %-10s %8s  %-12s %s",
+		style.Render(state), title, session.Target, shortID(session.ID),
+		formatBytes(session.Size), ago(session.Modified), styleDim.Render(backedUp))
 	if active {
 		return styleCursor.Render(row)
 	}
@@ -269,14 +285,7 @@ func displayName(path string) string {
 	return path
 }
 
-func pathOf(session Session) string {
-	if session.SourcePath != "" {
-		return session.SourcePath
-	}
-	return session.BackupPath
-}
-
-func shortID(id string) string { return truncate(id, 14) }
+func shortID(id string) string { return truncate(id, 10) }
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
