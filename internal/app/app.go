@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/rexovas/session-protect/internal/backup"
+	"github.com/rexovas/session-protect/internal/browse"
 	"github.com/rexovas/session-protect/internal/doctor"
 	"github.com/rexovas/session-protect/internal/hook"
 	"github.com/rexovas/session-protect/internal/plan"
@@ -34,6 +35,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return schedule.Run(args[1:], stdout, stderr)
 	case "hook":
 		return hook.Run(args[1:], stdout, stderr)
+	case "browse", "ui":
+		return browse.Run(args[1:], stdout, stderr)
 	case "version":
 		if hasFlag(args[1:], "--verbose") {
 			fmt.Fprintf(stdout, "session-protect version %s\n", version.Version)
@@ -77,6 +80,7 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "                          [--session ID] [--overwrite] [--dry-run] [--yes]")
 	fmt.Fprintln(out, "  session-protect schedule install|status|uninstall")
 	fmt.Fprintln(out, "  session-protect hook install|status|uninstall [claude]")
+	fmt.Fprintln(out, "  session-protect browse   (interactive session browser; alias: ui)")
 	fmt.Fprintln(out, "  session-protect version [--verbose]")
 	fmt.Fprintln(out, "  session-protect doctor")
 	fmt.Fprintln(out, "  session-protect plan [--json]")
