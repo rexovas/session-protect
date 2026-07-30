@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/guard"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -21,6 +22,7 @@ type Session struct {
 	ID             string
 	Title          string // first prompt of the session, from agent history
 	CustomName     string // user-assigned name, from custom-title events
+	LiveStatus     string // non-empty when open in a running agent process
 	State          string // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE
 	Modified       time.Time
 	BackupModified time.Time
@@ -41,6 +43,7 @@ type Project struct {
 	Stale       int
 	Unbacked    int // live sessions with no backup copy
 	RecoverOnly int // backed-up sessions missing from the live source
+	Open        int // sessions currently open in a running agent process
 	ClaudeCount int
 	CodexCount  int
 }
@@ -55,10 +58,15 @@ func Scan(cfg config.Config) []*Project {
 	scanCodex(cfg, byPath)
 
 	titles := historyTitles()
+	open := guard.Live(guard.RegistryDir())
 	projects := make([]*Project, 0, len(byPath))
 	for _, project := range byPath {
 		for i := range project.Sessions {
 			project.Sessions[i].Title = titles[project.Sessions[i].ID]
+			if info, ok := open[project.Sessions[i].ID]; ok {
+				project.Sessions[i].LiveStatus = info.Status
+				project.Open++
+			}
 		}
 		sort.Slice(project.Sessions, func(i, j int) bool {
 			return newest(project.Sessions[i]).After(newest(project.Sessions[j]))

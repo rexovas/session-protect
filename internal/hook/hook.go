@@ -54,21 +54,25 @@ func settingsPath() string {
 	return filepath.Join(home, ".claude", "settings.json")
 }
 
-// hookCommand runs a detached sync so the agent is never blocked, even if a
-// sync is slow or the backup root is temporarily unavailable.
-func hookCommand() (string, error) {
+// managedHooks returns the hook entries this tool installs per event: a
+// detached sync at every turn end, and the synchronous reopen guard at
+// session start (it must run inline to emit its warning, and is fast).
+func managedHooks() (map[string]string, error) {
 	binary, err := os.Executable()
 	if err == nil {
 		binary, err = filepath.EvalSymlinks(binary)
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return fmt.Sprintf("(%s sync >/dev/null 2>&1 &) %s", binary, marker), nil
+	return map[string]string{
+		"Stop":         fmt.Sprintf("(%s sync >/dev/null 2>&1 &) %s", binary, marker),
+		"SessionStart": fmt.Sprintf("%s guard %s", binary, marker),
+	}, nil
 }
 
 func install(stdout io.Writer, stderr io.Writer) int {
-	command, err := hookCommand()
+	commands, err := managedHooks()
 	if err != nil {
 		fmt.Fprintf(stderr, "hook install failed: %v\n", err)
 		return 1
@@ -81,30 +85,37 @@ func install(stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
-	if hasManagedHook(settings) {
-		fmt.Fprintf(stdout, "hook already installed in %s\n", path)
-		return 0
-	}
-
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {
 		hooks = map[string]any{}
 	}
-	stop, _ := hooks["Stop"].([]any)
-	stop = append(stop, map[string]any{
-		"hooks": []any{
-			map[string]any{"type": "command", "command": command},
-		},
-	})
-	hooks["Stop"] = stop
+	installed := 0
+	for _, event := range []string{"Stop", "SessionStart"} {
+		entries, _ := hooks[event].([]any)
+		if managedEntryPresent(entries) {
+			continue
+		}
+		hooks[event] = append(entries, map[string]any{
+			"hooks": []any{
+				map[string]any{"type": "command", "command": commands[event]},
+			},
+		})
+		installed++
+	}
+	if installed == 0 {
+		fmt.Fprintf(stdout, "hooks already installed in %s\n", path)
+		return 0
+	}
 	settings["hooks"] = hooks
 
 	if err := writeSettings(path, settings); err != nil {
 		fmt.Fprintf(stderr, "hook install failed: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Installed Stop hook in %s\n", path)
-	fmt.Fprintln(stdout, "New agent sessions sync after every turn; running sessions pick it up on restart.")
+	fmt.Fprintf(stdout, "Installed hooks in %s\n", path)
+	fmt.Fprintln(stdout, "  Stop          sync after every turn")
+	fmt.Fprintln(stdout, "  SessionStart  warn when a session is already open elsewhere")
+	fmt.Fprintln(stdout, "Running sessions pick hooks up on restart.")
 	return 0
 }
 
@@ -127,17 +138,19 @@ func uninstall(stdout io.Writer, stderr io.Writer) int {
 	}
 
 	hooks := settings["hooks"].(map[string]any)
-	stop, _ := hooks["Stop"].([]any)
-	var kept []any
-	for _, entry := range stop {
-		if !entryIsManaged(entry) {
-			kept = append(kept, entry)
+	for event, raw := range hooks {
+		entries, _ := raw.([]any)
+		var kept []any
+		for _, entry := range entries {
+			if !entryIsManaged(entry) {
+				kept = append(kept, entry)
+			}
 		}
-	}
-	if len(kept) > 0 {
-		hooks["Stop"] = kept
-	} else {
-		delete(hooks, "Stop")
+		if len(kept) > 0 {
+			hooks[event] = kept
+		} else {
+			delete(hooks, event)
+		}
 	}
 	if len(hooks) == 0 {
 		delete(settings, "hooks")
@@ -185,8 +198,17 @@ func writeSettings(path string, settings map[string]any) error {
 
 func hasManagedHook(settings map[string]any) bool {
 	hooks, _ := settings["hooks"].(map[string]any)
-	stop, _ := hooks["Stop"].([]any)
-	for _, entry := range stop {
+	for _, raw := range hooks {
+		entries, _ := raw.([]any)
+		if managedEntryPresent(entries) {
+			return true
+		}
+	}
+	return false
+}
+
+func managedEntryPresent(entries []any) bool {
+	for _, entry := range entries {
 		if entryIsManaged(entry) {
 			return true
 		}

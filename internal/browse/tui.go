@@ -165,7 +165,8 @@ func (m model) projectsView() string {
 	var b strings.Builder
 	title := fmt.Sprintf("Session Explorer — Projects (%d)", len(m.projects))
 	legend := styleDim.Render("  ") + styleOK.Render("●") + styleDim.Render(" <1h  ") +
-		styleStale.Render("●") + styleDim.Render(" today  ") + styleDim.Render("○ older")
+		styleStale.Render("●") + styleDim.Render(" today  ") + styleDim.Render("○ older  ") +
+		styleOK.Render("▶") + styleDim.Render(" open now")
 	b.WriteString(styleHeader.Render(title) + legend + "\n")
 	b.WriteString(styleDim.Render(strings.Repeat("─", min(m.width, 120))) + "\n")
 
@@ -191,6 +192,9 @@ func (m model) projectRow(project *Project, active bool) string {
 	counts := fmt.Sprintf("%3dc %2dx", project.ClaudeCount, project.CodexCount)
 
 	health := ""
+	if project.Open > 0 {
+		health += styleOK.Render(fmt.Sprintf(" ▶%d", project.Open))
+	}
 	if project.Stale > 0 {
 		health += styleStale.Render(fmt.Sprintf(" ~%d", project.Stale))
 	}
@@ -249,8 +253,12 @@ func (m model) sessionRow(session Session, active bool) string {
 	default:
 		title = styleDim.Render(fmt.Sprintf("%-36s", "(not set)"))
 	}
-	row := fmt.Sprintf(" %s  %s %-7s %-10s %8s  %-12s %s",
-		style.Render(state), title, session.Target, shortID(session.ID),
+	live := " "
+	if session.LiveStatus != "" {
+		live = styleOK.Render("▶")
+	}
+	row := fmt.Sprintf("%s%s  %s %-7s %-10s %8s  %-12s %s",
+		live, style.Render(state), title, session.Target, shortID(session.ID),
 		formatBytes(session.Size), ago(session.Modified), styleDim.Render(backedUp))
 	if active {
 		return styleCursor.Render(row)

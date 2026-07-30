@@ -55,8 +55,10 @@ func TestInstallStatusUninstall(t *testing.T) {
 		t.Fatal("second install failed")
 	}
 	hooks := settingsFor(t, home)["hooks"].(map[string]any)
-	if stop := hooks["Stop"].([]any); len(stop) != 1 {
-		t.Fatalf("expected 1 Stop entry after reinstall, got %d", len(stop))
+	for _, event := range []string{"Stop", "SessionStart"} {
+		if entries := hooks[event].([]any); len(entries) != 1 {
+			t.Fatalf("expected 1 %s entry after reinstall, got %d", event, len(entries))
+		}
 	}
 
 	if code := Run([]string{"status"}, &out, &errOut); code != 0 {
