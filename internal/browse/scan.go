@@ -2,6 +2,7 @@ package browse
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ type Session struct {
 	Target         string
 	ID             string
 	Title          string // first prompt of the session, from agent history
+	CustomName     string // user-assigned name, from custom-title events
 	State          string // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE
 	Modified       time.Time
 	BackupModified time.Time
@@ -29,6 +31,7 @@ type Session struct {
 
 // Project groups sessions that belong to one working directory.
 type Project struct {
+	NamesLoaded bool   // custom names are loaded lazily on first open
 	Path        string // real project path when recoverable, else the slug
 	Slug        string
 	Sessions    []Session
@@ -328,6 +331,58 @@ func historyTitles() map[string]string {
 		file.Close()
 	}
 	return titles
+}
+
+// LoadCustomNames fills in user-assigned session names by scanning each
+// session file for custom-title events (appended when a session is renamed).
+// It runs lazily per project because it reads whole files.
+func LoadCustomNames(project *Project) {
+	if project.NamesLoaded {
+		return
+	}
+	project.NamesLoaded = true
+	for i := range project.Sessions {
+		session := &project.Sessions[i]
+		path := session.SourcePath
+		if path == "" {
+			path = session.BackupPath
+		}
+		if path == "" {
+			continue
+		}
+		if name := customTitle(path); name != "" {
+			session.CustomName = name
+		}
+	}
+}
+
+// customTitle returns the last custom-title event in the file. A cheap byte
+// pre-filter keeps this fast on large transcripts.
+func customTitle(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	name := ""
+	pattern := []byte(`"custom-title"`)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if !bytes.Contains(line, pattern) {
+			continue
+		}
+		var event struct {
+			Type        string `json:"type"`
+			CustomTitle string `json:"customTitle"`
+		}
+		if json.Unmarshal(line, &event) == nil && event.Type == "custom-title" && event.CustomTitle != "" {
+			name = event.CustomTitle
+		}
+	}
+	return name
 }
 
 // codexMeta pulls the session id and working directory from the first lines

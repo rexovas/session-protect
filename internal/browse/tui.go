@@ -100,6 +100,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "l", "right":
 		if m.view == viewProjects && m.cursor < len(m.projects) {
 			m.selected = m.projects[m.cursor]
+			LoadCustomNames(m.selected)
 			m.view = viewSessions
 			m.sCursor, m.sOffset = 0, 0
 		}
@@ -237,8 +238,15 @@ func (m model) sessionRow(session Session, active bool) string {
 	if session.BackupModified.IsZero() {
 		backedUp = "never"
 	}
-	title := fmt.Sprintf("%-36s", truncate(session.Title, 36))
-	if session.Title == "" {
+	// Custom names render bright; the first-prompt fallback renders dim so
+	// the two are distinguishable at a glance.
+	var title string
+	switch {
+	case session.CustomName != "":
+		title = fmt.Sprintf("%-36s", truncate(session.CustomName, 36))
+	case session.Title != "":
+		title = styleDim.Render(fmt.Sprintf("%-36s", truncate(session.Title, 36)))
+	default:
 		title = styleDim.Render(fmt.Sprintf("%-36s", "(not set)"))
 	}
 	row := fmt.Sprintf(" %s  %s %-7s %-10s %8s  %-12s %s",

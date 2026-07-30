@@ -75,3 +75,20 @@ func TestScanMergesLiveAndBackup(t *testing.T) {
 		t.Fatalf("expected 1 recover-only session: %+v", projects[0])
 	}
 }
+
+func TestLoadCustomNames(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	writeFile(t, path, `{"type":"user","cwd":"/p"}
+{"type":"custom-title","customTitle":"first-name","sessionId":"s"}
+{"type":"custom-title","customTitle":"final-name","sessionId":"s"}
+`)
+	project := &Project{Sessions: []Session{{Target: "claude", ID: "s", SourcePath: path}}}
+	LoadCustomNames(project)
+	if project.Sessions[0].CustomName != "final-name" {
+		t.Fatalf("custom name = %q, want final-name (latest wins)", project.Sessions[0].CustomName)
+	}
+	if !project.NamesLoaded {
+		t.Fatal("NamesLoaded not set")
+	}
+}
