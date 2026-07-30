@@ -21,7 +21,15 @@ go run ./cmd/session-protect sync [claude|codex]
 go run ./cmd/session-protect restore --dry-run
 go run ./cmd/session-protect restore [--target claude|codex] [--project PATH] [--session ID] [--yes]
 go run ./cmd/session-protect schedule install|status|uninstall
+go run ./cmd/session-protect hook install|status|uninstall
+go run ./cmd/session-protect browse
 ```
+
+`browse` (alias `ui`) opens a full-screen interactive session browser:
+projects sorted by recent activity with per-agent session counts, sizes, and
+backup health, drilling into per-session states — including sessions that no
+longer exist locally but remain recoverable from backup. `--once` prints a
+single snapshot frame for scripting.
 
 `backup` mirrors each detected target's planned files into a local Git
 repository under the backup root. `save` is an alias for `backup`. `sync`
