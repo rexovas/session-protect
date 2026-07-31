@@ -48,6 +48,7 @@ type Project struct {
 	RecoverOnly int // backed-up sessions missing from the live source
 	Lost        int // known only from prompt history; no transcript anywhere
 	Open        int // sessions currently open in a running agent process
+	Active      int // open sessions with fresh unsynced writes (mid-turn)
 	ClaudeCount int
 	CodexCount  int
 }
@@ -124,6 +125,9 @@ func Scan(cfg config.Config) []*Project {
 			switch session.State {
 			case "OK", "ACTIVE": // active counts as protected; ▶ already shows it
 				project.OK++
+				if session.State == "ACTIVE" {
+					project.Active++
+				}
 			case "STALE_BACKUP":
 				project.Stale++
 			case "MISSING_BACKUP":
@@ -793,6 +797,7 @@ type Folder struct {
 	Unbacked    int
 	RecoverOnly int
 	Lost        int
+	Active      int
 }
 
 // ChildrenOf groups projects under root into immediate child folders with
@@ -842,6 +847,7 @@ func aggregate(folder *Folder, project *Project) {
 		folder.Latest = project.Latest
 	}
 	folder.Open += project.Open
+	folder.Active += project.Active
 	folder.Stale += project.Stale
 	folder.Unbacked += project.Unbacked
 	folder.RecoverOnly += project.RecoverOnly

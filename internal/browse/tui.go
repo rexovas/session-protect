@@ -582,7 +582,7 @@ func humanTokens(n int64) string {
 func (m model) pinBottom(content string, help string) string {
 	legend := styleOK.Render("●") + styleDim.Render(" <1h  ") +
 		styleStale.Render("●") + styleDim.Render(" today  ") + styleDim.Render("○ older  ") +
-		styleOK.Render("▶") + styleDim.Render(" open now ")
+		styleActive.Render("▶") + styleDim.Render(" open now ")
 	pathLine := styleDim.Render(" " + truncate(m.root, m.width-lipgloss.Width(legend)-3))
 	if pad := m.width - lipgloss.Width(pathLine) - lipgloss.Width(legend); pad > 0 {
 		pathLine += strings.Repeat(" ", pad)
@@ -628,7 +628,7 @@ func (m model) allSessionRow(session Session, active bool) string {
 	plain := active || gold
 	live := " "
 	if session.LiveStatus != "" {
-		live = styleUnless(plain, styleOK, "▶")
+		live = styleUnless(plain, styleActive, "▶")
 	}
 	row := fmt.Sprintf("%s%s  %s %-7s %-12s %8s  %-8s %s",
 		live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
@@ -691,7 +691,7 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	state, style := sessionState(session.State)
 	liveNote := ""
 	if session.LiveStatus != "" {
-		liveNote = styleOK.Render("  ▶ open now (" + session.LiveStatus + ")")
+		liveNote = styleActive.Render("  ▶ open now (" + session.LiveStatus + ")")
 	}
 	kv := func(key string, value string) {
 		b.WriteString(styleDim.Render(fmt.Sprintf(" %-10s", key)) + value + "\n")
@@ -1010,7 +1010,16 @@ func styleUnless(active bool, style lipgloss.Style, text string) string {
 }
 
 func (m model) folderRow(folder Folder, active bool) string {
+	// A folder holding actively-working sessions renders whole-row gold;
+	// the cursor highlight still wins when selected.
+	gold := folder.Active > 0 && !active
+	plain := active || gold
 	glyph, glyphStyle := activityGlyph(folder.Latest)
+	if folder.Open > 0 {
+		// Open now supersedes mtime age — an idle-but-open folder showing
+		// the "older" dot would contradict its ▶ badge.
+		glyph, glyphStyle = "▶", styleActive
+	}
 	name := truncate(folder.Name, m.nameWidth()-1) + "/"
 	if folder.Pseudo {
 		name = truncate(folder.Name, m.nameWidth())
@@ -1018,28 +1027,31 @@ func (m model) folderRow(folder Folder, active bool) string {
 
 	health := ""
 	if folder.Open > 0 {
-		health += styleUnless(active, styleOK, fmt.Sprintf(" ▶%d", folder.Open))
+		health += styleUnless(plain, styleActive, fmt.Sprintf(" ▶%d", folder.Open))
 	}
 	if folder.Stale > 0 {
-		health += styleUnless(active, styleStale, fmt.Sprintf(" ~%d", folder.Stale))
+		health += styleUnless(plain, styleStale, fmt.Sprintf(" ~%d", folder.Stale))
 	}
 	if folder.Unbacked > 0 {
-		health += styleUnless(active, styleUnbacked, fmt.Sprintf(" !%d", folder.Unbacked))
+		health += styleUnless(plain, styleUnbacked, fmt.Sprintf(" !%d", folder.Unbacked))
 	}
 	if folder.RecoverOnly > 0 {
-		health += styleUnless(active, styleRecover, fmt.Sprintf(" ✝%d", folder.RecoverOnly))
+		health += styleUnless(plain, styleRecover, fmt.Sprintf(" ✝%d", folder.RecoverOnly))
 	}
 	if folder.Lost > 0 {
-		health += styleUnless(active, styleDim, fmt.Sprintf(" ✕%d", folder.Lost))
+		health += styleUnless(plain, styleDim, fmt.Sprintf(" ✕%d", folder.Lost))
 	}
 	if health == "" {
-		health = styleUnless(active, styleOK, " ok")
+		health = styleUnless(plain, styleOK, " ok")
 	}
 
 	row := fmt.Sprintf(" %s %-*s  %8d  %8s  %-9s%s",
-		styleUnless(active, glyphStyle, glyph), m.nameWidth(), name, folder.Sessions, formatBytes(folder.SizeBytes), ago(folder.Latest), health)
+		styleUnless(plain, glyphStyle, glyph), m.nameWidth(), name, folder.Sessions, formatBytes(folder.SizeBytes), ago(folder.Latest), health)
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
+	}
+	if gold {
+		return styleActive.Render(row)
 	}
 	return row
 }
@@ -1052,7 +1064,7 @@ func (m model) sessionRow(session Session, active bool) string {
 	plain := active || gold
 	live := " "
 	if session.LiveStatus != "" {
-		live = styleUnless(plain, styleOK, "▶")
+		live = styleUnless(plain, styleActive, "▶")
 	}
 	size := formatBytes(session.Size)
 	if session.State == "LOST" {
