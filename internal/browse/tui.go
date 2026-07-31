@@ -2,7 +2,7 @@ package browse
 
 import (
 	"fmt"
-	"path/filepath"
+	"os"
 	"strings"
 	"time"
 
@@ -10,11 +10,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rexovas/session-protect/internal/config"
-)
-
-const (
-	viewProjects = iota
-	viewSessions
 )
 
 var (
@@ -31,14 +26,16 @@ var (
 type model struct {
 	cfg      config.Config
 	projects []*Project
-	view     int
-	selected *Project
 
-	cursor  int
-	offset  int
-	sCursor int
-	sOffset int
+	start string   // where the shell launched us
+	root  string   // directory currently viewed
+	trail []string // roots we descended through, for going back up
 
+	folders []Folder
+	here    *Project // project whose sessions live exactly at root
+
+	cursor int
+	offset int
 	width  int
 	height int
 }
@@ -46,7 +43,35 @@ type model struct {
 type rescanMsg []*Project
 
 func newModel(cfg config.Config) model {
-	return model{cfg: cfg, projects: Scan(cfg), width: 100, height: 32}
+	projects := Scan(cfg)
+	start, err := os.Getwd()
+	if err != nil {
+		start = string(os.PathSeparator)
+	}
+	m := model{cfg: cfg, projects: projects, start: start, width: 100, height: 32}
+	m.root = NearestRoot(projects, start)
+	m.rebuild()
+	return m
+}
+
+func (m *model) rebuild() {
+	m.folders = ChildrenOf(m.projects, m.root, m.start)
+	m.here = ProjectAt(m.projects, m.root)
+	if m.here != nil {
+		LoadCustomNames(m.here)
+	}
+	if m.cursor >= m.itemCount() {
+		m.cursor = max(0, m.itemCount()-1)
+	}
+	m.offset = clampOffset(m.offset, m.cursor, m.pageSize())
+}
+
+func (m model) itemCount() int {
+	count := len(m.folders)
+	if m.here != nil {
+		count += len(m.here.Sessions)
+	}
+	return count
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -58,15 +83,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case rescanMsg:
 		m.projects = msg
-		if m.cursor >= len(m.projects) {
-			m.cursor = max(0, len(m.projects)-1)
-		}
-		if m.selected != nil {
-			m.selected = findProject(m.projects, m.selected.Path)
-			if m.selected == nil {
-				m.view = viewProjects
-			}
-		}
+		m.rebuild()
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -77,72 +94,77 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
-		if m.view == viewSessions && msg.String() == "q" {
-			m.view = viewProjects
-			return m, nil
-		}
 		return m, tea.Quit
 	case "r":
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(Scan(cfg)) }
 	case "up", "k":
-		m.moveCursor(-1)
+		m.setCursor(m.cursor - 1)
 	case "down", "j":
-		m.moveCursor(1)
+		m.setCursor(m.cursor + 1)
 	case "pgup":
-		m.moveCursor(-m.pageSize())
+		m.setCursor(m.cursor - m.pageSize())
 	case "pgdown":
-		m.moveCursor(m.pageSize())
+		m.setCursor(m.cursor + m.pageSize())
 	case "g":
 		m.setCursor(0)
 	case "G":
 		m.setCursor(1 << 30)
 	case "enter", "l", "right":
-		if m.view == viewProjects && m.cursor < len(m.projects) {
-			m.selected = m.projects[m.cursor]
-			LoadCustomNames(m.selected)
-			m.view = viewSessions
-			m.sCursor, m.sOffset = 0, 0
+		if m.cursor < len(m.folders) {
+			m.trail = append(m.trail, m.root)
+			m.root = m.folders[m.cursor].Path
+			m.cursor, m.offset = 0, 0
+			m.rebuild()
 		}
 	case "esc", "backspace", "h", "left":
-		if m.view == viewSessions {
-			m.view = viewProjects
-		}
+		m.goUp()
 	}
 	return m, nil
 }
 
-func (m *model) moveCursor(delta int) { m.setCursor(m.current() + delta) }
+func (m *model) goUp() {
+	if len(m.trail) > 0 {
+		m.root = m.trail[len(m.trail)-1]
+		m.trail = m.trail[:len(m.trail)-1]
+		m.cursor, m.offset = 0, 0
+		m.rebuild()
+		return
+	}
+	parent := parentDir(m.root)
+	if parent == m.root {
+		return
+	}
+	m.root = parent
+	m.cursor, m.offset = 0, 0
+	m.rebuild()
+}
+
+func parentDir(path string) string {
+	if !strings.HasPrefix(path, string(os.PathSeparator)) {
+		return path // pseudo root; only the trail can leave it
+	}
+	parent := path
+	if idx := strings.LastIndex(path, string(os.PathSeparator)); idx > 0 {
+		parent = path[:idx]
+	} else if idx == 0 && path != string(os.PathSeparator) {
+		parent = string(os.PathSeparator)
+	}
+	return parent
+}
 
 func (m *model) setCursor(position int) {
-	limit := len(m.projects)
-	if m.view == viewSessions && m.selected != nil {
-		limit = len(m.selected.Sessions)
-	}
 	if position < 0 {
 		position = 0
 	}
-	if position > limit-1 {
-		position = max(0, limit-1)
+	if position > m.itemCount()-1 {
+		position = max(0, m.itemCount()-1)
 	}
-	page := m.pageSize()
-	if m.view == viewProjects {
-		m.cursor = position
-		m.offset = clampOffset(m.offset, position, page)
-	} else {
-		m.sCursor = position
-		m.sOffset = clampOffset(m.sOffset, position, page)
-	}
+	m.cursor = position
+	m.offset = clampOffset(m.offset, position, m.pageSize())
 }
 
-func (m model) current() int {
-	if m.view == viewSessions {
-		return m.sCursor
-	}
-	return m.cursor
-}
-
-func (m model) pageSize() int { return max(4, m.height-5) }
+func (m model) pageSize() int { return max(4, m.height-6) }
 
 func clampOffset(offset int, cursor int, page int) int {
 	if cursor < offset {
@@ -155,85 +177,80 @@ func clampOffset(offset int, cursor int, page int) int {
 }
 
 func (m model) View() string {
-	if m.view == viewSessions && m.selected != nil {
-		return m.sessionsView()
-	}
-	return m.projectsView()
-}
-
-func (m model) projectsView() string {
 	var b strings.Builder
-	title := fmt.Sprintf("Session Explorer — Projects (%d)", len(m.projects))
+
+	title := "Session Explorer"
 	legend := styleDim.Render("  ") + styleOK.Render("●") + styleDim.Render(" <1h  ") +
 		styleStale.Render("●") + styleDim.Render(" today  ") + styleDim.Render("○ older  ") +
 		styleOK.Render("▶") + styleDim.Render(" open now")
 	b.WriteString(styleHeader.Render(title) + legend + "\n")
-	b.WriteString(styleDim.Render(strings.Repeat("─", min(m.width, 120))) + "\n")
 
-	b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %8s  %8s  %-16s%s",
-		"PROJECT", "SESSIONS", "SIZE", "LAST ACTIVITY", " BACKUP")) + "\n")
+	total := 0
+	for _, folder := range m.folders {
+		total += folder.Sessions
+	}
+	if m.here != nil {
+		total += len(m.here.Sessions)
+	}
+	b.WriteString(styleDim.Render(fmt.Sprintf("%s — %d sessions beneath", truncate(m.root, m.width-24), total)) + "\n")
 
-	page := m.pageSize() - 1
-	end := min(len(m.projects), m.offset+page)
+	end := min(m.itemCount(), m.offset+m.pageSize())
+	lastKind := ""
 	for i := m.offset; i < end; i++ {
-		b.WriteString(m.projectRow(m.projects[i], i == m.cursor) + "\n")
+		if i < len(m.folders) {
+			if lastKind != "folder" {
+				b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %8s  %8s  %-16s%s",
+					"FOLDER", "SESSIONS", "SIZE", "LAST ACTIVITY", " BACKUP")) + "\n")
+				lastKind = "folder"
+			}
+			b.WriteString(m.folderRow(m.folders[i], i == m.cursor) + "\n")
+			continue
+		}
+		if lastKind != "session" {
+			b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-36s %-7s %-10s %8s  %-12s %s",
+				"STATE", "TITLE", "AGENT", "SESSION", "SIZE", "MODIFIED", "BACKED UP")) + "\n")
+			lastKind = "session"
+		}
+		b.WriteString(m.sessionRow(m.here.Sessions[i-len(m.folders)], i == m.cursor) + "\n")
 	}
-	if len(m.projects) == 0 {
-		b.WriteString(styleDim.Render("  no sessions found") + "\n")
+	if m.itemCount() == 0 {
+		b.WriteString(styleDim.Render("  no sessions here") + "\n")
 	}
 
-	b.WriteString(m.footer("↑/↓ move · enter open · r refresh · q quit"))
+	b.WriteString(m.footer("↑/↓ move · enter open · ← up · r refresh · q quit"))
 	return b.String()
 }
 
-func (m model) projectRow(project *Project, active bool) string {
-	glyph, glyphStyle := activityGlyph(project.Latest)
-	name := truncate(displayName(project.Path), 38)
-	counts := fmt.Sprintf("%8d", len(project.Sessions))
+func (m model) folderRow(folder Folder, active bool) string {
+	glyph, glyphStyle := activityGlyph(folder.Latest)
+	name := truncate(folder.Name, 37) + "/"
+	if folder.Pseudo {
+		name = truncate(folder.Name, 38)
+	}
 
 	health := ""
-	if project.Open > 0 {
-		health += styleOK.Render(fmt.Sprintf(" ▶%d", project.Open))
+	if folder.Open > 0 {
+		health += styleOK.Render(fmt.Sprintf(" ▶%d", folder.Open))
 	}
-	if project.Stale > 0 {
-		health += styleStale.Render(fmt.Sprintf(" ~%d", project.Stale))
+	if folder.Stale > 0 {
+		health += styleStale.Render(fmt.Sprintf(" ~%d", folder.Stale))
 	}
-	if project.Unbacked > 0 {
-		health += styleUnbacked.Render(fmt.Sprintf(" !%d", project.Unbacked))
+	if folder.Unbacked > 0 {
+		health += styleUnbacked.Render(fmt.Sprintf(" !%d", folder.Unbacked))
 	}
-	if project.RecoverOnly > 0 {
-		health += styleRecover.Render(fmt.Sprintf(" ✝%d", project.RecoverOnly))
+	if folder.RecoverOnly > 0 {
+		health += styleRecover.Render(fmt.Sprintf(" ✝%d", folder.RecoverOnly))
 	}
 	if health == "" {
 		health = styleOK.Render(" ok")
 	}
 
-	row := fmt.Sprintf(" %s %-38s  %s  %8s  %-16s%s",
-		glyphStyle.Render(glyph), name, counts, formatBytes(project.SizeBytes), ago(project.Latest), health)
+	row := fmt.Sprintf(" %s %-38s  %8d  %8s  %-16s%s",
+		glyphStyle.Render(glyph), name, folder.Sessions, formatBytes(folder.SizeBytes), ago(folder.Latest), health)
 	if active {
 		return styleCursor.Render(row)
 	}
 	return row
-}
-
-func (m model) sessionsView() string {
-	var b strings.Builder
-	project := m.selected
-	title := fmt.Sprintf("Session Explorer — %s (%d sessions)", displayName(project.Path), len(project.Sessions))
-	b.WriteString(styleHeader.Render(title) + "\n")
-	b.WriteString(styleDim.Render(truncate(project.Path, m.width)) + "\n")
-
-	b.WriteString(styleDim.Render(fmt.Sprintf(" %-11s  %-36s %-7s %-10s %8s  %-12s %s",
-		"STATE", "TITLE", "AGENT", "SESSION", "SIZE", "MODIFIED", "BACKED UP")) + "\n")
-
-	page := m.pageSize() - 2
-	end := min(len(project.Sessions), m.sOffset+page)
-	for i := m.sOffset; i < end; i++ {
-		b.WriteString(m.sessionRow(project.Sessions[i], i == m.sCursor) + "\n")
-	}
-
-	b.WriteString(m.footer("↑/↓ move · esc back · r refresh · q back · ctrl+c quit"))
-	return b.String()
 }
 
 func (m model) sessionRow(session Session, active bool) string {
@@ -242,8 +259,6 @@ func (m model) sessionRow(session Session, active bool) string {
 	if session.BackupModified.IsZero() {
 		backedUp = "never"
 	}
-	// Custom names render bright; the first-prompt fallback renders dim so
-	// the two are distinguishable at a glance.
 	var title string
 	switch {
 	case session.CustomName != "":
@@ -294,13 +309,6 @@ func activityGlyph(t time.Time) (string, lipgloss.Style) {
 	}
 }
 
-func displayName(path string) string {
-	if strings.HasPrefix(path, "/") {
-		return filepath.Base(path)
-	}
-	return path
-}
-
 func shortID(id string) string { return truncate(id, 10) }
 
 func truncate(s string, n int) string {
@@ -345,13 +353,4 @@ func formatBytes(size int64) string {
 		}
 	}
 	return fmt.Sprintf("%.1f PB", value/unit)
-}
-
-func findProject(projects []*Project, path string) *Project {
-	for _, project := range projects {
-		if project.Path == path {
-			return project
-		}
-	}
-	return nil
 }

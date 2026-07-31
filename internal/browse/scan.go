@@ -341,6 +341,108 @@ func historyTitles() map[string]string {
 	return titles
 }
 
+// Folder is one child directory of the current view root, aggregating every
+// session anywhere beneath it.
+type Folder struct {
+	Name        string
+	Path        string
+	Pseudo      bool // unresolved project key, not a real filesystem path
+	Sessions    int
+	SizeBytes   int64
+	Latest      time.Time
+	Open        int
+	Stale       int
+	Unbacked    int
+	RecoverOnly int
+}
+
+// ChildrenOf groups projects under root into immediate child folders with
+// recursive aggregates. Projects whose key is not an absolute path (rare:
+// unrecoverable cwd) surface as pseudo-folders only at the start root.
+func ChildrenOf(projects []*Project, root string, start string) []Folder {
+	byPath := map[string]*Folder{}
+	for _, project := range projects {
+		if !filepath.IsAbs(project.Path) {
+			if root == start {
+				folder := &Folder{Name: project.Path, Path: project.Path, Pseudo: true}
+				aggregate(folder, project)
+				byPath[project.Path] = folder
+			}
+			continue
+		}
+		if project.Path == root {
+			continue
+		}
+		rel, err := filepath.Rel(root, project.Path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		name := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+		childPath := filepath.Join(root, name)
+		folder := byPath[childPath]
+		if folder == nil {
+			folder = &Folder{Name: name, Path: childPath}
+			byPath[childPath] = folder
+		}
+		aggregate(folder, project)
+	}
+
+	folders := make([]Folder, 0, len(byPath))
+	for _, folder := range byPath {
+		folders = append(folders, *folder)
+	}
+	sort.Slice(folders, func(i, j int) bool { return folders[i].Latest.After(folders[j].Latest) })
+	return folders
+}
+
+func aggregate(folder *Folder, project *Project) {
+	folder.Sessions += len(project.Sessions)
+	folder.SizeBytes += project.SizeBytes
+	if project.Latest.After(folder.Latest) {
+		folder.Latest = project.Latest
+	}
+	folder.Open += project.Open
+	folder.Stale += project.Stale
+	folder.Unbacked += project.Unbacked
+	folder.RecoverOnly += project.RecoverOnly
+}
+
+// ProjectAt returns the project whose sessions live exactly at root.
+func ProjectAt(projects []*Project, root string) *Project {
+	for _, project := range projects {
+		if project.Path == root {
+			return project
+		}
+	}
+	return nil
+}
+
+// NearestRoot climbs from start toward the filesystem root until some
+// sessions exist at or beneath the directory, so launching from a
+// session-free directory still shows something useful.
+func NearestRoot(projects []*Project, start string) string {
+	dir := start
+	for {
+		for _, project := range projects {
+			if !filepath.IsAbs(project.Path) {
+				continue
+			}
+			if project.Path == dir {
+				return dir
+			}
+			rel, err := filepath.Rel(dir, project.Path)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return start
+		}
+		dir = parent
+	}
+}
+
 // LoadCustomNames fills in user-assigned session names by scanning each
 // session file for custom-title events (appended when a session is renamed).
 // It runs lazily per project because it reads whole files.
