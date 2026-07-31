@@ -316,7 +316,7 @@ func (m model) View() string {
 	cursor := m.currentCursor()
 	switch {
 	case m.showAll:
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-50s %-7s %8s  %-12s %s",
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-50s %-7s %8s  %-8s %s",
 			"STATE", "TITLE", "AGENT", "SIZE", "MODIFIED", "IN")) + "\n")
 		end := min(len(m.allSessions), m.aOffset+m.pageSize())
 		for i := m.aOffset; i < end; i++ {
@@ -330,8 +330,8 @@ func (m model) View() string {
 			b.WriteString(m.sessionRow(m.here.Sessions[i], i == cursor) + "\n")
 		}
 	default:
-		b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %8s  %8s  %-16s%s",
-			"FOLDER", "SESSIONS", "SIZE", "LAST ACTIVITY", " BACKUP")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %8s  %8s  %-9s%s",
+			"FOLDER", "SESSIONS", "SIZE", "ACTIVITY", " BACKUP")) + "\n")
 		end := min(len(m.folders), m.fOffset+m.pageSize())
 		for i := m.fOffset; i < end; i++ {
 			b.WriteString(m.folderRow(m.folders[i], i == cursor) + "\n")
@@ -378,9 +378,9 @@ func (m model) allSessionRow(session Session, active bool) string {
 	if session.LiveStatus != "" {
 		live = styleOK.Render("▶")
 	}
-	row := fmt.Sprintf("%s%s  %s %-7s %8s  %-12s %s",
+	row := fmt.Sprintf("%s%s  %s %-7s %8s  %-8s %s",
 		live, style.Render(state), sessionTitle(session, 50), session.Target,
-		formatBytes(session.Size), ago(session.Modified), styleDim.Render(truncate(m.relOfRoot(session), 24)))
+		formatBytes(session.Size), ago(session.Modified), styleDim.Render(truncate(m.relOfRoot(session), 30)))
 	if active {
 		return styleCursor.Render(row)
 	}
@@ -571,7 +571,7 @@ func (m model) folderRow(folder Folder, active bool) string {
 		health = styleOK.Render(" ok")
 	}
 
-	row := fmt.Sprintf(" %s %-38s  %8d  %8s  %-16s%s",
+	row := fmt.Sprintf(" %s %-38s  %8d  %8s  %-9s%s",
 		glyphStyle.Render(glyph), name, folder.Sessions, formatBytes(folder.SizeBytes), ago(folder.Latest), health)
 	if active {
 		return styleCursor.Render(row)
@@ -645,6 +645,8 @@ func truncate(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
+// ago renders a compact relative age; the columns' meaning makes the "ago"
+// implicit, and it never falls back to absolute dates.
 func ago(t time.Time) string {
 	if t.IsZero() {
 		return "-"
@@ -652,15 +654,17 @@ func ago(t time.Time) string {
 	since := time.Since(t)
 	switch {
 	case since < time.Minute:
-		return "just now"
+		return "now"
 	case since < time.Hour:
-		return fmt.Sprintf("%dm ago", int(since.Minutes()))
+		return fmt.Sprintf("%dm", int(since.Minutes()))
 	case since < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(since.Hours()))
-	case since < 30*24*time.Hour:
-		return fmt.Sprintf("%dd ago", int(since.Hours()/24))
+		return fmt.Sprintf("%dh", int(since.Hours()))
+	case since < 60*24*time.Hour:
+		return fmt.Sprintf("%dd", int(since.Hours()/24))
+	case since < 365*24*time.Hour:
+		return fmt.Sprintf("%dmo", int(since.Hours()/24/30))
 	default:
-		return t.Format("2006-01-02")
+		return fmt.Sprintf("%dy", int(since.Hours()/24/365))
 	}
 }
 
