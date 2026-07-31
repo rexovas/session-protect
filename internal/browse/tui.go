@@ -129,7 +129,12 @@ func (m model) currentCursor() int {
 	}
 }
 
-func (m model) Init() tea.Cmd { return tick() }
+// Init starts the refresh loop and an immediate full-name scan; launch
+// itself stays fast (names arrive from cache or the first background pass).
+func (m model) Init() tea.Cmd {
+	cfg := m.cfg
+	return tea.Batch(tick(), func() tea.Msg { return rescanMsg(ScanNamed(cfg)) })
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -142,7 +147,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.scanning = true
 		cfg := m.cfg
-		return m, tea.Batch(tick(), func() tea.Msg { return rescanMsg(Scan(cfg)) })
+		return m, tea.Batch(tick(), func() tea.Msg { return rescanMsg(ScanNamed(cfg)) })
 	case rescanMsg:
 		m.scanning = false
 		m.projects = msg
@@ -176,7 +181,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.scanning = true
 		cfg := m.cfg
-		return m, func() tea.Msg { return rescanMsg(Scan(cfg)) }
+		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
 	case "tab":
 		if m.showAll {
 			m.showAll = false

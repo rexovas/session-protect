@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/config"
@@ -90,5 +91,42 @@ func TestLoadCustomNames(t *testing.T) {
 	}
 	if !project.NamesLoaded {
 		t.Fatal("NamesLoaded not set")
+	}
+}
+
+func TestApplyNamesCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	configPath := filepath.Join(home, "config.toml")
+	writeFile(t, configPath, "backup_root = \""+filepath.Join(home, "root")+"\"\n")
+	t.Setenv("SESSION_PROTECT_CONFIG", configPath)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(home, ".claude", "projects", "-p", "s1.jsonl")
+	writeFile(t, path, `{"type":"custom-title","customTitle":"named-one","sessionId":"s1"}`+"\n")
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	projects := ScanNamed(cfg)
+	if projects[0].Sessions[0].CustomName != "named-one" {
+		t.Fatalf("name not applied: %+v", projects[0].Sessions[0])
+	}
+	if _, err := os.Stat(filepath.Join(cfg.BackupRoot, ".session-names.json")); err != nil {
+		t.Fatalf("cache not written: %v", err)
+	}
+
+	// A rename appends an event and bumps mtime; the cache must refresh.
+	writeFile(t, path, `{"type":"custom-title","customTitle":"named-one","sessionId":"s1"}
+{"type":"custom-title","customTitle":"renamed","sessionId":"s1"}
+`)
+	projects = ScanNamed(cfg)
+	if projects[0].Sessions[0].CustomName != "renamed" {
+		t.Fatalf("rename not picked up: %+v", projects[0].Sessions[0])
 	}
 }
