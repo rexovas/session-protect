@@ -391,6 +391,9 @@ func (m model) allSessionRow(session Session, active bool) string {
 func (m model) detailView() string {
 	session := *m.detail
 	data := m.detailData
+	width := max(min(m.width-2, 110), 40)
+	inner := width - 4 // box border + padding
+
 	var b strings.Builder
 
 	name := session.CustomName
@@ -408,7 +411,7 @@ func (m model) detailView() string {
 		liveNote = styleOK.Render("  ▶ open now (" + session.LiveStatus + ")")
 	}
 	kv := func(key string, value string) {
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s", key)) + value + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf(" %-10s", key)) + value + "\n")
 	}
 	kv("state", strings.TrimSpace(style.Render(state))+liveNote)
 	kv("agent", session.Target)
@@ -417,43 +420,93 @@ func (m model) detailView() string {
 	if project == "" {
 		project = m.root
 	}
-	kv("project", project)
-	kv("size", formatBytes(session.Size))
+	kv("project", tildePath(project))
+	stamp := formatBytes(session.Size)
 	if !data.Created.IsZero() {
-		kv("created", fmt.Sprintf("%s (%s)", data.Created.Local().Format("2006-01-02 15:04"), ago(data.Created)))
+		stamp += styleDim.Render("  ·  started ") + ago(data.Created)
 	}
-	kv("modified", ago(session.Modified))
-	backedUp := ago(session.BackupModified)
+	stamp += styleDim.Render("  ·  modified ") + ago(session.Modified)
 	if session.BackupModified.IsZero() {
-		backedUp = styleUnbacked.Render("never")
+		stamp += styleDim.Render("  ·  backup ") + styleUnbacked.Render("never")
+	} else {
+		stamp += styleDim.Render("  ·  backup ") + ago(session.BackupModified)
 	}
-	kv("backed up", backedUp)
-	if session.SourcePath != "" {
-		kv("source", truncate(session.SourcePath, m.width-14))
-	}
-	if session.BackupPath != "" {
-		kv("backup", truncate(session.BackupPath, m.width-14))
-	}
-
-	section := func(label string, text string) {
-		if text == "" {
+	kv("size", stamp)
+	kvPath := func(key string, path string) {
+		if path == "" {
 			return
 		}
-		b.WriteString("\n" + styleDim.Render("  "+label) + "\n")
-		for _, line := range wrapText(text, m.width-4, 4) {
-			b.WriteString("    " + line + "\n")
+		lines := chunk(tildePath(path), m.width-13)
+		kv(key, lines[0])
+		for _, line := range lines[1:] {
+			b.WriteString(strings.Repeat(" ", 11) + line + "\n")
 		}
 	}
+	kvPath("source", session.SourcePath)
+	kvPath("backup", session.BackupPath)
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.AdaptiveColor{Light: "#BBBBBB", Dark: "#555555"}).
+		Padding(0, 1).
+		Width(width - 2)
+
 	first := data.FirstPrompt
 	if first == "" {
 		first = session.Title
 	}
-	section("FIRST PROMPT", first)
-	section("LAST PROMPT", data.LastPrompt)
-	section("LAST RESPONSE", data.LastResponse)
+	if first != "" {
+		b.WriteString("\n" + styleDim.Render(" SESSION START") + "\n")
+		b.WriteString(box.Render(strings.Join(wrapText(first, inner, 5), "\n")) + "\n")
+	}
+
+	if data.LastPrompt != "" || data.LastResponse != "" {
+		responseLines := max(4, m.height-24)
+		var tail []string
+		if data.LastPrompt != "" {
+			prompt := wrapText(data.LastPrompt, inner-2, 4)
+			tail = append(tail, styleDim.Render("❯ ")+prompt[0])
+			for _, line := range prompt[1:] {
+				tail = append(tail, "  "+line)
+			}
+		}
+		if data.LastResponse != "" {
+			if len(tail) > 0 {
+				tail = append(tail, "")
+			}
+			tail = append(tail, wrapText(data.LastResponse, inner, responseLines)...)
+		}
+		b.WriteString("\n" + styleDim.Render(" SESSION TAIL") + "\n")
+		b.WriteString(box.Render(strings.Join(tail, "\n")) + "\n")
+	}
 
 	b.WriteString("\n" + m.footer("i/esc close · ctrl+c quit"))
 	return b.String()
+}
+
+// tildePath abbreviates the home directory for display.
+func tildePath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if rest, ok := strings.CutPrefix(path, home); ok {
+		return "~" + rest
+	}
+	return path
+}
+
+// chunk hard-wraps an unbroken string (like a path) into width-sized pieces.
+func chunk(s string, width int) []string {
+	if width < 10 {
+		width = 10
+	}
+	var out []string
+	for len(s) > width {
+		out = append(out, s[:width])
+		s = s[width:]
+	}
+	return append(out, s)
 }
 
 // wrapText breaks text into at most maxLines lines of the given width,
