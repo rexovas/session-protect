@@ -44,6 +44,8 @@ type model struct {
 	allSessions  []Session
 	detail       *Session
 	detailData   Detail
+	stats        *Stats
+	showStats    bool
 	fCursor      int
 	fOffset      int
 	sCursor      int
@@ -169,10 +171,22 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.showStats {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "s", "esc", "q", "backspace", "h", "left", "enter":
+			m.showStats = false
+		}
+		return m, nil
+	}
 
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "s":
+		m.stats = LoadStats()
+		m.showStats = true
 	case "i":
 		if session := m.selectedSession(); session != nil {
 			m.detail = session
@@ -347,6 +361,9 @@ func (m model) View() string {
 	if m.detail != nil {
 		return m.detailView()
 	}
+	if m.showStats {
+		return m.statsView()
+	}
 	var b strings.Builder
 
 	total := 0
@@ -399,11 +416,74 @@ func (m model) View() string {
 		b.WriteString(styleDim.Render("  nothing here") + "\n")
 	}
 
-	help := "↑/↓ move · enter open · ← up · tab sessions · ctrl+a all · q quit"
+	help := "↑/↓ move · enter open · ← up · tab sessions · ctrl+a all · s stats · q quit"
 	if m.showSessions || m.showAll {
-		help = "↑/↓ move · i info · ← folders · tab folders · ctrl+a all · q quit"
+		help = "↑/↓ move · i info · ← folders · tab folders · ctrl+a all · s stats · q quit"
 	}
 	return m.pinBottom(b.String(), help)
+}
+
+// statsView shows global usage statistics from the agent's own stats cache.
+func (m model) statsView() string {
+	var b strings.Builder
+	b.WriteString(styleHeader.Render("Session Explorer ▸ usage stats") + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
+
+	if m.stats == nil {
+		b.WriteString(styleDim.Render("  no stats available (claude stats cache not found)") + "\n")
+		return m.pinBottom(b.String(), "s/esc close · ctrl+c quit")
+	}
+
+	b.WriteString(styleDim.Render(fmt.Sprintf("  %-28s %10s %10s %12s %12s %10s",
+		"MODEL", "INPUT", "OUTPUT", "CACHE READ", "CACHE WRITE", "COST")) + "\n")
+	var total ModelStats
+	for _, model := range m.stats.Models {
+		b.WriteString(fmt.Sprintf("  %-28s %10s %10s %12s %12s %10s\n",
+			truncate(model.Model, 28), humanTokens(model.Input), humanTokens(model.Output),
+			humanTokens(model.CacheRead), humanTokens(model.CacheWrite),
+			fmt.Sprintf("$%.2f", model.CostUSD)))
+		total.Input += model.Input
+		total.Output += model.Output
+		total.CacheRead += model.CacheRead
+		total.CacheWrite += model.CacheWrite
+		total.CostUSD += model.CostUSD
+	}
+	b.WriteString(styleHeader.Render(fmt.Sprintf("  %-28s %10s %10s %12s %12s %10s",
+		"total", humanTokens(total.Input), humanTokens(total.Output),
+		humanTokens(total.CacheRead), humanTokens(total.CacheWrite),
+		fmt.Sprintf("$%.2f", total.CostUSD))) + "\n")
+
+	if len(m.stats.Daily) > 0 {
+		b.WriteString("\n" + styleDim.Render(fmt.Sprintf("  %-12s %10s %10s %11s",
+			"DAY", "MESSAGES", "SESSIONS", "TOOL CALLS")) + "\n")
+		days := m.stats.Daily
+		if len(days) > 10 {
+			days = days[:10]
+		}
+		for _, day := range days {
+			b.WriteString(fmt.Sprintf("  %-12s %10d %10d %11d\n",
+				day.Date, day.Messages, day.Sessions, day.ToolCalls))
+		}
+	}
+	b.WriteString("\n" + styleDim.Render(fmt.Sprintf(
+		"  %d sessions all-time · source: claude stats cache, computed %s",
+		m.stats.TotalSessions, m.stats.LastComputed)) + "\n")
+
+	return m.pinBottom(b.String(), "s/esc close · ctrl+c quit")
+}
+
+// humanTokens renders token counts compactly (1.2k, 3.4M, 1.1B).
+func humanTokens(n int64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(n)/1_000_000_000)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // pinBottom pads the content so the footer block hugs the window bottom:
@@ -512,6 +592,20 @@ func (m model) detailView() string {
 		stamp += styleDim.Render("  ·  backup ") + ago(session.BackupModified)
 	}
 	kv("size", stamp)
+	if !data.Tokens.Zero() {
+		tokens := "in " + humanTokens(data.Tokens.Input) +
+			styleDim.Render("  ·  out ") + humanTokens(data.Tokens.Output) +
+			styleDim.Render("  ·  cache read ") + humanTokens(data.Tokens.CacheRead) +
+			styleDim.Render("  ·  cache write ") + humanTokens(data.Tokens.CacheWrite)
+		kv("tokens", tokens)
+	}
+	if data.Messages > 0 {
+		messages := fmt.Sprintf("%d", data.Messages)
+		if len(data.Models) > 0 {
+			messages += styleDim.Render("  ·  " + strings.Join(data.Models, ", "))
+		}
+		kv("messages", messages)
+	}
 	kvPath := func(key string, path string) {
 		if path == "" {
 			return
