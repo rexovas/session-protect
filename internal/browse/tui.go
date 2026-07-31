@@ -59,12 +59,19 @@ type model struct {
 	tailOffset   int // lines scrolled up from the bottom
 	stats        *Stats
 	showStats    bool
-	fCursor      int
-	fOffset      int
-	sCursor      int
-	sOffset      int
-	aCursor      int
-	aOffset      int
+
+	// confirmRestore holds the recoverable session awaiting a y/enter before
+	// its backup copy is written back into the live tree; notice is the
+	// one-line outcome shown until the next keypress.
+	confirmRestore *Session
+	notice         string
+	noticeErr      bool
+	fCursor        int
+	fOffset        int
+	sCursor        int
+	sOffset        int
+	aCursor        int
+	aOffset        int
 
 	scanning bool // a background rescan is in flight
 
@@ -247,6 +254,26 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.confirmRestore != nil {
+		session := *m.confirmRestore
+		m.confirmRestore = nil
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "y", "enter":
+			dest, err := RestoreSession(m.cfg, session)
+			if err != nil {
+				m.notice, m.noticeErr = "restore failed: "+err.Error(), true
+			} else {
+				m.notice, m.noticeErr = "restored "+session.ID+" → "+dest, false
+			}
+			m.scanning = true
+			cfg := m.cfg
+			return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
+		}
+		return m, nil
+	}
+	m.notice = ""
 
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -268,6 +295,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.buildTailLines()
 		}
 	case "r":
+		if session := m.selectedSession(); session != nil && session.State == "MISSING_SOURCE" {
+			copied := *session
+			m.confirmRestore = &copied
+		}
+	case "ctrl+r":
 		m.scanning = true
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
@@ -505,10 +537,22 @@ func (m model) View() string {
 	if m.itemCount() == 0 {
 		b.WriteString(styleDim.Render("  nothing here") + "\n")
 	}
+	if m.confirmRestore != nil {
+		b.WriteString("\n" + m.confirmRestoreBox(*m.confirmRestore) + "\n")
+	} else if m.notice != "" {
+		noticeStyle := styleOK
+		if m.noticeErr {
+			noticeStyle = styleUnbacked
+		}
+		b.WriteString("\n " + noticeStyle.Render(truncate(m.notice, m.width-2)) + "\n")
+	}
 
 	help := "↑/↓ move · enter open · ← up · tab sessions · ctrl+a all · s stats · x lost · q quit"
 	if m.showSessions || m.showAll {
-		help = "↑/↓ move · i info · ← folders · tab folders · ctrl+a all · x lost · q quit"
+		help = "↑/↓ move · i info · r restore · ← folders · ctrl+a all · x lost · q quit"
+	}
+	if m.confirmRestore != nil {
+		help = "y/enter restore · esc cancel"
 	}
 	return m.pinBottom(b.String(), help)
 }
@@ -818,6 +862,28 @@ func (m model) usageTab(b *strings.Builder) {
 	if data.Messages > 0 {
 		b.WriteString(styleDim.Render(fmt.Sprintf("  %d messages in transcript", data.Messages)) + "\n")
 	}
+}
+
+// confirmRestoreBox previews exactly what a pending restore will write, so
+// the y/enter lands on a visible plan rather than an implied one.
+func (m model) confirmRestoreBox(session Session) string {
+	dest, _, err := restoreDest(m.cfg, session)
+	if err != nil {
+		dest = "unresolvable: " + err.Error()
+	}
+	title := session.CustomName
+	if title == "" {
+		title = session.Title
+	}
+	if title == "" {
+		title = session.ID
+	}
+	width := min(m.width, 100)
+	inner := width - 12
+	body := styleRecover.Render("✝ ") + styleBold.Render("restore ") + truncate(title, inner) + "\n" +
+		styleDim.Render("from  ") + truncate(session.BackupPath, inner) + "\n" +
+		styleDim.Render("to    ") + truncate(dest, inner)
+	return detailBox(width).Render(body)
 }
 
 // detailBox is the rounded frame used by the inspector's sections.
