@@ -59,14 +59,13 @@ type model struct {
 	tailLines    []string
 	tailWidth    int
 	tailOffset   int // lines scrolled up from the bottom
-	stats        *Stats
-	showStats    bool
-
-	// The activity pane lists the audit log — every action the tool has
-	// taken on the user's behalf — newest first.
-	showActivity bool
-	activity     []audit.Entry
-	actOffset    int
+	// The menu pane collapses the non-navigation views behind one key:
+	// tab-switchable stats / activity (audit log, newest first) / keys.
+	showMenu  bool
+	menuTab   int // 0 stats · 1 activity · 2 keys
+	stats     *Stats
+	activity  []audit.Entry
+	actOffset int
 
 	// confirmRestore holds the recoverable session awaiting a y/enter before
 	// its backup copy is written back into the live tree; notice is the
@@ -206,17 +205,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.MouseButtonWheelUp:
 			if m.detail != nil {
 				m.scrollTail(3)
-			} else if m.showActivity {
+			} else if m.showMenu {
 				m.actOffset = max(0, m.actOffset-3)
-			} else if !m.showStats {
+			} else {
 				m.setCursor(m.currentCursor() - 3)
 			}
 		case tea.MouseButtonWheelDown:
 			if m.detail != nil {
 				m.scrollTail(-3)
-			} else if m.showActivity {
+			} else if m.showMenu {
 				m.actOffset = min(max(0, len(m.activity)-m.pageSize()), m.actOffset+3)
-			} else if !m.showStats {
+			} else {
 				m.setCursor(m.currentCursor() + 3)
 			}
 		}
@@ -257,21 +256,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if m.showStats {
+	if m.showMenu {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "s", "esc", "q", "backspace", "h", "left", "enter":
-			m.showStats = false
-		}
-		return m, nil
-	}
-	if m.showActivity {
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-		case "a", "esc", "q", "backspace", "h", "left", "enter":
-			m.showActivity = false
+		case "m", "esc", "q", "backspace", "enter":
+			m.showMenu = false
+			m.actOffset = 0
+		case "tab", "right", "l":
+			m.menuTab = (m.menuTab + 1) % 3
+			m.actOffset = 0
+		case "left", "h":
+			m.menuTab = (m.menuTab + 2) % 3
 			m.actOffset = 0
 		case "up", "k":
 			m.actOffset = max(0, m.actOffset-1)
@@ -308,31 +304,26 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
-	case "s":
+	case "m", "s", "a":
 		m.stats = LoadStats()
-		m.activity = audit.Read(m.cfg.BackupRoot)
-		m.showStats = true
-	case "a":
 		entries := audit.Read(m.cfg.BackupRoot)
 		for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
 			entries[i], entries[j] = entries[j], entries[i]
 		}
 		m.activity = entries
 		m.actOffset = 0
-		m.showActivity = true
+		switch msg.String() {
+		case "s":
+			m.menuTab = 0
+		case "a":
+			m.menuTab = 1
+		}
+		m.showMenu = true
 	case "x":
 		m.showLost = !m.showLost
 		m.rebuild()
 	case "i":
-		if session := m.selectedSession(); session != nil {
-			m.detail = session
-			if session.State == "LOST" {
-				m.detailData = LoadLostDetail(session.ID)
-			} else {
-				m.detailData = LoadDetail(*session)
-			}
-			m.buildTailLines()
-		}
+		(&m).openDetail()
 	case "r":
 		if session := m.selectedSession(); session != nil && session.State == "MISSING_SOURCE" {
 			copied := *session
@@ -373,7 +364,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		m.setCursor(1 << 30)
 	case "enter", "l", "right":
-		if !m.showSessions && !m.showAll && m.fCursor < len(m.folders) {
+		if m.showSessions || m.showAll {
+			(&m).openDetail()
+		} else if m.fCursor < len(m.folders) {
 			m.trail = append(m.trail, m.root)
 			m.root = m.folders[m.fCursor].Path
 			m.resetPanes()
@@ -522,11 +515,8 @@ func (m model) View() string {
 	if m.detail != nil {
 		return m.detailView()
 	}
-	if m.showStats {
-		return m.statsView()
-	}
-	if m.showActivity {
-		return m.activityView()
+	if m.showMenu {
+		return m.menuView()
 	}
 	var b strings.Builder
 
@@ -589,22 +579,63 @@ func (m model) View() string {
 		b.WriteString("\n " + noticeStyle.Render(truncate(m.notice, m.width-2)) + "\n")
 	}
 
-	help := "↑/↓ move · enter open · ← up · tab sessions · ctrl+a all · s stats · a activity · x lost · q quit"
-	if m.showSessions || m.showAll {
-		help = "↑/↓ move · i info · r restore · ← folders · ctrl+a all · x lost · q quit"
-	}
+	help := "↑/↓ move · enter open · ← back · tab panes · ctrl+a all · m menu · q quit"
 	if m.confirmRestore != nil {
 		help = "y/enter restore · esc cancel"
 	}
 	return m.pinBottom(b.String(), help)
 }
 
-// statsView shows global usage statistics from the agent's own stats cache.
-func (m model) statsView() string {
+// openDetail loads the inspector for the selected session.
+func (m *model) openDetail() {
+	session := m.selectedSession()
+	if session == nil {
+		return
+	}
+	m.detail = session
+	if session.State == "LOST" {
+		m.detailData = LoadLostDetail(session.ID)
+	} else {
+		m.detailData = LoadDetail(*session)
+	}
+	m.buildTailLines()
+}
+
+// menuView is the tabbed home of everything that is not navigation:
+// usage stats, the activity log, and the full key reference.
+func (m model) menuView() string {
+	tab := func(label string, index int) string {
+		if m.menuTab == index {
+			return styleCursor.Render(" " + label + " ")
+		}
+		return styleDim.Render(" " + label + " ")
+	}
+	left := styleHeader.Render("Session Explorer ▸ menu")
+	right := tab("Stats", 0) + tab("Activity", 1) + tab("Keys", 2)
+	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
+		left += strings.Repeat(" ", pad)
+	}
+
 	var b strings.Builder
-	b.WriteString(styleHeader.Render("Session Explorer ▸ usage stats") + "\n")
+	b.WriteString(left + right + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
 
+	help := "tab sections · esc close"
+	switch m.menuTab {
+	case 1:
+		m.activityBody(&b)
+		help = "↑/↓/wheel scroll · tab sections · esc close"
+	case 2:
+		m.keysBody(&b)
+	default:
+		m.statsBody(&b)
+	}
+	return m.pinBottom(b.String(), help)
+}
+
+// statsBody shows the protection summary plus global usage statistics from
+// the agent's own stats cache.
+func (m model) statsBody(b *strings.Builder) {
 	var ok, stale, unbacked, recoverable, lost, restored int
 	for _, project := range m.projects {
 		for _, session := range project.Sessions {
@@ -653,7 +684,7 @@ func (m model) statsView() string {
 
 	if m.stats == nil {
 		b.WriteString(styleDim.Render("  no stats available (claude stats cache not found)") + "\n")
-		return m.pinBottom(b.String(), "s/esc close · ctrl+c quit")
+		return
 	}
 
 	b.WriteString(styleDim.Render(fmt.Sprintf("  %-28s %10s %10s %12s %12s %10s",
@@ -690,20 +721,14 @@ func (m model) statsView() string {
 	b.WriteString("\n" + styleDim.Render(fmt.Sprintf(
 		"  %d sessions all-time · source: claude stats cache, computed %s",
 		m.stats.TotalSessions, m.stats.LastComputed)) + "\n")
-
-	return m.pinBottom(b.String(), "s/esc close · ctrl+c quit")
 }
 
-// activityView lists the audit log — every action the tool has taken on
+// activityBody lists the audit log — every action the tool has taken on
 // the user's behalf — newest first.
-func (m model) activityView() string {
-	var b strings.Builder
-	b.WriteString(styleHeader.Render("Session Explorer ▸ activity log") + "\n")
-	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
-
+func (m model) activityBody(b *strings.Builder) {
 	if len(m.activity) == 0 {
 		b.WriteString(styleDim.Render("  no recorded actions yet — restores and repairs will appear here") + "\n")
-		return m.pinBottom(b.String(), "a/esc close · ctrl+c quit")
+		return
 	}
 
 	b.WriteString(styleDim.Render(fmt.Sprintf("  %-17s %-9s %-7s %-37s %s",
@@ -727,7 +752,32 @@ func (m model) activityView() string {
 	}
 	b.WriteString(styleDim.Render(fmt.Sprintf("\n  %d action(s) recorded · %s",
 		len(m.activity), tildePath(filepath.Join(m.cfg.BackupRoot, "audit.log")))) + "\n")
-	return m.pinBottom(b.String(), "↑/↓/wheel scroll · a/esc close · ctrl+c quit")
+}
+
+// keysBody is the full key reference; the footer stays minimal because
+// everything beyond basic navigation lives here.
+func (m model) keysBody(b *strings.Builder) {
+	section := func(title string) {
+		b.WriteString("\n" + styleDim.Render("  "+title) + "\n")
+	}
+	key := func(keys string, what string) {
+		b.WriteString("  " + styleBold.Render(fmt.Sprintf("%-14s", keys)) + what + "\n")
+	}
+	section("NAVIGATE")
+	key("↑/↓ · j/k", "move (mouse wheel scrolls)")
+	key("enter", "open folder / session details")
+	key("← · esc", "back — leave pane, then go up a folder")
+	key("tab", "switch between folders and sessions")
+	key("ctrl+a", "all sessions beneath this folder")
+	key("g · G", "jump to top / bottom")
+	section("SESSIONS")
+	key("i", "session details (overview · usage · transcript)")
+	key("r", "restore a ✝ recover session, with confirmation")
+	key("x", "show or hide ✕ lost sessions")
+	section("GLOBAL")
+	key("m", "this menu · s and a jump straight to stats / activity")
+	key("ctrl+r", "rescan now (automatic every 5s)")
+	key("q · ctrl+c", "quit")
 }
 
 // humanTokens renders token counts compactly (1.2k, 3.4M, 1.1B).
