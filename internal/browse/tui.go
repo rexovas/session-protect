@@ -695,7 +695,7 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 		first = session.Title
 	}
 	if first != "" {
-		b.WriteString("\n" + styleDim.Render(" INITIAL PROMPT") + "\n")
+		b.WriteString("\n" + styleDim.Render(" initial prompt") + "\n")
 		b.WriteString(detailBox(width).Render(strings.Join(wrapPreserve(first, inner, 6), "\n")) + "\n")
 	}
 
@@ -715,7 +715,7 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 			responseCap := max(4, m.height-len(exchange)-24)
 			exchange = append(exchange, wrapPreserve(data.LastResponse, inner, responseCap)...)
 		}
-		b.WriteString("\n" + styleDim.Render(" LAST EXCHANGE") + "\n")
+		b.WriteString("\n" + styleDim.Render(" last exchange") + "\n")
 		b.WriteString(detailBox(width).Render(strings.Join(exchange, "\n")) + "\n")
 	}
 }
