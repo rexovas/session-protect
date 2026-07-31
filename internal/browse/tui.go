@@ -589,7 +589,7 @@ func (m model) pinBottom(content string, help string) string {
 	}
 	helpLine := styleFooter.Render(" " + help)
 	if commit := shortCommit(); commit != "" {
-		revision := styleDim.Render("revision: " + commit + " ")
+		revision := styleDim.Render("version: " + commit + " ")
 		if pad := m.width - lipgloss.Width(helpLine) - lipgloss.Width(revision); pad > 0 {
 			helpLine += strings.Repeat(" ", pad)
 		}
