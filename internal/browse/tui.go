@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/version"
 )
 
 var (
@@ -278,6 +279,19 @@ func (m *model) setCursor(position int) {
 
 func (m model) pageSize() int { return max(4, m.height-7) }
 
+// shortCommit is the installed build's revision, shown faintly for
+// dogfooding traceability.
+func shortCommit() string {
+	commit := version.Commit
+	if len(commit) > 7 {
+		commit = commit[:7]
+	}
+	if commit == "unknown" {
+		return ""
+	}
+	return commit
+}
+
 // nameWidth is the flexible folder-name column: everything the fixed
 // columns don't use.
 func (m model) nameWidth() int { return max(24, m.width-46) }
@@ -308,12 +322,11 @@ func (m model) View() string {
 	}
 	var b strings.Builder
 
-	titleLeft := styleHeader.Render("Session Explorer")
-	titleRight := m.tabBar()
-	if pad := m.width - lipgloss.Width(titleLeft) - lipgloss.Width(titleRight); pad > 0 {
-		titleLeft += strings.Repeat(" ", pad)
+	title := styleHeader.Render("Session Explorer")
+	if commit := shortCommit(); commit != "" {
+		title += styleDim.Render("  " + commit)
 	}
-	b.WriteString(titleLeft + titleRight + "\n")
+	b.WriteString(title + "\n")
 
 	total := 0
 	for _, folder := range m.folders {
@@ -324,12 +337,17 @@ func (m model) View() string {
 	if idx := strings.LastIndex(m.root, string(os.PathSeparator)); idx >= 0 && len(m.root) > idx+1 {
 		name = m.root[idx+1:]
 	}
-	beneath := fmt.Sprintf("  %d sessions beneath ", total)
+	beneath := fmt.Sprintf("  total nested sessions %d ", total)
 	countStyle := styleDim
 	if m.showAll {
 		countStyle = styleCursor // the all pane is exactly this set
 	}
-	b.WriteString(styleHeader.Render("▸ "+truncate(name, 40)) + countStyle.Render(beneath) + "\n")
+	left := styleHeader.Render("▸ "+truncate(name, 40)) + countStyle.Render(beneath)
+	right := m.tabBar()
+	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
+		left += strings.Repeat(" ", pad)
+	}
+	b.WriteString(left + right + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
 
 	cursor := m.currentCursor()
@@ -350,7 +368,7 @@ func (m model) View() string {
 		}
 	default:
 		b.WriteString(styleDim.Render(fmt.Sprintf("   %-*s  %8s  %8s  %-9s%s",
-			m.nameWidth(), "FOLDER", "SESSIONS", "SIZE", "ACTIVITY", " BACKUP")) + "\n")
+			m.nameWidth(), "FOLDER", "SESSIONS", "SIZE", "LAST USED", " BACKUP")) + "\n")
 		end := min(len(m.folders), m.fOffset+m.pageSize())
 		for i := m.fOffset; i < end; i++ {
 			b.WriteString(m.folderRow(m.folders[i], i == cursor) + "\n")
