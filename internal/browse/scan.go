@@ -113,6 +113,11 @@ func Scan(cfg config.Config) []*Project {
 				time.Since(session.Modified) < 30*time.Minute {
 				session.State = "ACTIVE"
 			}
+			// Open but idle (and fully synced): its own state, distinct
+			// from actively-writing and from closed-and-ok.
+			if session.State == "OK" && session.LiveStatus != "" {
+				session.State = "OPEN"
+			}
 		}
 		sort.Slice(project.Sessions, func(i, j int) bool {
 			return newest(project.Sessions[i]).After(newest(project.Sessions[j]))
@@ -123,7 +128,7 @@ func Scan(cfg config.Config) []*Project {
 			}
 			project.SizeBytes += session.Size
 			switch session.State {
-			case "OK", "ACTIVE": // active counts as protected; ▶ already shows it
+			case "OK", "ACTIVE", "OPEN": // open/active still count as protected
 				project.OK++
 				if session.State == "ACTIVE" {
 					project.Active++

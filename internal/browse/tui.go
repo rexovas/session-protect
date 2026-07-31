@@ -1101,6 +1101,8 @@ func sessionState(state string) (string, lipgloss.Style) {
 		return "● ok       ", styleOK
 	case "ACTIVE":
 		return "● active   ", styleActive
+	case "OPEN":
+		return "● open     ", styleActive
 	case "STALE_BACKUP":
 		return "~ stale    ", styleStale
 	case "MISSING_BACKUP":
