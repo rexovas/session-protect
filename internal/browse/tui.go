@@ -624,16 +624,21 @@ func (m model) tabBar() string {
 // session lives relative to the current root.
 func (m model) allSessionRow(session Session, active bool) string {
 	state, style := sessionState(session.State)
+	gold := session.State == "ACTIVE" && !active
+	plain := active || gold
 	live := " "
 	if session.LiveStatus != "" {
-		live = styleUnless(active, styleOK, "▶")
+		live = styleUnless(plain, styleOK, "▶")
 	}
 	row := fmt.Sprintf("%s%s  %s %-7s %-12s %8s  %-8s %s",
-		live, styleUnless(active, style, state), sessionTitle(session, m.titleWidth(), active), session.Target,
+		live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
 		truncate(displayModel(session.LastModel), 12), formatBytes(session.Size), ago(session.Modified),
-		styleUnless(active, styleDim, truncate(m.relOfRoot(session), 30)))
+		styleUnless(plain, styleDim, truncate(m.relOfRoot(session), 30)))
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
+	}
+	if gold {
+		return styleActive.Render(row)
 	}
 	return row
 }
@@ -1041,19 +1046,26 @@ func (m model) folderRow(folder Folder, active bool) string {
 
 func (m model) sessionRow(session Session, active bool) string {
 	state, style := sessionState(session.State)
+	// Active sessions render the entire row in gold so live work stands
+	// out; the cursor highlight still takes precedence when selected.
+	gold := session.State == "ACTIVE" && !active
+	plain := active || gold
 	live := " "
 	if session.LiveStatus != "" {
-		live = styleUnless(active, styleOK, "▶")
+		live = styleUnless(plain, styleOK, "▶")
 	}
 	size := formatBytes(session.Size)
 	if session.State == "LOST" {
 		size = fmt.Sprintf("%dp", session.Prompts)
 	}
 	row := fmt.Sprintf("%s%s  %s %-7s %-12s %8s  %s",
-		live, styleUnless(active, style, state), sessionTitle(session, m.titleWidth(), active), session.Target,
+		live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
 		truncate(displayModel(session.LastModel), 12), size, ago(session.Modified))
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
+	}
+	if gold {
+		return styleActive.Render(row)
 	}
 	return row
 }
