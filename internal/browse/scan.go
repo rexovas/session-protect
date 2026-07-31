@@ -69,10 +69,16 @@ func Scan(cfg config.Config) []*Project {
 				session.LiveStatus = info.Status
 				project.Open++
 			}
-			// An open session is expected to run ahead of its mirror
-			// between turn-end syncs; that is activity, not staleness.
+			// An open session with fresh writes is expected to run ahead
+			// of its mirror until the next turn-end sync; that is
+			// activity, not staleness. The mtime GAP between live and
+			// mirror is not the right signal — the mirror keeps source
+			// mtimes, so an idle-then-resumed session shows an hours-wide
+			// gap seconds after its first new write. Recency of the
+			// latest write is: recent unsynced writes are normal, old
+			// unsynced writes mean a sync was missed.
 			if session.State == "STALE_BACKUP" && session.LiveStatus != "" &&
-				session.Modified.Sub(session.BackupModified) < 2*time.Hour {
+				time.Since(session.Modified) < 30*time.Minute {
 				session.State = "ACTIVE"
 			}
 		}
