@@ -141,7 +141,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if m.showAll {
 			m.showAll = false
-			m.showSessions = false
+			m.showSessions = len(m.folders) == 0 && m.sessionCount() > 0
 		} else if len(m.folders) > 0 && m.sessionCount() > 0 {
 			m.showSessions = !m.showSessions
 		}
@@ -175,9 +175,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rebuild()
 		}
 	case "esc", "backspace", "h", "left":
-		// Leave the current pane first; only the folders pane navigates up.
-		if m.showAll || m.showSessions {
+		// Leave the current pane first, but never land on an empty pane:
+		// at a leaf folder (sessions only) back means up.
+		if m.showAll {
 			m.showAll = false
+			m.showSessions = len(m.folders) == 0 && m.sessionCount() > 0
+			m.setCursor(m.currentCursor())
+			return m, nil
+		}
+		if m.showSessions && len(m.folders) > 0 {
 			m.showSessions = false
 			m.setCursor(m.currentCursor())
 			return m, nil
