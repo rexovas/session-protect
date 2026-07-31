@@ -299,6 +299,133 @@ func listCodex(root string) []fileInfo {
 	return files
 }
 
+// Detail is on-demand deep information about one session, loaded when the
+// user inspects it.
+type Detail struct {
+	Created      time.Time
+	FirstPrompt  string
+	LastPrompt   string
+	LastResponse string
+}
+
+// LoadDetail reads the session file's head for creation time and first
+// prompt, and its tail for the most recent prompt and response. Formats vary
+// per agent and version, so extraction is best-effort.
+func LoadDetail(session Session) Detail {
+	var detail Detail
+	path := session.SourcePath
+	if path == "" {
+		path = session.BackupPath
+	}
+	if path == "" {
+		return detail
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return detail
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	for i := 0; i < 40 && scanner.Scan(); i++ {
+		var event transcriptLine
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			continue
+		}
+		if detail.Created.IsZero() && event.Timestamp != "" {
+			if t, err := time.Parse(time.RFC3339, event.Timestamp); err == nil {
+				detail.Created = t
+			}
+		}
+		if detail.FirstPrompt == "" && event.Type == "user" {
+			detail.FirstPrompt = contentText(event.Message.Content)
+		}
+		if detail.FirstPrompt != "" && !detail.Created.IsZero() {
+			break
+		}
+	}
+
+	// Tail: read the last chunk and walk lines backwards for the latest
+	// user prompt and assistant response.
+	const tailBytes = 512 * 1024
+	info, err := file.Stat()
+	if err != nil {
+		return detail
+	}
+	offset := max(info.Size()-tailBytes, 0)
+	buf := make([]byte, info.Size()-offset)
+	if _, err := file.ReadAt(buf, offset); err != nil && len(buf) == 0 {
+		return detail
+	}
+	lines := bytes.Split(buf, []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		if detail.LastPrompt != "" && detail.LastResponse != "" {
+			break
+		}
+		var event transcriptLine
+		if json.Unmarshal(lines[i], &event) != nil {
+			continue
+		}
+		text := contentText(event.Message.Content)
+		if text == "" {
+			continue
+		}
+		if detail.LastResponse == "" && event.Type == "assistant" {
+			detail.LastResponse = text
+		}
+		if detail.LastPrompt == "" && event.Type == "user" {
+			detail.LastPrompt = text
+		}
+	}
+	return detail
+}
+
+type transcriptLine struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	Message   struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	} `json:"message"`
+}
+
+// contentText extracts human text from a message content field that may be a
+// plain string or a list of typed blocks. Tool results and system-tagged
+// content are skipped.
+func contentText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return cleanText(plain)
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, block := range blocks {
+		if block.Type == "text" && block.Text != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return cleanText(strings.Join(parts, " "))
+}
+
+func cleanText(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if strings.HasPrefix(s, "<") {
+		return "" // system/command envelope, not a human message
+	}
+	return s
+}
+
 // historyTitles maps session ids to the first prompt recorded for them in the
 // agents' history files — a cheap title source that avoids opening every
 // session file.

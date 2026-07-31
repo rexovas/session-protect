@@ -40,7 +40,8 @@ type model struct {
 	showSessions bool
 	showAll      bool
 	allSessions  []Session
-	showPath     bool
+	detail       *Session
+	detailData   Detail
 	fCursor      int
 	fOffset      int
 	sCursor      int
@@ -132,9 +133,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.detail != nil {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "i", "esc", "q", "backspace", "h", "left", "enter":
+			m.detail = nil
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "i":
+		if session := m.selectedSession(); session != nil {
+			m.detail = session
+			m.detailData = LoadDetail(*session)
+		}
 	case "r":
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(Scan(cfg)) }
@@ -153,8 +169,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.aCursor, m.aOffset = 0, 0
 		}
 		m.setCursor(m.currentCursor())
-	case "?":
-		m.showPath = !m.showPath
 	case "up", "k":
 		m.setCursor(m.currentCursor() - 1)
 	case "down", "j":
@@ -191,6 +205,20 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.goUp()
 	}
 	return m, nil
+}
+
+func (m model) selectedSession() *Session {
+	switch {
+	case m.showAll:
+		if m.aCursor < len(m.allSessions) {
+			return &m.allSessions[m.aCursor]
+		}
+	case m.showSessions:
+		if m.here != nil && m.sCursor < len(m.here.Sessions) {
+			return &m.here.Sessions[m.sCursor]
+		}
+	}
+	return nil
 }
 
 func (m *model) resetPanes() {
@@ -248,7 +276,7 @@ func (m *model) setCursor(position int) {
 	}
 }
 
-func (m model) pageSize() int { return max(4, m.height-6) }
+func (m model) pageSize() int { return max(4, m.height-7) }
 
 func clampOffset(offset int, cursor int, page int) int {
 	if cursor < offset {
@@ -261,6 +289,9 @@ func clampOffset(offset int, cursor int, page int) int {
 }
 
 func (m model) View() string {
+	if m.detail != nil {
+		return m.detailView()
+	}
 	var b strings.Builder
 
 	title := "Session Explorer"
@@ -285,15 +316,15 @@ func (m model) View() string {
 	cursor := m.currentCursor()
 	switch {
 	case m.showAll:
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-36s %-7s %-10s %8s  %-12s %s",
-			"STATE", "TITLE", "AGENT", "SESSION", "SIZE", "MODIFIED", "IN")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-50s %-7s %8s  %-12s %s",
+			"STATE", "TITLE", "AGENT", "SIZE", "MODIFIED", "IN")) + "\n")
 		end := min(len(m.allSessions), m.aOffset+m.pageSize())
 		for i := m.aOffset; i < end; i++ {
 			b.WriteString(m.allSessionRow(m.allSessions[i], i == cursor) + "\n")
 		}
 	case m.showSessions:
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-36s %-7s %-10s %8s  %-12s %s",
-			"STATE", "TITLE", "AGENT", "SESSION", "SIZE", "MODIFIED", "BACKED UP")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-50s %-7s %8s  %s",
+			"STATE", "TITLE", "AGENT", "SIZE", "MODIFIED")) + "\n")
 		end := min(m.sessionCount(), m.sOffset+m.pageSize())
 		for i := m.sOffset; i < end; i++ {
 			b.WriteString(m.sessionRow(m.here.Sessions[i], i == cursor) + "\n")
@@ -310,15 +341,20 @@ func (m model) View() string {
 		b.WriteString(styleDim.Render("  nothing here") + "\n")
 	}
 
-	if m.showPath {
-		b.WriteString(styleDim.Render(" "+truncate(m.root, m.width-2)) + "\n")
-	}
-	help := "↑/↓ move · enter open · ← up · tab sessions · ^a all · ? path · q quit"
+	help := "↑/↓ move · enter open · ← up · tab sessions · ^a all · q quit"
 	if m.showSessions || m.showAll {
-		help = "↑/↓ move · ← folders · tab folders · ^a all · ? path · q quit"
+		help = "↑/↓ move · i info · ← folders · tab folders · ^a all · q quit"
 	}
-	b.WriteString(m.footer(help))
+	b.WriteString(m.statusBar(help))
 	return b.String()
+}
+
+// statusBar pins the full current path bottom-left, with key help on the
+// line beneath it.
+func (m model) statusBar(help string) string {
+	return styleFooter.Render(strings.Repeat("─", min(m.width, 120))) + "\n" +
+		styleDim.Render(" "+truncate(m.root, m.width-2)) + "\n" +
+		styleFooter.Render(" "+help)
 }
 
 // tabBar renders the pane switcher; the active pane is highlighted.
@@ -338,26 +374,117 @@ func (m model) tabBar(total int) string {
 // session lives relative to the current root.
 func (m model) allSessionRow(session Session, active bool) string {
 	state, style := sessionState(session.State)
-	var title string
-	switch {
-	case session.CustomName != "":
-		title = fmt.Sprintf("%-36s", truncate(session.CustomName, 36))
-	case session.Title != "":
-		title = styleDim.Render(fmt.Sprintf("%-36s", truncate(session.Title, 36)))
-	default:
-		title = styleDim.Render(fmt.Sprintf("%-36s", "(not set)"))
-	}
 	live := " "
 	if session.LiveStatus != "" {
 		live = styleOK.Render("▶")
 	}
-	row := fmt.Sprintf("%s%s  %s %-7s %-10s %8s  %-12s %s",
-		live, style.Render(state), title, session.Target, shortID(session.ID),
+	row := fmt.Sprintf("%s%s  %s %-7s %8s  %-12s %s",
+		live, style.Render(state), sessionTitle(session, 50), session.Target,
 		formatBytes(session.Size), ago(session.Modified), styleDim.Render(truncate(m.relOfRoot(session), 24)))
 	if active {
 		return styleCursor.Render(row)
 	}
 	return row
+}
+
+// detailView is the full-stat inspector for one session (i to open/close).
+func (m model) detailView() string {
+	session := *m.detail
+	data := m.detailData
+	var b strings.Builder
+
+	name := session.CustomName
+	if name == "" {
+		name = truncate(session.Title, 60)
+	}
+	if name == "" {
+		name = session.ID
+	}
+	b.WriteString(styleHeader.Render("▸ "+name) + "\n\n")
+
+	state, style := sessionState(session.State)
+	liveNote := ""
+	if session.LiveStatus != "" {
+		liveNote = styleOK.Render("  ▶ open now (" + session.LiveStatus + ")")
+	}
+	kv := func(key string, value string) {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s", key)) + value + "\n")
+	}
+	kv("state", strings.TrimSpace(style.Render(state))+liveNote)
+	kv("agent", session.Target)
+	kv("session", session.ID)
+	project := session.ProjectPath
+	if project == "" {
+		project = m.root
+	}
+	kv("project", project)
+	kv("size", formatBytes(session.Size))
+	if !data.Created.IsZero() {
+		kv("created", fmt.Sprintf("%s (%s)", data.Created.Local().Format("2006-01-02 15:04"), ago(data.Created)))
+	}
+	kv("modified", ago(session.Modified))
+	backedUp := ago(session.BackupModified)
+	if session.BackupModified.IsZero() {
+		backedUp = styleUnbacked.Render("never")
+	}
+	kv("backed up", backedUp)
+	if session.SourcePath != "" {
+		kv("source", truncate(session.SourcePath, m.width-14))
+	}
+	if session.BackupPath != "" {
+		kv("backup", truncate(session.BackupPath, m.width-14))
+	}
+
+	section := func(label string, text string) {
+		if text == "" {
+			return
+		}
+		b.WriteString("\n" + styleDim.Render("  "+label) + "\n")
+		for _, line := range wrapText(text, m.width-4, 4) {
+			b.WriteString("    " + line + "\n")
+		}
+	}
+	first := data.FirstPrompt
+	if first == "" {
+		first = session.Title
+	}
+	section("FIRST PROMPT", first)
+	section("LAST PROMPT", data.LastPrompt)
+	section("LAST RESPONSE", data.LastResponse)
+
+	b.WriteString("\n" + m.footer("i/esc close · ctrl+c quit"))
+	return b.String()
+}
+
+// wrapText breaks text into at most maxLines lines of the given width,
+// ellipsizing the remainder.
+func wrapText(text string, width int, maxLines int) []string {
+	if width < 10 {
+		width = 10
+	}
+	words := strings.Fields(text)
+	var lines []string
+	current := ""
+	for _, word := range words {
+		if current != "" && len(current)+1+len(word) > width {
+			lines = append(lines, current)
+			if len(lines) == maxLines {
+				lines[maxLines-1] = truncate(lines[maxLines-1]+" …", width)
+				return lines
+			}
+			current = word
+			continue
+		}
+		if current == "" {
+			current = word
+		} else {
+			current += " " + word
+		}
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
 }
 
 func (m model) relOfRoot(session Session) string {
@@ -401,30 +528,30 @@ func (m model) folderRow(folder Folder, active bool) string {
 
 func (m model) sessionRow(session Session, active bool) string {
 	state, style := sessionState(session.State)
-	backedUp := ago(session.BackupModified)
-	if session.BackupModified.IsZero() {
-		backedUp = "never"
-	}
-	var title string
-	switch {
-	case session.CustomName != "":
-		title = fmt.Sprintf("%-36s", truncate(session.CustomName, 36))
-	case session.Title != "":
-		title = styleDim.Render(fmt.Sprintf("%-36s", truncate(session.Title, 36)))
-	default:
-		title = styleDim.Render(fmt.Sprintf("%-36s", "(not set)"))
-	}
 	live := " "
 	if session.LiveStatus != "" {
 		live = styleOK.Render("▶")
 	}
-	row := fmt.Sprintf("%s%s  %s %-7s %-10s %8s  %-12s %s",
-		live, style.Render(state), title, session.Target, shortID(session.ID),
-		formatBytes(session.Size), ago(session.Modified), styleDim.Render(backedUp))
+	row := fmt.Sprintf("%s%s  %s %-7s %8s  %s",
+		live, style.Render(state), sessionTitle(session, 50), session.Target,
+		formatBytes(session.Size), ago(session.Modified))
 	if active {
 		return styleCursor.Render(row)
 	}
 	return row
+}
+
+// sessionTitle renders the display title in a fixed-width cell: custom names
+// bright, first-prompt fallback dim.
+func sessionTitle(session Session, width int) string {
+	switch {
+	case session.CustomName != "":
+		return fmt.Sprintf("%-*s", width, truncate(session.CustomName, width))
+	case session.Title != "":
+		return styleDim.Render(fmt.Sprintf("%-*s", width, truncate(session.Title, width)))
+	default:
+		return styleDim.Render(fmt.Sprintf("%-*s", width, "(not set)"))
+	}
 }
 
 func (m model) footer(help string) string {
@@ -454,8 +581,6 @@ func activityGlyph(t time.Time) (string, lipgloss.Style) {
 		return "○", styleDim
 	}
 }
-
-func shortID(id string) string { return truncate(id, 10) }
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
