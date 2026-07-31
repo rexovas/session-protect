@@ -34,8 +34,14 @@ type model struct {
 	folders []Folder
 	here    *Project // project whose sessions live exactly at root
 
-	cursor int
-	offset int
+	// One pane is visible at a time; tab switches. Each keeps its own
+	// cursor so toggling does not lose the user's place.
+	showSessions bool
+	fCursor      int
+	fOffset      int
+	sCursor      int
+	sOffset      int
+
 	width  int
 	height int
 }
@@ -60,18 +66,35 @@ func (m *model) rebuild() {
 	if m.here != nil {
 		LoadCustomNames(m.here)
 	}
-	if m.cursor >= m.itemCount() {
-		m.cursor = max(0, m.itemCount()-1)
+	// Show the pane that has content when the other is empty.
+	if len(m.folders) == 0 && m.sessionCount() > 0 {
+		m.showSessions = true
 	}
-	m.offset = clampOffset(m.offset, m.cursor, m.pageSize())
+	if m.sessionCount() == 0 && len(m.folders) > 0 {
+		m.showSessions = false
+	}
+	m.setCursor(m.currentCursor())
+}
+
+func (m model) sessionCount() int {
+	if m.here == nil {
+		return 0
+	}
+	return len(m.here.Sessions)
 }
 
 func (m model) itemCount() int {
-	count := len(m.folders)
-	if m.here != nil {
-		count += len(m.here.Sessions)
+	if m.showSessions {
+		return m.sessionCount()
 	}
-	return count
+	return len(m.folders)
+}
+
+func (m model) currentCursor() int {
+	if m.showSessions {
+		return m.sCursor
+	}
+	return m.fCursor
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -98,23 +121,29 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(Scan(cfg)) }
+	case "tab":
+		if len(m.folders) > 0 && m.sessionCount() > 0 {
+			m.showSessions = !m.showSessions
+			m.setCursor(m.currentCursor())
+		}
 	case "up", "k":
-		m.setCursor(m.cursor - 1)
+		m.setCursor(m.currentCursor() - 1)
 	case "down", "j":
-		m.setCursor(m.cursor + 1)
+		m.setCursor(m.currentCursor() + 1)
 	case "pgup":
-		m.setCursor(m.cursor - m.pageSize())
+		m.setCursor(m.currentCursor() - m.pageSize())
 	case "pgdown":
-		m.setCursor(m.cursor + m.pageSize())
+		m.setCursor(m.currentCursor() + m.pageSize())
 	case "g":
 		m.setCursor(0)
 	case "G":
 		m.setCursor(1 << 30)
 	case "enter", "l", "right":
-		if m.cursor < len(m.folders) {
+		if !m.showSessions && m.fCursor < len(m.folders) {
 			m.trail = append(m.trail, m.root)
-			m.root = m.folders[m.cursor].Path
-			m.cursor, m.offset = 0, 0
+			m.root = m.folders[m.fCursor].Path
+			m.fCursor, m.fOffset, m.sCursor, m.sOffset = 0, 0, 0, 0
+			m.showSessions = false
 			m.rebuild()
 		}
 	case "esc", "backspace", "h", "left":
@@ -124,19 +153,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) goUp() {
+	target := ""
 	if len(m.trail) > 0 {
-		m.root = m.trail[len(m.trail)-1]
+		target = m.trail[len(m.trail)-1]
 		m.trail = m.trail[:len(m.trail)-1]
-		m.cursor, m.offset = 0, 0
-		m.rebuild()
+	} else if parent := parentDir(m.root); parent != m.root {
+		target = parent
+	}
+	if target == "" {
 		return
 	}
-	parent := parentDir(m.root)
-	if parent == m.root {
-		return
-	}
-	m.root = parent
-	m.cursor, m.offset = 0, 0
+	m.root = target
+	m.fCursor, m.fOffset, m.sCursor, m.sOffset = 0, 0, 0, 0
+	m.showSessions = false
 	m.rebuild()
 }
 
@@ -160,8 +189,13 @@ func (m *model) setCursor(position int) {
 	if position > m.itemCount()-1 {
 		position = max(0, m.itemCount()-1)
 	}
-	m.cursor = position
-	m.offset = clampOffset(m.offset, position, m.pageSize())
+	if m.showSessions {
+		m.sCursor = position
+		m.sOffset = clampOffset(m.sOffset, position, m.pageSize())
+	} else {
+		m.fCursor = position
+		m.fOffset = clampOffset(m.fOffset, position, m.pageSize())
+	}
 }
 
 func (m model) pageSize() int { return max(4, m.height-6) }
@@ -189,36 +223,46 @@ func (m model) View() string {
 	for _, folder := range m.folders {
 		total += folder.Sessions
 	}
-	if m.here != nil {
-		total += len(m.here.Sessions)
-	}
+	total += m.sessionCount()
 	b.WriteString(styleDim.Render(fmt.Sprintf("%s — %d sessions beneath", truncate(m.root, m.width-24), total)) + "\n")
+	b.WriteString(m.tabBar() + "\n")
 
-	end := min(m.itemCount(), m.offset+m.pageSize())
-	lastKind := ""
-	for i := m.offset; i < end; i++ {
-		if i < len(m.folders) {
-			if lastKind != "folder" {
-				b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %8s  %8s  %-16s%s",
-					"FOLDER", "SESSIONS", "SIZE", "LAST ACTIVITY", " BACKUP")) + "\n")
-				lastKind = "folder"
-			}
-			b.WriteString(m.folderRow(m.folders[i], i == m.cursor) + "\n")
-			continue
+	cursor := m.currentCursor()
+	if m.showSessions {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-36s %-7s %-10s %8s  %-12s %s",
+			"STATE", "TITLE", "AGENT", "SESSION", "SIZE", "MODIFIED", "BACKED UP")) + "\n")
+		end := min(m.sessionCount(), m.sOffset+m.pageSize())
+		for i := m.sOffset; i < end; i++ {
+			b.WriteString(m.sessionRow(m.here.Sessions[i], i == cursor) + "\n")
 		}
-		if lastKind != "session" {
-			b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-36s %-7s %-10s %8s  %-12s %s",
-				"STATE", "TITLE", "AGENT", "SESSION", "SIZE", "MODIFIED", "BACKED UP")) + "\n")
-			lastKind = "session"
+	} else {
+		b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %8s  %8s  %-16s%s",
+			"FOLDER", "SESSIONS", "SIZE", "LAST ACTIVITY", " BACKUP")) + "\n")
+		end := min(len(m.folders), m.fOffset+m.pageSize())
+		for i := m.fOffset; i < end; i++ {
+			b.WriteString(m.folderRow(m.folders[i], i == cursor) + "\n")
 		}
-		b.WriteString(m.sessionRow(m.here.Sessions[i-len(m.folders)], i == m.cursor) + "\n")
 	}
 	if m.itemCount() == 0 {
-		b.WriteString(styleDim.Render("  no sessions here") + "\n")
+		b.WriteString(styleDim.Render("  nothing here") + "\n")
 	}
 
-	b.WriteString(m.footer("↑/↓ move · enter open · ← up · r refresh · q quit"))
+	help := "↑/↓ move · enter open · ← up · tab sessions · r refresh · q quit"
+	if m.showSessions {
+		help = "↑/↓ move · ← up · tab folders · r refresh · q quit"
+	}
+	b.WriteString(m.footer(help))
 	return b.String()
+}
+
+// tabBar renders the pane switcher; the active pane is highlighted.
+func (m model) tabBar() string {
+	folders := fmt.Sprintf(" Folders %d ", len(m.folders))
+	sessions := fmt.Sprintf(" Sessions %d ", m.sessionCount())
+	if m.showSessions {
+		return styleDim.Render(folders) + styleCursor.Render(sessions)
+	}
+	return styleCursor.Render(folders) + styleDim.Render(sessions)
 }
 
 func (m model) folderRow(folder Folder, active bool) string {
