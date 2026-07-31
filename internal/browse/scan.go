@@ -333,7 +333,7 @@ type TranscriptMsg struct {
 }
 
 // transcriptKeep bounds how much of the tail the inspector loads.
-const transcriptKeep = 120
+const transcriptKeep = 300
 
 // TokenTotals sums per-message usage across a session.
 type TokenTotals struct {

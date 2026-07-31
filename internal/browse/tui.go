@@ -188,7 +188,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // scrollTail moves the tail viewport; positive is toward earlier lines.
 func (m *model) scrollTail(delta int) {
-	if m.detailTab != 0 {
+	if m.detailTab != 2 {
 		return
 	}
 	m.tailOffset = max(0, min(m.tailOffset+delta, max(0, len(m.tailLines)-3)))
@@ -203,8 +203,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detail = nil
 			m.detailTab, m.tailOffset = 0, 0
 			m.tailLines = nil
-		case "tab", "right", "l", "left", "h":
-			m.detailTab = (m.detailTab + 1) % 2
+		case "tab", "right", "l":
+			m.detailTab = (m.detailTab + 1) % 3
+		case "left", "h":
+			m.detailTab = (m.detailTab + 2) % 3
 		case "up", "k":
 			m.scrollTail(1)
 		case "down", "j":
@@ -615,7 +617,7 @@ func (m model) detailView() string {
 		return styleDim.Render(" " + label + " ")
 	}
 	left := styleHeader.Render("▸ " + name)
-	right := tab("Overview", 0) + tab("Usage", 1)
+	right := tab("Overview", 0) + tab("Usage", 1) + tab("Transcript", 2)
 	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
 		left += strings.Repeat(" ", pad)
 	}
@@ -624,20 +626,16 @@ func (m model) detailView() string {
 	b.WriteString(left + right + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
 
-	if m.detailTab == 1 {
+	switch m.detailTab {
+	case 1:
 		m.usageTab(&b)
 		return m.pinBottom(b.String(), "tab switch · i/esc close · ctrl+c quit")
+	case 2:
+		m.renderTail(&b, max(4, m.height-6))
+		return m.pinBottom(b.String(), "↑/↓/wheel scroll · tab switch · i/esc close")
 	}
-
 	m.overviewTab(&b, session)
-	used := strings.Count(b.String(), "\n")
-	avail := max(3, m.height-used-8)
-	width := max(min(m.width-2, 110), 40)
-	var tail strings.Builder
-	m.renderTail(&tail, avail)
-	b.WriteString("\n" + styleDim.Render(" SESSION TAIL") + "\n")
-	b.WriteString(detailBox(width).Render(strings.TrimRight(tail.String(), "\n")) + "\n")
-	return m.pinBottom(b.String(), "↑/↓/wheel scroll tail · tab usage · i/esc close")
+	return m.pinBottom(b.String(), "tab switch · i/esc close · ctrl+c quit")
 }
 
 func (m model) overviewTab(b *strings.Builder, session Session) {
@@ -697,9 +695,28 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 		first = session.Title
 	}
 	if first != "" {
-		startCap := max(4, (m.height-20)/2)
-		b.WriteString("\n" + styleDim.Render(" SESSION START") + "\n")
-		b.WriteString(detailBox(width).Render(strings.Join(wrapPreserve(first, inner, startCap), "\n")) + "\n")
+		b.WriteString("\n" + styleDim.Render(" INITIAL PROMPT") + "\n")
+		b.WriteString(detailBox(width).Render(strings.Join(wrapPreserve(first, inner, 6), "\n")) + "\n")
+	}
+
+	if data.LastPrompt != "" || data.LastResponse != "" {
+		var exchange []string
+		if data.LastPrompt != "" {
+			prompt := wrapPreserve(data.LastPrompt, inner-2, 4)
+			exchange = append(exchange, styleActive.Render("❯ ")+prompt[0])
+			for _, line := range prompt[1:] {
+				exchange = append(exchange, "  "+line)
+			}
+		}
+		if data.LastResponse != "" {
+			if len(exchange) > 0 {
+				exchange = append(exchange, "")
+			}
+			responseCap := max(4, m.height-len(exchange)-24)
+			exchange = append(exchange, wrapPreserve(data.LastResponse, inner, responseCap)...)
+		}
+		b.WriteString("\n" + styleDim.Render(" LAST EXCHANGE") + "\n")
+		b.WriteString(detailBox(width).Render(strings.Join(exchange, "\n")) + "\n")
 	}
 }
 
@@ -790,7 +807,7 @@ func (m model) renderTail(b *strings.Builder, page int) {
 
 func (m *model) buildTailLines() {
 	m.tailWidth = m.width
-	width := max(min(m.width-2, 110), 40) - 4 // box border + padding
+	width := max(min(m.width-4, 110), 40)
 	style := styles.DarkStyleConfig
 	margin := uint(0)
 	style.Document.Margin = &margin
