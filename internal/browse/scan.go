@@ -389,6 +389,9 @@ func LoadDetail(session Session) Detail {
 		switch event.Type {
 		case "user":
 			detail.Messages++
+			for _, result := range toolResults(event.Message.Content) {
+				appendMsg("result", result)
+			}
 			if text := contentRaw(event.Message.Content); text != "" {
 				if detail.FirstPrompt == "" {
 					detail.FirstPrompt = text
@@ -497,6 +500,46 @@ func toolUses(raw json.RawMessage) []string {
 		uses = append(uses, use)
 	}
 	return uses
+}
+
+// toolResults extracts a one-line summary from each tool_result block in a
+// user event, for the "⎿ …" lines under tool calls.
+func toolResults(raw json.RawMessage) []string {
+	var blocks []struct {
+		Type    string          `json:"type"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return nil
+	}
+	var results []string
+	for _, block := range blocks {
+		if block.Type != "tool_result" {
+			continue
+		}
+		text := ""
+		var plain string
+		if json.Unmarshal(block.Content, &plain) == nil {
+			text = plain
+		} else {
+			var inner []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(block.Content, &inner) == nil {
+				for _, part := range inner {
+					if part.Type == "text" && part.Text != "" {
+						text = part.Text
+						break
+					}
+				}
+			}
+		}
+		if line, _, _ := strings.Cut(strings.TrimSpace(text), "\n"); line != "" {
+			results = append(results, strings.Join(strings.Fields(line), " "))
+		}
+	}
+	return results
 }
 
 // toolDetail picks the most informative input field for display.

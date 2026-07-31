@@ -822,6 +822,10 @@ func (m *model) buildTailLines() {
 
 	var lines []string
 	for _, msg := range m.detailData.Transcript {
+		if msg.Role == "result" {
+			lines = append(lines, styleDim.Render("    ⎿ "+truncate(msg.Text, max(20, width-8))))
+			continue
+		}
 		if msg.Role == "tool" {
 			name, detail, hasDetail := strings.Cut(msg.Text, ": ")
 			line := "  " + styleOK.Render("●") + " " + styleBold.Render(name)
