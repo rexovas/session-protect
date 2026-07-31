@@ -130,3 +130,47 @@ func TestApplyNamesCache(t *testing.T) {
 		t.Fatalf("rename not picked up: %+v", projects[0].Sessions[0])
 	}
 }
+
+func TestScanSurfacesLostSessions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	configPath := filepath.Join(home, "config.toml")
+	writeFile(t, configPath, "backup_root = \""+filepath.Join(home, "root")+"\"\n")
+	t.Setenv("SESSION_PROTECT_CONFIG", configPath)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	project := filepath.Join(home, "work", "app")
+	// A live session plus history entries: one for the live session, two
+	// for a session that no longer exists anywhere.
+	writeFile(t, filepath.Join(home, ".claude", "projects", "-slug", "alive.jsonl"), `{"cwd":"`+project+`"}`)
+	writeFile(t, filepath.Join(home, ".claude", "history.jsonl"),
+		`{"display":"still here","sessionId":"alive","project":"`+project+`","timestamp":1000}
+{"display":"first lost prompt","sessionId":"ghost","project":"`+project+`","timestamp":2000}
+{"display":"second lost prompt","sessionId":"ghost","project":"`+project+`","timestamp":3000}
+`)
+
+	projects := Scan(cfg)
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project, got %+v", projects)
+	}
+	if projects[0].Lost != 1 {
+		t.Fatalf("expected 1 lost session, got %+v", projects[0])
+	}
+	var lost *Session
+	for i := range projects[0].Sessions {
+		if projects[0].Sessions[i].State == "LOST" {
+			lost = &projects[0].Sessions[i]
+		}
+	}
+	if lost == nil || lost.ID != "ghost" || lost.Prompts != 2 || lost.Title != "first lost prompt" {
+		t.Fatalf("lost session wrong: %+v", lost)
+	}
+	// The live session must not be duplicated as lost.
+	if len(projects[0].Sessions) != 2 {
+		t.Fatalf("expected 2 sessions total, got %d", len(projects[0].Sessions))
+	}
+}

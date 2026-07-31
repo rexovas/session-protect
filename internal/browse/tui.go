@@ -38,7 +38,12 @@ type model struct {
 	trail []string // roots we descended through, for going back up
 
 	folders []Folder
-	here    *Project // project whose sessions live exactly at root
+	here    *Project  // project whose sessions live exactly at root
+	visible []Session // here's sessions, filtered by the lost toggle
+
+	// showLost reveals sessions known only from prompt history. Hidden by
+	// default so losses don't crowd the living sessions.
+	showLost bool
 
 	// One pane is visible at a time; tab switches folders/sessions and
 	// ctrl+a opens the recursive all-sessions pane. Each pane keeps its
@@ -94,11 +99,13 @@ func newModel(cfg config.Config) model {
 func (m *model) rebuild() {
 	m.folders = ChildrenOf(m.projects, m.root, m.start)
 	m.here = ProjectAt(m.projects, m.root)
+	m.visible = nil
 	if m.here != nil {
 		LoadCustomNames(m.here)
+		m.visible = m.filterLost(m.here.Sessions)
 	}
 	if m.showAll {
-		m.allSessions = AllUnder(m.projects, m.root)
+		m.allSessions = m.filterLost(AllUnder(m.projects, m.root))
 	}
 	// Show the pane that has content when the other is empty.
 	if len(m.folders) == 0 && m.sessionCount() > 0 {
@@ -111,10 +118,21 @@ func (m *model) rebuild() {
 }
 
 func (m model) sessionCount() int {
-	if m.here == nil {
-		return 0
+	return len(m.visible)
+}
+
+// filterLost hides history-only sessions unless the toggle is on.
+func (m model) filterLost(sessions []Session) []Session {
+	if m.showLost {
+		return sessions
 	}
-	return len(m.here.Sessions)
+	var out []Session
+	for _, session := range sessions {
+		if session.State != "LOST" {
+			out = append(out, session)
+		}
+	}
+	return out
 }
 
 func (m model) itemCount() int {
@@ -236,10 +254,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		m.stats = LoadStats()
 		m.showStats = true
+	case "x":
+		m.showLost = !m.showLost
+		m.rebuild()
 	case "i":
 		if session := m.selectedSession(); session != nil {
 			m.detail = session
-			m.detailData = LoadDetail(*session)
+			if session.State == "LOST" {
+				m.detailData = LoadLostDetail(session.ID)
+			} else {
+				m.detailData = LoadDetail(*session)
+			}
 			m.buildTailLines()
 		}
 	case "r":
@@ -260,7 +285,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.showAll = !m.showAll
 		if m.showAll {
-			m.allSessions = AllUnder(m.projects, m.root)
+			m.allSessions = m.filterLost(AllUnder(m.projects, m.root))
 			m.aCursor, m.aOffset = 0, 0
 		}
 		m.setCursor(m.currentCursor())
@@ -309,8 +334,8 @@ func (m model) selectedSession() *Session {
 			return &m.allSessions[m.aCursor]
 		}
 	case m.showSessions:
-		if m.here != nil && m.sCursor < len(m.here.Sessions) {
-			return &m.here.Sessions[m.sCursor]
+		if m.sCursor < len(m.visible) {
+			return &m.visible[m.sCursor]
 		}
 	}
 	return nil
@@ -455,7 +480,7 @@ func (m model) View() string {
 			"STATE", m.titleWidth(), "TITLE", "AGENT", "SIZE", "MODIFIED")) + "\n")
 		end := min(m.sessionCount(), m.sOffset+m.pageSize())
 		for i := m.sOffset; i < end; i++ {
-			b.WriteString(m.sessionRow(m.here.Sessions[i], i == cursor) + "\n")
+			b.WriteString(m.sessionRow(m.visible[i], i == cursor) + "\n")
 		}
 	default:
 		b.WriteString(styleDim.Render(fmt.Sprintf("   %-*s  %8s  %8s  %-9s%s",
@@ -469,9 +494,9 @@ func (m model) View() string {
 		b.WriteString(styleDim.Render("  nothing here") + "\n")
 	}
 
-	help := "↑/↓ move · enter open · ← up · tab sessions · ctrl+a all · s stats · q quit"
+	help := "↑/↓ move · enter open · ← up · tab sessions · ctrl+a all · s stats · x lost · q quit"
 	if m.showSessions || m.showAll {
-		help = "↑/↓ move · i info · ← folders · tab folders · ctrl+a all · s stats · q quit"
+		help = "↑/↓ move · i info · ← folders · tab folders · ctrl+a all · x lost · q quit"
 	}
 	return m.pinBottom(b.String(), help)
 }
@@ -960,6 +985,9 @@ func (m model) folderRow(folder Folder, active bool) string {
 	if folder.RecoverOnly > 0 {
 		health += styleUnless(active, styleRecover, fmt.Sprintf(" ✝%d", folder.RecoverOnly))
 	}
+	if folder.Lost > 0 {
+		health += styleUnless(active, styleDim, fmt.Sprintf(" ✕%d", folder.Lost))
+	}
 	if health == "" {
 		health = styleUnless(active, styleOK, " ok")
 	}
@@ -978,9 +1006,13 @@ func (m model) sessionRow(session Session, active bool) string {
 	if session.LiveStatus != "" {
 		live = styleUnless(active, styleOK, "▶")
 	}
+	size := formatBytes(session.Size)
+	if session.State == "LOST" {
+		size = fmt.Sprintf("%dp", session.Prompts)
+	}
 	row := fmt.Sprintf("%s%s  %s %-7s %8s  %s",
 		live, styleUnless(active, style, state), sessionTitle(session, m.titleWidth(), active), session.Target,
-		formatBytes(session.Size), ago(session.Modified))
+		size, ago(session.Modified))
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}
@@ -1010,6 +1042,8 @@ func sessionState(state string) (string, lipgloss.Style) {
 		return "~ stale    ", styleStale
 	case "MISSING_BACKUP":
 		return "! unbacked ", styleUnbacked
+	case "LOST":
+		return "✕ lost     ", styleDim
 	default:
 		return "✝ recover  ", styleRecover
 	}

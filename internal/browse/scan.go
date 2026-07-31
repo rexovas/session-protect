@@ -24,7 +24,8 @@ type Session struct {
 	CustomName     string // user-assigned name, from custom-title events
 	LiveStatus     string // non-empty when open in a running agent process
 	ProjectPath    string // set on aggregated (AllUnder) sessions for display
-	State          string // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE
+	Prompts        int    // for LOST sessions: prompt count from history
+	State          string // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE | LOST
 	Modified       time.Time
 	BackupModified time.Time
 	Size           int64
@@ -44,6 +45,7 @@ type Project struct {
 	Stale       int
 	Unbacked    int // live sessions with no backup copy
 	RecoverOnly int // backed-up sessions missing from the live source
+	Lost        int // known only from prompt history; no transcript anywhere
 	Open        int // sessions currently open in a running agent process
 	ClaudeCount int
 	CodexCount  int
@@ -57,6 +59,34 @@ func Scan(cfg config.Config) []*Project {
 
 	scanClaude(cfg, byPath)
 	scanCodex(cfg, byPath)
+
+	// Sessions known only from the prompt history — lost from both live
+	// and backup — surface as permanent LOST entries. The history file is
+	// never modified; reconstruction (if ever) creates a new session.
+	seen := map[string]bool{}
+	for _, project := range byPath {
+		for _, session := range project.Sessions {
+			seen[session.ID] = true
+		}
+	}
+	for id, ghost := range claudeHistorySessions() {
+		if seen[id] || ghost.Project == "" {
+			continue
+		}
+		project := byPath[ghost.Project]
+		if project == nil {
+			project = &Project{Path: ghost.Project}
+			byPath[ghost.Project] = project
+		}
+		project.Sessions = append(project.Sessions, Session{
+			Target:   "claude",
+			ID:       id,
+			Title:    ghost.Title,
+			State:    "LOST",
+			Modified: ghost.Last,
+			Prompts:  ghost.Count,
+		})
+	}
 
 	titles := historyTitles()
 	open := guard.Live(guard.RegistryDir())
@@ -99,6 +129,8 @@ func Scan(cfg config.Config) []*Project {
 				project.Unbacked++
 			case "MISSING_SOURCE":
 				project.RecoverOnly++
+			case "LOST":
+				project.Lost++
 			}
 			if session.Target == "claude" {
 				project.ClaudeCount++
@@ -591,6 +623,93 @@ func cleanText(s string) string {
 	return s
 }
 
+// lostInfo summarizes one session's prompt history.
+type lostInfo struct {
+	Project string
+	Title   string
+	Count   int
+	First   time.Time
+	Last    time.Time
+}
+
+// claudeHistorySessions indexes the claude prompt history by session id.
+// This is the only record of sessions whose transcripts were pruned before
+// any backup existed.
+func claudeHistorySessions() map[string]lostInfo {
+	sessions := map[string]lostInfo{}
+	file, err := os.Open(filepath.Join(targets.DetectClaude().Source, "history.jsonl"))
+	if err != nil {
+		return sessions
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var entry struct {
+			Display   string `json:"display"`
+			SessionID string `json:"sessionId"`
+			Project   string `json:"project"`
+			Timestamp int64  `json:"timestamp"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.SessionID == "" {
+			continue
+		}
+		info := sessions[entry.SessionID]
+		info.Count++
+		if info.Project == "" {
+			info.Project = entry.Project
+		}
+		if info.Title == "" {
+			info.Title = strings.Join(strings.Fields(entry.Display), " ")
+		}
+		at := time.UnixMilli(entry.Timestamp)
+		if info.First.IsZero() || at.Before(info.First) {
+			info.First = at
+		}
+		if at.After(info.Last) {
+			info.Last = at
+		}
+		sessions[entry.SessionID] = info
+	}
+	return sessions
+}
+
+// LoadLostDetail builds inspector data for a LOST session from the prompt
+// history — the user's half of the conversation is all that survives.
+func LoadLostDetail(id string) Detail {
+	var detail Detail
+	file, err := os.Open(filepath.Join(targets.DetectClaude().Source, "history.jsonl"))
+	if err != nil {
+		return detail
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var entry struct {
+			Display   string `json:"display"`
+			SessionID string `json:"sessionId"`
+			Timestamp int64  `json:"timestamp"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.SessionID != id || entry.Display == "" {
+			continue
+		}
+		detail.Messages++
+		if detail.FirstPrompt == "" {
+			detail.FirstPrompt = entry.Display
+			detail.Created = time.UnixMilli(entry.Timestamp)
+		}
+		detail.LastPrompt = entry.Display
+		detail.Transcript = append(detail.Transcript, TranscriptMsg{Role: "user", Text: entry.Display})
+		if len(detail.Transcript) > transcriptKeep {
+			detail.Transcript = detail.Transcript[1:]
+		}
+	}
+	return detail
+}
+
 // historyTitles maps session ids to the first prompt recorded for them in the
 // agents' history files — a cheap title source that avoids opening every
 // session file.
@@ -647,6 +766,7 @@ type Folder struct {
 	Stale       int
 	Unbacked    int
 	RecoverOnly int
+	Lost        int
 }
 
 // ChildrenOf groups projects under root into immediate child folders with
@@ -689,7 +809,8 @@ func ChildrenOf(projects []*Project, root string, start string) []Folder {
 }
 
 func aggregate(folder *Folder, project *Project) {
-	folder.Sessions += len(project.Sessions)
+	folder.Sessions += len(project.Sessions) - project.Lost
+	folder.Lost += project.Lost
 	folder.SizeBytes += project.SizeBytes
 	if project.Latest.After(folder.Latest) {
 		folder.Latest = project.Latest
