@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rexovas/session-protect/internal/config"
@@ -44,6 +45,10 @@ type model struct {
 	allSessions  []Session
 	detail       *Session
 	detailData   Detail
+	detailTab    int // 0 overview · 1 usage · 2 tail
+	tailLines    []string
+	tailWidth    int
+	tailOffset   int // lines scrolled up from the bottom
 	stats        *Stats
 	showStats    bool
 	fCursor      int
@@ -142,6 +147,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.detail != nil && m.detailTab == 2 {
+			m.buildTailLines()
+		}
 		return m, nil
 	case tickMsg:
 		if m.scanning {
@@ -166,8 +174,34 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "i", "esc", "q", "backspace", "h", "left", "enter":
+		case "i", "esc", "q":
 			m.detail = nil
+			m.detailTab, m.tailOffset = 0, 0
+			m.tailLines = nil
+		case "tab", "right", "l":
+			m.detailTab = (m.detailTab + 1) % 3
+			m.tailOffset = 0
+			m.ensureTailLines()
+		case "left", "h":
+			m.detailTab = (m.detailTab + 2) % 3
+			m.tailOffset = 0
+			m.ensureTailLines()
+		case "up", "k":
+			if m.detailTab == 2 {
+				m.tailOffset = min(m.tailOffset+1, max(0, len(m.tailLines)-m.tailPage()))
+			}
+		case "down", "j":
+			if m.detailTab == 2 {
+				m.tailOffset = max(0, m.tailOffset-1)
+			}
+		case "pgup":
+			if m.detailTab == 2 {
+				m.tailOffset = min(m.tailOffset+m.tailPage(), max(0, len(m.tailLines)-m.tailPage()))
+			}
+		case "pgdown":
+			if m.detailTab == 2 {
+				m.tailOffset = max(0, m.tailOffset-m.tailPage())
+			}
 		}
 		return m, nil
 	}
@@ -547,14 +581,9 @@ func (m model) allSessionRow(session Session, active bool) string {
 	return row
 }
 
-// detailView is the full-stat inspector for one session (i to open/close).
+// detailView is the tabbed inspector for one session (i to open/close).
 func (m model) detailView() string {
 	session := *m.detail
-	data := m.detailData
-	width := max(min(m.width-2, 110), 40)
-	inner := width - 4 // box border + padding
-
-	var b strings.Builder
 
 	name := session.CustomName
 	if name == "" {
@@ -563,7 +592,43 @@ func (m model) detailView() string {
 	if name == "" {
 		name = session.ID
 	}
-	b.WriteString(styleHeader.Render("▸ "+name) + "\n\n")
+
+	tab := func(label string, index int) string {
+		if m.detailTab == index {
+			return styleCursor.Render(" " + label + " ")
+		}
+		return styleDim.Render(" " + label + " ")
+	}
+	left := styleHeader.Render("▸ " + name)
+	right := tab("Overview", 0) + tab("Usage", 1) + tab("Tail", 2)
+	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
+		left += strings.Repeat(" ", pad)
+	}
+
+	var b strings.Builder
+	b.WriteString(left + right + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
+
+	switch m.detailTab {
+	case 1:
+		m.usageTab(&b)
+	case 2:
+		m.tailTab(&b)
+	default:
+		m.overviewTab(&b, session)
+	}
+
+	help := "tab switch · i/esc close · ctrl+c quit"
+	if m.detailTab == 2 {
+		help = "↑/↓ scroll · tab switch · i/esc close · ctrl+c quit"
+	}
+	return m.pinBottom(b.String(), help)
+}
+
+func (m model) overviewTab(b *strings.Builder, session Session) {
+	data := m.detailData
+	width := max(min(m.width-2, 110), 40)
+	inner := width - 4
 
 	state, style := sessionState(session.State)
 	liveNote := ""
@@ -592,13 +657,6 @@ func (m model) detailView() string {
 		stamp += styleDim.Render("  ·  backup ") + ago(session.BackupModified)
 	}
 	kv("size", stamp)
-	if !data.Tokens.Zero() {
-		tokens := "in " + humanTokens(data.Tokens.Input) +
-			styleDim.Render("  ·  out ") + humanTokens(data.Tokens.Output) +
-			styleDim.Render("  ·  cache read ") + humanTokens(data.Tokens.CacheRead) +
-			styleDim.Render("  ·  cache write ") + humanTokens(data.Tokens.CacheWrite)
-		kv("tokens", tokens)
-	}
 	if data.Messages > 0 {
 		messages := fmt.Sprintf("%d", data.Messages)
 		if len(data.Models) > 0 {
@@ -619,42 +677,127 @@ func (m model) detailView() string {
 	kvPath("source", session.SourcePath)
 	kvPath("backup", session.BackupPath)
 
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.AdaptiveColor{Light: "#BBBBBB", Dark: "#555555"}).
-		Padding(0, 1).
-		Width(width - 2)
-
 	first := data.FirstPrompt
 	if first == "" {
 		first = session.Title
 	}
 	if first != "" {
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.AdaptiveColor{Light: "#BBBBBB", Dark: "#555555"}).
+			Padding(0, 1).
+			Width(width - 2)
 		b.WriteString("\n" + styleDim.Render(" SESSION START") + "\n")
-		b.WriteString(box.Render(strings.Join(wrapText(first, inner, 5), "\n")) + "\n")
+		b.WriteString(box.Render(strings.Join(wrapText(first, inner, 8), "\n")) + "\n")
+	}
+}
+
+// usageTab mirrors the agent's own usage panel: per-model tokens and an
+// offline cost estimate from the local pricing table.
+func (m model) usageTab(b *strings.Builder) {
+	data := m.detailData
+	if data.Tokens.Zero() {
+		b.WriteString(styleDim.Render("  no usage data in this transcript") + "\n")
+		return
 	}
 
-	if data.LastPrompt != "" || data.LastResponse != "" {
-		responseLines := max(4, m.height-24)
-		var tail []string
-		if data.LastPrompt != "" {
-			prompt := wrapText(data.LastPrompt, inner-2, 4)
-			tail = append(tail, styleDim.Render("❯ ")+prompt[0])
-			for _, line := range prompt[1:] {
-				tail = append(tail, "  "+line)
-			}
+	b.WriteString("\n" + styleDim.Render(fmt.Sprintf("  %-28s %10s %10s %12s %12s %10s",
+		"MODEL", "INPUT", "OUTPUT", "CACHE READ", "CACHE WRITE", "COST")) + "\n")
+
+	var totalCost float64
+	costKnown := true
+	for _, model := range data.Models {
+		usage := data.PerModel[model]
+		costText := styleDim.Render("         —")
+		if cost, ok := costUSD(model, usage); ok {
+			costText = fmt.Sprintf("%10s", fmt.Sprintf("$%.2f", cost))
+			totalCost += cost
+		} else {
+			costKnown = false
 		}
-		if data.LastResponse != "" {
-			if len(tail) > 0 {
-				tail = append(tail, "")
-			}
-			tail = append(tail, wrapText(data.LastResponse, inner, responseLines)...)
-		}
-		b.WriteString("\n" + styleDim.Render(" SESSION TAIL") + "\n")
-		b.WriteString(box.Render(strings.Join(tail, "\n")) + "\n")
+		b.WriteString(fmt.Sprintf("  %-28s %10s %10s %12s %12s %s\n",
+			truncate(model, 28), humanTokens(usage.Input), humanTokens(usage.Output),
+			humanTokens(usage.CacheRead), humanTokens(usage.CacheWrite), costText))
 	}
 
-	return m.pinBottom(b.String(), "i/esc close · ctrl+c quit")
+	total := data.Tokens
+	totalText := fmt.Sprintf("$%.2f", totalCost)
+	if !costKnown {
+		totalText += "+"
+	}
+	b.WriteString(styleHeader.Render(fmt.Sprintf("  %-28s %10s %10s %12s %12s %10s",
+		"total", humanTokens(total.Input), humanTokens(total.Output),
+		humanTokens(total.CacheRead), humanTokens(total.CacheWrite), totalText)) + "\n")
+
+	b.WriteString("\n" + styleDim.Render("  cost estimated locally from published per-token prices"+
+		" (cache read 0.1×, cache write 1.25× input rate); no external calls") + "\n")
+	if data.Messages > 0 {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %d messages in transcript", data.Messages)) + "\n")
+	}
+}
+
+// tailTab renders the transcript tail like the agent itself would: markdown
+// for assistant messages, prompt-prefixed plain text for the user's.
+func (m model) tailTab(b *strings.Builder) {
+	if len(m.tailLines) == 0 {
+		b.WriteString(styleDim.Render("  no messages extracted") + "\n")
+		return
+	}
+	page := m.tailPage()
+	start := max(0, len(m.tailLines)-page-m.tailOffset)
+	end := min(len(m.tailLines), start+page)
+	if m.tailOffset > 0 {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  ↑ %d earlier lines", start)) + "\n")
+	}
+	for _, line := range m.tailLines[start:end] {
+		b.WriteString(line + "\n")
+	}
+}
+
+func (m model) tailPage() int { return max(4, m.height-6) }
+
+// ensureTailLines builds the rendered tail when the tab is entered.
+func (m *model) ensureTailLines() {
+	if m.detailTab == 2 && (len(m.tailLines) == 0 || m.tailWidth != m.width) {
+		m.buildTailLines()
+	}
+}
+
+func (m *model) buildTailLines() {
+	m.tailWidth = m.width
+	width := max(min(m.width-4, 110), 40)
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(width),
+	)
+
+	var lines []string
+	for _, msg := range m.detailData.Transcript {
+		if msg.Role == "user" {
+			wrapped := wrapText(msg.Text, width-2, 200)
+			for i, line := range wrapped {
+				if i == 0 {
+					lines = append(lines, styleActive.Render("❯ ")+line)
+				} else {
+					lines = append(lines, "  "+line)
+				}
+			}
+			lines = append(lines, "")
+			continue
+		}
+		rendered := msg.Text
+		if err == nil {
+			if out, renderErr := renderer.Render(msg.Text); renderErr == nil {
+				rendered = out
+			}
+		}
+		for _, line := range strings.Split(strings.Trim(rendered, "\n"), "\n") {
+			lines = append(lines, line)
+		}
+		lines = append(lines, "")
+	}
+	m.tailLines = lines
+	m.tailOffset = 0
 }
 
 // tildePath abbreviates the home directory for display.

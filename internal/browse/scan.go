@@ -320,9 +320,20 @@ type Detail struct {
 	LastPrompt   string
 	LastResponse string
 	Tokens       TokenTotals
+	PerModel     map[string]TokenTotals
 	Messages     int
 	Models       []string
+	// Transcript holds the most recent text messages for the tail viewer.
+	Transcript []TranscriptMsg
 }
+
+type TranscriptMsg struct {
+	Role string // user | assistant
+	Text string
+}
+
+// transcriptKeep bounds how much of the tail the inspector loads.
+const transcriptKeep = 120
 
 // TokenTotals sums per-message usage across a session.
 type TokenTotals struct {
@@ -356,7 +367,13 @@ func LoadDetail(session Session) Detail {
 	}
 	defer file.Close()
 
-	models := map[string]bool{}
+	detail.PerModel = map[string]TokenTotals{}
+	appendMsg := func(role string, text string) {
+		detail.Transcript = append(detail.Transcript, TranscriptMsg{Role: role, Text: text})
+		if len(detail.Transcript) > transcriptKeep {
+			detail.Transcript = detail.Transcript[1:]
+		}
+	}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 	for scanner.Scan() {
@@ -377,11 +394,13 @@ func LoadDetail(session Session) Detail {
 					detail.FirstPrompt = text
 				}
 				detail.LastPrompt = text
+				appendMsg("user", text)
 			}
 		case "assistant":
 			detail.Messages++
 			if text := contentText(event.Message.Content); text != "" {
 				detail.LastResponse = text
+				appendMsg("assistant", text)
 			}
 			usage := event.Message.Usage
 			detail.Tokens.Input += usage.InputTokens
@@ -389,11 +408,16 @@ func LoadDetail(session Session) Detail {
 			detail.Tokens.CacheRead += usage.CacheReadInputTokens
 			detail.Tokens.CacheWrite += usage.CacheCreationInputTokens
 			if event.Message.Model != "" {
-				models[event.Message.Model] = true
+				perModel := detail.PerModel[event.Message.Model]
+				perModel.Input += usage.InputTokens
+				perModel.Output += usage.OutputTokens
+				perModel.CacheRead += usage.CacheReadInputTokens
+				perModel.CacheWrite += usage.CacheCreationInputTokens
+				detail.PerModel[event.Message.Model] = perModel
 			}
 		}
 	}
-	for model := range models {
+	for model := range detail.PerModel {
 		detail.Models = append(detail.Models, model)
 	}
 	sort.Strings(detail.Models)
