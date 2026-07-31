@@ -43,6 +43,11 @@ type model struct {
 	here    *Project  // project whose sessions live exactly at root
 	visible []Session // here's sessions, filtered by the lost toggle
 
+	// expanded folders render their children indented in place. Keyed by
+	// path so state survives rescans; a collapsed parent hides but keeps
+	// its children's expansions for when it is reopened.
+	expanded map[string]bool
+
 	// showLost reveals sessions known only from prompt history. Hidden by
 	// default so losses don't crowd the living sessions.
 	showLost bool
@@ -104,14 +109,14 @@ func newModel(cfg config.Config) model {
 	if err != nil {
 		start = string(os.PathSeparator)
 	}
-	m := model{cfg: cfg, projects: projects, start: start, width: 100, height: 32}
+	m := model{cfg: cfg, projects: projects, start: start, width: 100, height: 32, expanded: map[string]bool{}}
 	m.root = NearestRoot(projects, start)
 	m.rebuild()
 	return m
 }
 
 func (m *model) rebuild() {
-	m.folders = ChildrenOf(m.projects, m.root, m.start)
+	m.folders = m.treeRows(ChildrenOf(m.projects, m.root, m.start), 0)
 	m.here = ProjectAt(m.projects, m.root)
 	m.visible = nil
 	if m.here != nil {
@@ -129,6 +134,20 @@ func (m *model) rebuild() {
 		m.showSessions = false
 	}
 	m.setCursor(m.currentCursor())
+}
+
+// treeRows flattens the folder tree for display, descending into folders
+// the user expanded in place.
+func (m *model) treeRows(folders []Folder, depth int) []Folder {
+	var out []Folder
+	for _, folder := range folders {
+		folder.Depth = depth
+		out = append(out, folder)
+		if m.expanded[folder.Path] {
+			out = append(out, m.treeRows(ChildrenOf(m.projects, folder.Path, m.start), depth+1)...)
+		}
+	}
+	return out
 }
 
 func (m model) sessionCount() int {
@@ -351,6 +370,27 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.aCursor, m.aOffset = 0, 0
 		}
 		m.setCursor(m.currentCursor())
+	case " ", "ctrl+right", "ctrl+left":
+		if m.showSessions || m.showAll || m.fCursor >= len(m.folders) {
+			break
+		}
+		folder := m.folders[m.fCursor]
+		switch msg.String() {
+		case "ctrl+right":
+			if m.expanded[folder.Path] {
+				break
+			}
+			fallthrough
+		case " ":
+			if m.expanded[folder.Path] {
+				delete(m.expanded, folder.Path)
+			} else if len(ChildrenOf(m.projects, folder.Path, m.start)) > 0 {
+				m.expanded[folder.Path] = true
+			}
+		default: // ctrl+left collapses only
+			delete(m.expanded, folder.Path)
+		}
+		m.rebuild()
 	case "up", "k":
 		m.setCursor(m.currentCursor() - 1)
 	case "down", "j":
@@ -769,6 +809,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("← · esc", "back — leave pane, then go up a folder")
 	key("tab", "switch between folders and sessions")
 	key("ctrl+a", "all sessions beneath this folder")
+	key("space", "expand / collapse a folder's subfolders in place")
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
@@ -1267,9 +1308,10 @@ func (m model) folderRow(folder Folder, active bool) string {
 		// the "older" dot would contradict its ▶ badge.
 		glyph, glyphStyle = "▶", styleActive
 	}
-	name := truncate(folder.Name, m.nameWidth()-1) + "/"
+	indent := strings.Repeat("  ", folder.Depth)
+	name := indent + truncate(folder.Name, m.nameWidth()-1-len(indent)) + "/"
 	if folder.Pseudo {
-		name = truncate(folder.Name, m.nameWidth())
+		name = indent + truncate(folder.Name, m.nameWidth()-len(indent))
 	}
 
 	// Severity badges keep their own colors even inside gold rows — a

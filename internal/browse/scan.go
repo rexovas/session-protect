@@ -811,6 +811,7 @@ type Folder struct {
 	Name        string
 	Path        string
 	Pseudo      bool // unresolved project key, not a real filesystem path
+	Depth       int  // indent level when shown expanded under a parent
 	Sessions    int
 	SizeBytes   int64
 	Latest      time.Time
