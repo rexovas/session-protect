@@ -389,7 +389,7 @@ func LoadDetail(session Session) Detail {
 		switch event.Type {
 		case "user":
 			detail.Messages++
-			if text := contentText(event.Message.Content); text != "" {
+			if text := contentRaw(event.Message.Content); text != "" {
 				if detail.FirstPrompt == "" {
 					detail.FirstPrompt = text
 				}
@@ -398,7 +398,7 @@ func LoadDetail(session Session) Detail {
 			}
 		case "assistant":
 			detail.Messages++
-			if text := contentText(event.Message.Content); text != "" {
+			if text := contentRaw(event.Message.Content); text != "" {
 				detail.LastResponse = text
 				appendMsg("assistant", text)
 			}
@@ -474,23 +474,70 @@ func contentText(raw json.RawMessage) string {
 	return cleanText(strings.Join(parts, " "))
 }
 
-// toolUses lists tool names invoked in a message's content blocks, for the
-// "Ran <tool>" lines in the tail view.
+// toolUses lists tool invocations (name plus a short input detail) from a
+// message's content blocks, for the "⏺ Bash: …" lines in the tail view.
 func toolUses(raw json.RawMessage) []string {
 	var blocks []struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
+		Type  string         `json:"type"`
+		Name  string         `json:"name"`
+		Input map[string]any `json:"input"`
 	}
 	if json.Unmarshal(raw, &blocks) != nil {
 		return nil
 	}
-	var names []string
+	var uses []string
 	for _, block := range blocks {
-		if block.Type == "tool_use" && block.Name != "" {
-			names = append(names, block.Name)
+		if block.Type != "tool_use" || block.Name == "" {
+			continue
+		}
+		use := block.Name
+		if detail := toolDetail(block.Input); detail != "" {
+			use += ": " + detail
+		}
+		uses = append(uses, use)
+	}
+	return uses
+}
+
+// toolDetail picks the most informative input field for display.
+func toolDetail(input map[string]any) string {
+	for _, key := range []string{"command", "file_path", "path", "pattern", "url", "query", "description", "prompt", "skill"} {
+		if value, ok := input[key].(string); ok && value != "" {
+			return strings.Join(strings.Fields(value), " ")
 		}
 	}
-	return names
+	return ""
+}
+
+// contentRaw extracts message text preserving newlines and markdown
+// structure, for transcript rendering.
+func contentRaw(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		plain = strings.TrimSpace(plain)
+		if strings.HasPrefix(plain, "<") {
+			return ""
+		}
+		return plain
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, block := range blocks {
+		text := strings.TrimSpace(block.Text)
+		if block.Type == "text" && text != "" && !strings.HasPrefix(text, "<") {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func cleanText(s string) string {

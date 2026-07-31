@@ -631,9 +631,12 @@ func (m model) detailView() string {
 
 	m.overviewTab(&b, session)
 	used := strings.Count(b.String(), "\n")
-	avail := max(3, m.height-used-5)
+	avail := max(3, m.height-used-8)
+	width := max(min(m.width-2, 110), 40)
+	var tail strings.Builder
+	m.renderTail(&tail, avail)
 	b.WriteString("\n" + styleDim.Render(" SESSION TAIL") + "\n")
-	m.renderTail(&b, avail)
+	b.WriteString(detailBox(width).Render(strings.TrimRight(tail.String(), "\n")) + "\n")
 	return m.pinBottom(b.String(), "↑/↓/wheel scroll tail · tab usage · i/esc close")
 }
 
@@ -694,13 +697,9 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 		first = session.Title
 	}
 	if first != "" {
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.AdaptiveColor{Light: "#BBBBBB", Dark: "#555555"}).
-			Padding(0, 1).
-			Width(width - 2)
+		startCap := max(4, (m.height-20)/2)
 		b.WriteString("\n" + styleDim.Render(" SESSION START") + "\n")
-		b.WriteString(box.Render(strings.Join(wrapText(first, inner, 3), "\n")) + "\n")
+		b.WriteString(detailBox(width).Render(strings.Join(wrapPreserve(first, inner, startCap), "\n")) + "\n")
 	}
 }
 
@@ -748,6 +747,31 @@ func (m model) usageTab(b *strings.Builder) {
 	}
 }
 
+// detailBox is the rounded frame used by the inspector's sections.
+func detailBox(width int) lipgloss.Style {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.AdaptiveColor{Light: "#BBBBBB", Dark: "#555555"}).
+		Padding(0, 1).
+		Width(width - 2)
+}
+
+// wrapPreserve word-wraps text while keeping its newline structure.
+func wrapPreserve(text string, width int, maxLines int) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			out = append(out, "")
+		} else {
+			out = append(out, wrapText(line, width, 1000)...)
+		}
+		if len(out) > maxLines {
+			return append(out[:maxLines], styleDim.Render("… (scroll the tail for the full transcript)"))
+		}
+	}
+	return out
+}
+
 // renderTail writes a scrollable window over the rendered transcript tail.
 func (m model) renderTail(b *strings.Builder, page int) {
 	if len(m.tailLines) == 0 {
@@ -766,7 +790,7 @@ func (m model) renderTail(b *strings.Builder, page int) {
 
 func (m *model) buildTailLines() {
 	m.tailWidth = m.width
-	width := max(min(m.width-4, 110), 40)
+	width := max(min(m.width-2, 110), 40) - 4 // box border + padding
 	style := styles.DarkStyleConfig
 	margin := uint(0)
 	style.Document.Margin = &margin
@@ -784,7 +808,7 @@ func (m *model) buildTailLines() {
 			continue
 		}
 		if msg.Role == "user" {
-			wrapped := wrapText(msg.Text, width-2, 200)
+			wrapped := wrapPreserve(msg.Text, width-2, 400)
 			for i, line := range wrapped {
 				if i == 0 {
 					lines = append(lines, styleActive.Render("❯ ")+line)
