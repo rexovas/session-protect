@@ -407,7 +407,11 @@ func LoadDetail(session Session) Detail {
 			detail.Tokens.Output += usage.OutputTokens
 			detail.Tokens.CacheRead += usage.CacheReadInputTokens
 			detail.Tokens.CacheWrite += usage.CacheCreationInputTokens
-			if event.Message.Model != "" {
+			// Harness-generated lines (model "<synthetic>") carry no usage
+			// and are not real models — only register models that billed.
+			hasUsage := usage.InputTokens+usage.OutputTokens+
+				usage.CacheReadInputTokens+usage.CacheCreationInputTokens > 0
+			if event.Message.Model != "" && hasUsage {
 				perModel := detail.PerModel[event.Message.Model]
 				perModel.Input += usage.InputTokens
 				perModel.Output += usage.OutputTokens
