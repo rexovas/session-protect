@@ -624,7 +624,7 @@ func (m model) tabBar() string {
 // session lives relative to the current root.
 func (m model) allSessionRow(session Session, active bool) string {
 	state, style := sessionState(session.State)
-	gold := session.State == "ACTIVE" && !active
+	gold := session.LiveStatus != "" && !active
 	plain := active || gold
 	live := " "
 	if session.LiveStatus != "" {
@@ -1010,9 +1010,9 @@ func styleUnless(active bool, style lipgloss.Style, text string) string {
 }
 
 func (m model) folderRow(folder Folder, active bool) string {
-	// A folder holding actively-working sessions renders whole-row gold;
-	// the cursor highlight still wins when selected.
-	gold := folder.Active > 0 && !active
+	// A folder holding open sessions renders whole-row gold; the cursor
+	// highlight still wins when selected.
+	gold := folder.Open > 0 && !active
 	plain := active || gold
 	glyph, glyphStyle := activityGlyph(folder.Latest)
 	if folder.Open > 0 {
@@ -1058,9 +1058,9 @@ func (m model) folderRow(folder Folder, active bool) string {
 
 func (m model) sessionRow(session Session, active bool) string {
 	state, style := sessionState(session.State)
-	// Active sessions render the entire row in gold so live work stands
+	// Open sessions render the entire row in gold so live work stands
 	// out; the cursor highlight still takes precedence when selected.
-	gold := session.State == "ACTIVE" && !active
+	gold := session.LiveStatus != "" && !active
 	plain := active || gold
 	live := " "
 	if session.LiveStatus != "" {
