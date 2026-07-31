@@ -276,7 +276,7 @@ func (m *model) setCursor(position int) {
 	}
 }
 
-func (m model) pageSize() int { return max(4, m.height-7) }
+func (m model) pageSize() int { return max(4, m.height-6) }
 
 func clampOffset(offset int, cursor int, page int) int {
 	if cursor < offset {
@@ -309,9 +309,17 @@ func (m model) View() string {
 	if idx := strings.LastIndex(m.root, string(os.PathSeparator)); idx >= 0 && len(m.root) > idx+1 {
 		name = m.root[idx+1:]
 	}
-	b.WriteString(styleHeader.Render("▸ "+truncate(name, 40)) +
-		styleDim.Render(fmt.Sprintf("  %d sessions beneath", total)) + "\n")
-	b.WriteString(m.tabBar(total) + "\n")
+	beneath := fmt.Sprintf("  %d sessions beneath ", total)
+	countStyle := styleDim
+	if m.showAll {
+		countStyle = styleCursor // the all pane is exactly this set
+	}
+	left := styleHeader.Render("▸ "+truncate(name, 40)) + countStyle.Render(beneath)
+	right := m.tabBar()
+	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
+		left += strings.Repeat(" ", pad)
+	}
+	b.WriteString(left + right + "\n")
 
 	cursor := m.currentCursor()
 	switch {
@@ -341,24 +349,31 @@ func (m model) View() string {
 		b.WriteString(styleDim.Render("  nothing here") + "\n")
 	}
 
-	help := "↑/↓ move · enter open · ← up · tab sessions · ^a all · q quit"
+	help := "↑/↓ move · enter open · ← up · tab sessions · ctrl+a all · q quit"
 	if m.showSessions || m.showAll {
-		help = "↑/↓ move · i info · ← folders · tab folders · ^a all · q quit"
+		help = "↑/↓ move · i info · ← folders · tab folders · ctrl+a all · q quit"
 	}
-	b.WriteString(m.statusBar(help))
-	return b.String()
+	return m.pinBottom(b.String(), help)
 }
 
-// statusBar pins the full current path bottom-left, with key help on the
-// line beneath it.
-func (m model) statusBar(help string) string {
-	return styleFooter.Render(strings.Repeat("─", min(m.width, 120))) + "\n" +
-		styleDim.Render(" "+truncate(m.root, m.width-2)) + "\n" +
-		styleFooter.Render(" "+help)
+// pinBottom pads the content so the separator, key help, and — on the very
+// last line of the window — the current path are anchored to the bottom.
+func (m model) pinBottom(content string, help string) string {
+	footer := []string{
+		styleFooter.Render(strings.Repeat("─", min(m.width, 120))),
+		styleFooter.Render(" " + help),
+		styleDim.Render(" " + truncate(m.root, m.width-2)),
+	}
+	used := strings.Count(content, "\n")
+	if pad := m.height - used - len(footer); pad > 0 {
+		content += strings.Repeat("\n", pad)
+	}
+	return content + strings.Join(footer, "\n")
 }
 
-// tabBar renders the pane switcher; the active pane is highlighted.
-func (m model) tabBar(total int) string {
+// tabBar renders the pane switcher; the active pane is highlighted. The all
+// pane has no segment — the "sessions beneath" count highlights instead.
+func (m model) tabBar() string {
 	segment := func(label string, active bool) string {
 		if active {
 			return styleCursor.Render(label)
@@ -366,8 +381,7 @@ func (m model) tabBar(total int) string {
 		return styleDim.Render(label)
 	}
 	return segment(fmt.Sprintf(" Folders %d ", len(m.folders)), !m.showSessions && !m.showAll) +
-		segment(fmt.Sprintf(" Sessions %d ", m.sessionCount()), m.showSessions && !m.showAll) +
-		segment(fmt.Sprintf(" All %d ", total), m.showAll)
+		segment(fmt.Sprintf(" Sessions %d ", m.sessionCount()), m.showSessions && !m.showAll)
 }
 
 // allSessionRow is a session row whose trailing column shows where the
@@ -480,8 +494,7 @@ func (m model) detailView() string {
 		b.WriteString(box.Render(strings.Join(tail, "\n")) + "\n")
 	}
 
-	b.WriteString("\n" + m.footer("i/esc close · ctrl+c quit"))
-	return b.String()
+	return m.pinBottom(b.String(), "i/esc close · ctrl+c quit")
 }
 
 // tildePath abbreviates the home directory for display.
@@ -605,10 +618,6 @@ func sessionTitle(session Session, width int) string {
 	default:
 		return styleDim.Render(fmt.Sprintf("%-*s", width, "(not set)"))
 	}
-}
-
-func (m model) footer(help string) string {
-	return styleFooter.Render(strings.Repeat("─", min(m.width, 120))) + "\n" + styleFooter.Render(" "+help)
 }
 
 func sessionState(state string) (string, lipgloss.Style) {
