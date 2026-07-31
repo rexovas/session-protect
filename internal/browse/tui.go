@@ -496,7 +496,7 @@ func (m model) View() string {
 		}
 	default:
 		b.WriteString(styleDim.Render(fmt.Sprintf("   %-*s  %8s  %8s  %-9s%s",
-			m.nameWidth(), "FOLDER", "SESSIONS", "SIZE", "LAST USED", " BACKUP")) + "\n")
+			m.nameWidth(), "FOLDER", "SESSIONS", "SIZE", "LAST USED", " HEALTH")) + "\n")
 		end := min(len(m.folders), m.fOffset+m.pageSize())
 		for i := m.fOffset; i < end; i++ {
 			b.WriteString(m.folderRow(m.folders[i], i == cursor) + "\n")
