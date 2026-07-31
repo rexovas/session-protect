@@ -23,6 +23,7 @@ type Session struct {
 	Title          string // first prompt of the session, from agent history
 	CustomName     string // user-assigned name, from custom-title events
 	LiveStatus     string // non-empty when open in a running agent process
+	ProjectPath    string // set on aggregated (AllUnder) sessions for display
 	State          string // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE
 	Modified       time.Time
 	BackupModified time.Time
@@ -405,6 +406,29 @@ func aggregate(folder *Folder, project *Project) {
 	folder.Stale += project.Stale
 	folder.Unbacked += project.Unbacked
 	folder.RecoverOnly += project.RecoverOnly
+}
+
+// AllUnder returns every session at or beneath root, newest first, paired
+// with its project path for display.
+func AllUnder(projects []*Project, root string) []Session {
+	var all []Session
+	for _, project := range projects {
+		if !filepath.IsAbs(project.Path) {
+			continue
+		}
+		if project.Path != root {
+			rel, err := filepath.Rel(root, project.Path)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+		}
+		for _, session := range project.Sessions {
+			session.ProjectPath = project.Path
+			all = append(all, session)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return newest(all[i]).After(newest(all[j])) })
+	return all
 }
 
 // ProjectAt returns the project whose sessions live exactly at root.
