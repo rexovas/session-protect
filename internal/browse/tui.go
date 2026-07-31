@@ -481,14 +481,14 @@ func (m model) View() string {
 	cursor := m.currentCursor()
 	switch {
 	case m.showAll:
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-*s %-7s %-12s %8s  %-8s %s",
+		b.WriteString(styleDim.Render(fmt.Sprintf(" %-11s  %-*s %-7s %-12s %8s  %-8s %s",
 			"STATE", m.titleWidth(), "TITLE", "AGENT", "MODEL", "SIZE", "MODIFIED", "IN")) + "\n")
 		end := min(len(m.allSessions), m.aOffset+m.pageSize())
 		for i := m.aOffset; i < end; i++ {
 			b.WriteString(m.allSessionRow(m.allSessions[i], i == cursor) + "\n")
 		}
 	case m.showSessions:
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-*s %-7s %-12s %8s  %s",
+		b.WriteString(styleDim.Render(fmt.Sprintf(" %-11s  %-*s %-7s %-12s %8s  %s",
 			"STATE", m.titleWidth(), "TITLE", "AGENT", "MODEL", "SIZE", "MODIFIED")) + "\n")
 		end := min(m.sessionCount(), m.sOffset+m.pageSize())
 		for i := m.sOffset; i < end; i++ {
