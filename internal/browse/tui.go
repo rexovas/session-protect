@@ -973,28 +973,17 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 		first = session.Title
 	}
 	if first != "" {
+		// Same highlighted bar the transcript tab uses for user input.
+		var lines []string
+		for i, line := range wrapPreserve(first, inner-4, 6) {
+			prefix := "  "
+			if i == 0 {
+				prefix = "❯ "
+			}
+			lines = append(lines, styleUserMsg.Render(fmt.Sprintf(" %s%-*s ", prefix, inner-4, line)))
+		}
 		b.WriteString("\n" + styleDim.Render(" initial prompt") + "\n")
-		b.WriteString(detailBox(width).Render(strings.Join(wrapPreserve(first, inner, 6), "\n")) + "\n")
-	}
-
-	if data.LastPrompt != "" || data.LastResponse != "" {
-		var exchange []string
-		if data.LastPrompt != "" {
-			prompt := wrapPreserve(data.LastPrompt, inner-2, 4)
-			exchange = append(exchange, styleActive.Render("❯ ")+prompt[0])
-			for _, line := range prompt[1:] {
-				exchange = append(exchange, "  "+line)
-			}
-		}
-		if data.LastResponse != "" {
-			if len(exchange) > 0 {
-				exchange = append(exchange, "")
-			}
-			responseCap := max(4, m.height-len(exchange)-24)
-			exchange = append(exchange, wrapPreserve(data.LastResponse, inner, responseCap)...)
-		}
-		b.WriteString("\n" + styleDim.Render(" last exchange") + "\n")
-		b.WriteString(detailBox(width).Render(strings.Join(exchange, "\n")) + "\n")
+		b.WriteString(detailBox(width).Render(strings.Join(lines, "\n")) + "\n")
 	}
 }
 
