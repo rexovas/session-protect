@@ -402,6 +402,9 @@ func LoadDetail(session Session) Detail {
 				detail.LastResponse = text
 				appendMsg("assistant", text)
 			}
+			for _, name := range toolUses(event.Message.Content) {
+				appendMsg("tool", name)
+			}
 			usage := event.Message.Usage
 			detail.Tokens.Input += usage.InputTokens
 			detail.Tokens.Output += usage.OutputTokens
@@ -469,6 +472,25 @@ func contentText(raw json.RawMessage) string {
 		}
 	}
 	return cleanText(strings.Join(parts, " "))
+}
+
+// toolUses lists tool names invoked in a message's content blocks, for the
+// "Ran <tool>" lines in the tail view.
+func toolUses(raw json.RawMessage) []string {
+	var blocks []struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return nil
+	}
+	var names []string
+	for _, block := range blocks {
+		if block.Type == "tool_use" && block.Name != "" {
+			names = append(names, block.Name)
+		}
+	}
+	return names
 }
 
 func cleanText(s string) string {

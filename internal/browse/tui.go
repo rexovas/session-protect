@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rexovas/session-protect/internal/config"
@@ -147,7 +148,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		if m.detail != nil && m.detailTab == 2 {
+		if m.detail != nil {
 			m.buildTailLines()
 		}
 		return m, nil
@@ -165,8 +166,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case tea.MouseMsg:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if m.detail != nil {
+				m.scrollTail(3)
+			} else if !m.showStats {
+				m.setCursor(m.currentCursor() - 3)
+			}
+		case tea.MouseButtonWheelDown:
+			if m.detail != nil {
+				m.scrollTail(-3)
+			} else if !m.showStats {
+				m.setCursor(m.currentCursor() + 3)
+			}
+		}
+		return m, nil
 	}
 	return m, nil
+}
+
+// scrollTail moves the tail viewport; positive is toward earlier lines.
+func (m *model) scrollTail(delta int) {
+	if m.detailTab != 0 {
+		return
+	}
+	m.tailOffset = max(0, min(m.tailOffset+delta, max(0, len(m.tailLines)-3)))
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -178,30 +203,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detail = nil
 			m.detailTab, m.tailOffset = 0, 0
 			m.tailLines = nil
-		case "tab", "right", "l":
-			m.detailTab = (m.detailTab + 1) % 3
-			m.tailOffset = 0
-			m.ensureTailLines()
-		case "left", "h":
-			m.detailTab = (m.detailTab + 2) % 3
-			m.tailOffset = 0
-			m.ensureTailLines()
+		case "tab", "right", "l", "left", "h":
+			m.detailTab = (m.detailTab + 1) % 2
 		case "up", "k":
-			if m.detailTab == 2 {
-				m.tailOffset = min(m.tailOffset+1, max(0, len(m.tailLines)-m.tailPage()))
-			}
+			m.scrollTail(1)
 		case "down", "j":
-			if m.detailTab == 2 {
-				m.tailOffset = max(0, m.tailOffset-1)
-			}
+			m.scrollTail(-1)
 		case "pgup":
-			if m.detailTab == 2 {
-				m.tailOffset = min(m.tailOffset+m.tailPage(), max(0, len(m.tailLines)-m.tailPage()))
-			}
+			m.scrollTail(10)
 		case "pgdown":
-			if m.detailTab == 2 {
-				m.tailOffset = max(0, m.tailOffset-m.tailPage())
-			}
+			m.scrollTail(-10)
 		}
 		return m, nil
 	}
@@ -225,6 +236,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session := m.selectedSession(); session != nil {
 			m.detail = session
 			m.detailData = LoadDetail(*session)
+			m.buildTailLines()
 		}
 	case "r":
 		m.scanning = true
@@ -239,6 +251,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.setCursor(m.currentCursor())
 	case "ctrl+a":
+		if len(m.folders) == 0 {
+			break // sessions here ARE all nested sessions; nothing to add
+		}
 		m.showAll = !m.showAll
 		if m.showAll {
 			m.allSessions = AllUnder(m.projects, m.root)
@@ -600,7 +615,7 @@ func (m model) detailView() string {
 		return styleDim.Render(" " + label + " ")
 	}
 	left := styleHeader.Render("▸ " + name)
-	right := tab("Overview", 0) + tab("Usage", 1) + tab("Tail", 2)
+	right := tab("Overview", 0) + tab("Usage", 1)
 	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
 		left += strings.Repeat(" ", pad)
 	}
@@ -609,20 +624,17 @@ func (m model) detailView() string {
 	b.WriteString(left + right + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
 
-	switch m.detailTab {
-	case 1:
+	if m.detailTab == 1 {
 		m.usageTab(&b)
-	case 2:
-		m.tailTab(&b)
-	default:
-		m.overviewTab(&b, session)
+		return m.pinBottom(b.String(), "tab switch · i/esc close · ctrl+c quit")
 	}
 
-	help := "tab switch · i/esc close · ctrl+c quit"
-	if m.detailTab == 2 {
-		help = "↑/↓ scroll · tab switch · i/esc close · ctrl+c quit"
-	}
-	return m.pinBottom(b.String(), help)
+	m.overviewTab(&b, session)
+	used := strings.Count(b.String(), "\n")
+	avail := max(3, m.height-used-5)
+	b.WriteString("\n" + styleDim.Render(" SESSION TAIL") + "\n")
+	m.renderTail(&b, avail)
+	return m.pinBottom(b.String(), "↑/↓/wheel scroll tail · tab usage · i/esc close")
 }
 
 func (m model) overviewTab(b *strings.Builder, session Session) {
@@ -688,7 +700,7 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 			Padding(0, 1).
 			Width(width - 2)
 		b.WriteString("\n" + styleDim.Render(" SESSION START") + "\n")
-		b.WriteString(box.Render(strings.Join(wrapText(first, inner, 8), "\n")) + "\n")
+		b.WriteString(box.Render(strings.Join(wrapText(first, inner, 3), "\n")) + "\n")
 	}
 }
 
@@ -736,43 +748,41 @@ func (m model) usageTab(b *strings.Builder) {
 	}
 }
 
-// tailTab renders the transcript tail like the agent itself would: markdown
-// for assistant messages, prompt-prefixed plain text for the user's.
-func (m model) tailTab(b *strings.Builder) {
+// renderTail writes a scrollable window over the rendered transcript tail.
+func (m model) renderTail(b *strings.Builder, page int) {
 	if len(m.tailLines) == 0 {
 		b.WriteString(styleDim.Render("  no messages extracted") + "\n")
 		return
 	}
-	page := m.tailPage()
 	start := max(0, len(m.tailLines)-page-m.tailOffset)
 	end := min(len(m.tailLines), start+page)
-	if m.tailOffset > 0 {
-		b.WriteString(styleDim.Render(fmt.Sprintf("  ↑ %d earlier lines", start)) + "\n")
+	if start > 0 {
+		b.WriteString(styleDim.Render(fmt.Sprintf(" ↑ %d earlier lines", start)) + "\n")
 	}
 	for _, line := range m.tailLines[start:end] {
 		b.WriteString(line + "\n")
 	}
 }
 
-func (m model) tailPage() int { return max(4, m.height-6) }
-
-// ensureTailLines builds the rendered tail when the tab is entered.
-func (m *model) ensureTailLines() {
-	if m.detailTab == 2 && (len(m.tailLines) == 0 || m.tailWidth != m.width) {
-		m.buildTailLines()
-	}
-}
-
 func (m *model) buildTailLines() {
 	m.tailWidth = m.width
 	width := max(min(m.width-4, 110), 40)
+	style := styles.DarkStyleConfig
+	margin := uint(0)
+	style.Document.Margin = &margin
+	style.Document.BlockPrefix = ""
+	style.Document.BlockSuffix = ""
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
+		glamour.WithStyles(style),
 		glamour.WithWordWrap(width),
 	)
 
 	var lines []string
 	for _, msg := range m.detailData.Transcript {
+		if msg.Role == "tool" {
+			lines = append(lines, styleDim.Render("  ⏺ "+msg.Text))
+			continue
+		}
 		if msg.Role == "user" {
 			wrapped := wrapText(msg.Text, width-2, 200)
 			for i, line := range wrapped {
