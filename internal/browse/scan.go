@@ -63,10 +63,17 @@ func Scan(cfg config.Config) []*Project {
 	projects := make([]*Project, 0, len(byPath))
 	for _, project := range byPath {
 		for i := range project.Sessions {
-			project.Sessions[i].Title = titles[project.Sessions[i].ID]
-			if info, ok := open[project.Sessions[i].ID]; ok {
-				project.Sessions[i].LiveStatus = info.Status
+			session := &project.Sessions[i]
+			session.Title = titles[session.ID]
+			if info, ok := open[session.ID]; ok {
+				session.LiveStatus = info.Status
 				project.Open++
+			}
+			// An open session is expected to run ahead of its mirror
+			// between turn-end syncs; that is activity, not staleness.
+			if session.State == "STALE_BACKUP" && session.LiveStatus != "" &&
+				session.Modified.Sub(session.BackupModified) < 2*time.Hour {
+				session.State = "ACTIVE"
 			}
 		}
 		sort.Slice(project.Sessions, func(i, j int) bool {
@@ -78,7 +85,7 @@ func Scan(cfg config.Config) []*Project {
 			}
 			project.SizeBytes += session.Size
 			switch session.State {
-			case "OK":
+			case "OK", "ACTIVE": // active counts as protected; ▶ already shows it
 				project.OK++
 			case "STALE_BACKUP":
 				project.Stale++

@@ -18,6 +18,7 @@ var (
 	styleDim      = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#999999", Dark: "#666666"})
 	styleCursor   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#111111", Dark: "#FFFFFF"}).Background(lipgloss.AdaptiveColor{Light: "#E8E8FF", Dark: "#333355"})
 	styleOK       = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#0A8754", Dark: "#3DDC97"})
+	styleActive   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#1D7EA8", Dark: "#7DD3FC"})
 	styleStale    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#B8860B", Dark: "#F5C518"})
 	styleUnbacked = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#C0392B", Dark: "#FF6B6B"})
 	styleRecover  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#8E44AD", Dark: "#C39BD3"})
@@ -663,6 +664,8 @@ func sessionState(state string) (string, lipgloss.Style) {
 	switch state {
 	case "OK":
 		return "● ok       ", styleOK
+	case "ACTIVE":
+		return "● active   ", styleActive
 	case "STALE_BACKUP":
 		return "~ stale    ", styleStale
 	case "MISSING_BACKUP":
