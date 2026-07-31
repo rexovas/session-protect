@@ -117,7 +117,7 @@ func TestApplyNamesCache(t *testing.T) {
 	if projects[0].Sessions[0].CustomName != "named-one" {
 		t.Fatalf("name not applied: %+v", projects[0].Sessions[0])
 	}
-	if _, err := os.Stat(filepath.Join(cfg.BackupRoot, ".session-names.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(cfg.BackupRoot, ".session-meta.json")); err != nil {
 		t.Fatalf("cache not written: %v", err)
 	}
 

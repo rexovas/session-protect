@@ -418,11 +418,23 @@ func (m model) nameWidth() int { return max(24, m.width-46) }
 // titleWidth is the flexible session-title column; the all pane reserves
 // room for the IN column.
 func (m model) titleWidth() int {
-	width := m.width - 41
+	width := m.width - 54 // state, agent, model, size, modified columns
 	if m.showAll {
 		width -= 31
 	}
 	return max(24, width)
+}
+
+// displayModel compacts a model id for column display.
+func displayModel(model string) string {
+	if model == "" {
+		return "-"
+	}
+	model = strings.TrimPrefix(model, "claude-")
+	if idx := strings.LastIndex(model, "-20"); idx > 0 && len(model)-idx >= 9 {
+		model = model[:idx]
+	}
+	return model
 }
 
 func clampOffset(offset int, cursor int, page int) int {
@@ -469,15 +481,15 @@ func (m model) View() string {
 	cursor := m.currentCursor()
 	switch {
 	case m.showAll:
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-*s %-7s %8s  %-8s %s",
-			"STATE", m.titleWidth(), "TITLE", "AGENT", "SIZE", "MODIFIED", "IN")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-*s %-7s %-12s %8s  %-8s %s",
+			"STATE", m.titleWidth(), "TITLE", "AGENT", "MODEL", "SIZE", "MODIFIED", "IN")) + "\n")
 		end := min(len(m.allSessions), m.aOffset+m.pageSize())
 		for i := m.aOffset; i < end; i++ {
 			b.WriteString(m.allSessionRow(m.allSessions[i], i == cursor) + "\n")
 		}
 	case m.showSessions:
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-*s %-7s %8s  %s",
-			"STATE", m.titleWidth(), "TITLE", "AGENT", "SIZE", "MODIFIED")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-*s %-7s %-12s %8s  %s",
+			"STATE", m.titleWidth(), "TITLE", "AGENT", "MODEL", "SIZE", "MODIFIED")) + "\n")
 		end := min(m.sessionCount(), m.sOffset+m.pageSize())
 		for i := m.sOffset; i < end; i++ {
 			b.WriteString(m.sessionRow(m.visible[i], i == cursor) + "\n")
@@ -616,9 +628,10 @@ func (m model) allSessionRow(session Session, active bool) string {
 	if session.LiveStatus != "" {
 		live = styleUnless(active, styleOK, "▶")
 	}
-	row := fmt.Sprintf("%s%s  %s %-7s %8s  %-8s %s",
+	row := fmt.Sprintf("%s%s  %s %-7s %-12s %8s  %-8s %s",
 		live, styleUnless(active, style, state), sessionTitle(session, m.titleWidth(), active), session.Target,
-		formatBytes(session.Size), ago(session.Modified), styleUnless(active, styleDim, truncate(m.relOfRoot(session), 30)))
+		truncate(displayModel(session.LastModel), 12), formatBytes(session.Size), ago(session.Modified),
+		styleUnless(active, styleDim, truncate(m.relOfRoot(session), 30)))
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}
@@ -703,6 +716,17 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 			messages += styleDim.Render("  ·  " + strings.Join(data.Models, ", "))
 		}
 		kv("messages", messages)
+	}
+	if data.Compactions > 0 {
+		note := fmt.Sprintf("%d", data.Compactions)
+		if data.LastCompact != "" {
+			extra := data.LastCompact
+			if data.LastCompactPre > 0 {
+				extra += " @ " + humanTokens(data.LastCompactPre) + " tokens"
+			}
+			note += styleDim.Render("  ·  last " + extra)
+		}
+		kv("compactions", note)
 	}
 	kvPath := func(key string, path string) {
 		if path == "" {
@@ -847,6 +871,21 @@ func (m *model) buildTailLines() {
 
 	var lines []string
 	for _, msg := range m.detailData.Transcript {
+		if msg.Role == "compact" {
+			lines = append(lines, "", styleDim.Render("── conversation compacted ("+msg.Text+") ──"), "")
+			continue
+		}
+		if msg.Role == "summary" {
+			for i, line := range wrapPreserve(msg.Text, width-2, 12) {
+				prefix := "  "
+				if i == 0 {
+					prefix = styleDim.Render("⧉ ")
+				}
+				lines = append(lines, prefix+styleDim.Render(line))
+			}
+			lines = append(lines, "")
+			continue
+		}
 		if msg.Role == "result" {
 			lines = append(lines, styleDim.Render("    ⎿ "+truncate(msg.Text, max(20, width-8))))
 			continue
@@ -1010,9 +1049,9 @@ func (m model) sessionRow(session Session, active bool) string {
 	if session.State == "LOST" {
 		size = fmt.Sprintf("%dp", session.Prompts)
 	}
-	row := fmt.Sprintf("%s%s  %s %-7s %8s  %s",
+	row := fmt.Sprintf("%s%s  %s %-7s %-12s %8s  %s",
 		live, styleUnless(active, style, state), sessionTitle(session, m.titleWidth(), active), session.Target,
-		size, ago(session.Modified))
+		truncate(displayModel(session.LastModel), 12), size, ago(session.Modified))
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}

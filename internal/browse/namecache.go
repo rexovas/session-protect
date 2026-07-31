@@ -9,8 +9,9 @@ import (
 )
 
 type nameEntry struct {
-	Name string `json:"name"`
-	Mod  int64  `json:"mod"` // session file mtime when the name was read
+	Name  string `json:"name"`
+	Model string `json:"model"`
+	Mod   int64  `json:"mod"` // session file mtime when the entry was read
 }
 
 // ScanNamed is Scan plus custom names for every session, backed by an
@@ -22,7 +23,7 @@ func ScanNamed(cfg config.Config) []*Project {
 }
 
 func applyNames(cfg config.Config, projects []*Project) {
-	path := filepath.Join(cfg.BackupRoot, ".session-names.json")
+	path := filepath.Join(cfg.BackupRoot, ".session-meta.json")
 	cache := map[string]nameEntry{}
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &cache)
@@ -42,10 +43,13 @@ func applyNames(cfg config.Config, projects []*Project) {
 			mod := newest(*session).Unix()
 			if entry, ok := cache[session.ID]; ok && entry.Mod == mod {
 				session.CustomName = entry.Name
+				session.LastModel = entry.Model
 				continue
 			}
-			session.CustomName = customTitle(file)
-			cache[session.ID] = nameEntry{Name: session.CustomName, Mod: mod}
+			name, model := scanFileMeta(file)
+			session.CustomName = name
+			session.LastModel = model
+			cache[session.ID] = nameEntry{Name: name, Model: model, Mod: mod}
 			dirty = true
 		}
 		project.NamesLoaded = true

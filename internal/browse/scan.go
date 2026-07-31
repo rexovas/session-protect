@@ -25,6 +25,7 @@ type Session struct {
 	LiveStatus     string // non-empty when open in a running agent process
 	ProjectPath    string // set on aggregated (AllUnder) sessions for display
 	Prompts        int    // for LOST sessions: prompt count from history
+	LastModel      string // most recent model seen in the transcript
 	State          string // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE | LOST
 	Modified       time.Time
 	BackupModified time.Time
@@ -347,14 +348,17 @@ func listCodex(root string) []fileInfo {
 // Detail is on-demand deep information about one session, loaded when the
 // user inspects it.
 type Detail struct {
-	Created      time.Time
-	FirstPrompt  string
-	LastPrompt   string
-	LastResponse string
-	Tokens       TokenTotals
-	PerModel     map[string]TokenTotals
-	Messages     int
-	Models       []string
+	Created        time.Time
+	FirstPrompt    string
+	LastPrompt     string
+	LastResponse   string
+	Tokens         TokenTotals
+	PerModel       map[string]TokenTotals
+	Messages       int
+	Models         []string
+	Compactions    int
+	LastCompact    string // trigger of the most recent compaction
+	LastCompactPre int64  // context tokens at that compaction
 	// Transcript holds the most recent text messages for the tail viewer.
 	Transcript []TranscriptMsg
 }
@@ -419,12 +423,28 @@ func LoadDetail(session Session) Detail {
 			}
 		}
 		switch event.Type {
+		case "system":
+			if event.Subtype == "compact_boundary" {
+				detail.Compactions++
+				detail.LastCompact = event.CompactMetadata.Trigger
+				detail.LastCompactPre = event.CompactMetadata.PreTokens
+				marker := event.CompactMetadata.Trigger
+				if event.CompactMetadata.PreTokens > 0 {
+					marker += " · " + humanTokens(event.CompactMetadata.PreTokens) + " tokens"
+				}
+				appendMsg("compact", marker)
+			}
 		case "user":
 			detail.Messages++
 			for _, result := range toolResults(event.Message.Content) {
 				appendMsg("result", result)
 			}
 			if text := contentRaw(event.Message.Content); text != "" {
+				if event.IsCompactSummary {
+					// Machine-written continuation summary, not a human prompt.
+					appendMsg("summary", text)
+					break
+				}
 				if detail.FirstPrompt == "" {
 					detail.FirstPrompt = text
 				}
@@ -467,9 +487,15 @@ func LoadDetail(session Session) Detail {
 }
 
 type transcriptLine struct {
-	Type      string `json:"type"`
-	Timestamp string `json:"timestamp"`
-	Message   struct {
+	Type             string `json:"type"`
+	Subtype          string `json:"subtype"`
+	Timestamp        string `json:"timestamp"`
+	IsCompactSummary bool   `json:"isCompactSummary"`
+	CompactMetadata  struct {
+		Trigger   string `json:"trigger"`
+		PreTokens int64  `json:"preTokens"`
+	} `json:"compactMetadata"`
+	Message struct {
 		Role    string          `json:"role"`
 		Model   string          `json:"model"`
 		Content json.RawMessage `json:"content"`
@@ -903,33 +929,44 @@ func LoadCustomNames(project *Project) {
 	}
 }
 
-// customTitle returns the last custom-title event in the file. A cheap byte
-// pre-filter keeps this fast on large transcripts.
+// customTitle returns the last custom-title event in the file.
 func customTitle(path string) string {
+	name, _ := scanFileMeta(path)
+	return name
+}
+
+// scanFileMeta reads a session file once for its latest custom name and the
+// last model used. Cheap byte pre-filters keep this fast on large files.
+func scanFileMeta(path string) (name string, model string) {
 	file, err := os.Open(path)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer file.Close()
 
-	name := ""
-	pattern := []byte(`"custom-title"`)
+	titlePattern := []byte(`"custom-title"`)
+	modelPattern := []byte(`"model":"claude`)
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if !bytes.Contains(line, pattern) {
-			continue
+		if bytes.Contains(line, titlePattern) {
+			var event struct {
+				Type        string `json:"type"`
+				CustomTitle string `json:"customTitle"`
+			}
+			if json.Unmarshal(line, &event) == nil && event.Type == "custom-title" && event.CustomTitle != "" {
+				name = event.CustomTitle
+			}
 		}
-		var event struct {
-			Type        string `json:"type"`
-			CustomTitle string `json:"customTitle"`
-		}
-		if json.Unmarshal(line, &event) == nil && event.Type == "custom-title" && event.CustomTitle != "" {
-			name = event.CustomTitle
+		if idx := bytes.LastIndex(line, modelPattern); idx >= 0 {
+			rest := line[idx+len(`"model":"`):]
+			if end := bytes.IndexByte(rest, '"'); end > 0 {
+				model = string(rest[:end])
+			}
 		}
 	}
-	return name
+	return name, model
 }
 
 // codexMeta pulls the session id and working directory from the first lines
