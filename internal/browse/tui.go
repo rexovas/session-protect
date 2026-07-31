@@ -170,8 +170,8 @@ func (m model) projectsView() string {
 	b.WriteString(styleHeader.Render(title) + legend + "\n")
 	b.WriteString(styleDim.Render(strings.Repeat("─", min(m.width, 120))) + "\n")
 
-	b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %6s %6s  %8s  %-16s%s",
-		"PROJECT", "CLAUDE", "CODEX", "SIZE", "LAST ACTIVITY", " BACKUP")) + "\n")
+	b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %8s  %8s  %-16s%s",
+		"PROJECT", "SESSIONS", "SIZE", "LAST ACTIVITY", " BACKUP")) + "\n")
 
 	page := m.pageSize() - 1
 	end := min(len(m.projects), m.offset+page)
@@ -189,7 +189,7 @@ func (m model) projectsView() string {
 func (m model) projectRow(project *Project, active bool) string {
 	glyph, glyphStyle := activityGlyph(project.Latest)
 	name := truncate(displayName(project.Path), 38)
-	counts := countCell(project.ClaudeCount) + " " + countCell(project.CodexCount)
+	counts := fmt.Sprintf("%8d", len(project.Sessions))
 
 	health := ""
 	if project.Open > 0 {
@@ -302,16 +302,6 @@ func displayName(path string) string {
 }
 
 func shortID(id string) string { return truncate(id, 10) }
-
-// countCell renders a session count in a fixed-width cell, dimming zeros so
-// the eye lands on projects that actually have sessions for that agent.
-func countCell(count int) string {
-	cell := fmt.Sprintf("%6d", count)
-	if count == 0 {
-		return styleDim.Render(cell)
-	}
-	return cell
-}
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
