@@ -1025,24 +1025,27 @@ func (m model) folderRow(folder Folder, active bool) string {
 		name = truncate(folder.Name, m.nameWidth())
 	}
 
+	// Severity badges keep their own colors even inside gold rows — a
+	// lost or unbacked count must never read as "live". Only the cursor
+	// highlight flattens them.
 	health := ""
 	if folder.Open > 0 {
-		health += styleUnless(plain, styleActive, fmt.Sprintf(" ▶%d", folder.Open))
+		health += styleUnless(active, styleActive, fmt.Sprintf(" ▶%d", folder.Open))
 	}
 	if folder.Stale > 0 {
-		health += styleUnless(plain, styleStale, fmt.Sprintf(" ~%d", folder.Stale))
+		health += styleUnless(active, styleStale, fmt.Sprintf(" ~%d", folder.Stale))
 	}
 	if folder.Unbacked > 0 {
-		health += styleUnless(plain, styleUnbacked, fmt.Sprintf(" !%d", folder.Unbacked))
+		health += styleUnless(active, styleUnbacked, fmt.Sprintf(" !%d", folder.Unbacked))
 	}
 	if folder.RecoverOnly > 0 {
-		health += styleUnless(plain, styleRecover, fmt.Sprintf(" ✝%d", folder.RecoverOnly))
+		health += styleUnless(active, styleRecover, fmt.Sprintf(" ✝%d", folder.RecoverOnly))
 	}
 	if folder.Lost > 0 {
-		health += styleUnless(plain, styleDim, fmt.Sprintf(" ✕%d", folder.Lost))
+		health += styleUnless(active, styleDim, fmt.Sprintf(" ✕%d", folder.Lost))
 	}
 	if health == "" {
-		health = styleUnless(plain, styleOK, " ok")
+		health = styleUnless(active, styleOK, " ok")
 	}
 
 	row := fmt.Sprintf(" %s %-*s  %8d  %8s  %-9s%s",
