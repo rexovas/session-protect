@@ -277,7 +277,7 @@ func (m *model) setCursor(position int) {
 	}
 }
 
-func (m model) pageSize() int { return max(4, m.height-7) }
+func (m model) pageSize() int { return max(4, m.height-6) }
 
 // shortCommit is the installed build's revision, shown faintly for
 // dogfooding traceability.
@@ -322,12 +322,6 @@ func (m model) View() string {
 	}
 	var b strings.Builder
 
-	title := styleHeader.Render("Session Explorer")
-	if commit := shortCommit(); commit != "" {
-		title += styleDim.Render("  " + commit)
-	}
-	b.WriteString(title + "\n")
-
 	total := 0
 	for _, folder := range m.folders {
 		total += folder.Sessions
@@ -342,7 +336,7 @@ func (m model) View() string {
 	if m.showAll {
 		countStyle = styleCursor // the all pane is exactly this set
 	}
-	left := styleHeader.Render("▸ "+truncate(name, 40)) + countStyle.Render(beneath)
+	left := styleHeader.Render("Session Explorer ▸ "+truncate(name, 40)) + countStyle.Render(beneath)
 	right := m.tabBar()
 	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
 		left += strings.Repeat(" ", pad)
@@ -396,10 +390,18 @@ func (m model) pinBottom(content string, help string) string {
 	if pad := m.width - lipgloss.Width(pathLine) - lipgloss.Width(legend); pad > 0 {
 		pathLine += strings.Repeat(" ", pad)
 	}
+	helpLine := styleFooter.Render(" " + help)
+	if commit := shortCommit(); commit != "" {
+		revision := styleDim.Render("revision: " + commit + " ")
+		if pad := m.width - lipgloss.Width(helpLine) - lipgloss.Width(revision); pad > 0 {
+			helpLine += strings.Repeat(" ", pad)
+		}
+		helpLine += revision
+	}
 	footer := []string{
 		pathLine + legend,
 		styleFooter.Render(strings.Repeat("─", max(m.width, 10))),
-		styleFooter.Render(" " + help),
+		helpLine,
 	}
 	used := strings.Count(content, "\n")
 	if pad := m.height - used - len(footer); pad > 0 {
