@@ -51,11 +51,23 @@ type model struct {
 	aCursor      int
 	aOffset      int
 
+	scanning bool // a background rescan is in flight
+
 	width  int
 	height int
 }
 
 type rescanMsg []*Project
+
+type tickMsg time.Time
+
+// refreshEvery is the live-update cadence; rescans run asynchronously so
+// the UI never blocks on them.
+const refreshEvery = 5 * time.Second
+
+func tick() tea.Cmd {
+	return tea.Tick(refreshEvery, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
 
 func newModel(cfg config.Config) model {
 	projects := Scan(cfg)
@@ -117,14 +129,22 @@ func (m model) currentCursor() int {
 	}
 }
 
-func (m model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd { return tick() }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
+	case tickMsg:
+		if m.scanning {
+			return m, tick()
+		}
+		m.scanning = true
+		cfg := m.cfg
+		return m, tea.Batch(tick(), func() tea.Msg { return rescanMsg(Scan(cfg)) })
 	case rescanMsg:
+		m.scanning = false
 		m.projects = msg
 		m.rebuild()
 		return m, nil
@@ -154,6 +174,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detailData = LoadDetail(*session)
 		}
 	case "r":
+		m.scanning = true
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(Scan(cfg)) }
 	case "tab":
