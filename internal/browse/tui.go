@@ -794,6 +794,20 @@ func humanTokens(n int64) string {
 	}
 }
 
+// pinBottomBare pads the content so a separator and the key help hug the
+// window bottom — no path or legend, for views that are not file lists.
+func (m model) pinBottomBare(content string, help string) string {
+	footer := []string{
+		styleFooter.Render(strings.Repeat("─", max(m.width, 10))),
+		styleFooter.Render(" " + help),
+	}
+	used := strings.Count(content, "\n")
+	if pad := m.height - used - len(footer); pad > 0 {
+		content += strings.Repeat("\n", pad)
+	}
+	return content + strings.Join(footer, "\n")
+}
+
 // pinBottom pads the content so the footer block hugs the window bottom:
 // path (left) with the activity legend (right), a separator, then key help
 // on the very last line.
@@ -892,13 +906,13 @@ func (m model) detailView() string {
 	switch m.detailTab {
 	case 1:
 		m.usageTab(&b)
-		return m.pinBottom(b.String(), "tab switch · i/esc close · ctrl+c quit")
+		return m.pinBottomBare(b.String(), "tab switch · i/esc close · ctrl+c quit")
 	case 2:
 		m.renderTail(&b, max(4, m.height-6))
-		return m.pinBottom(b.String(), "↑/↓/wheel scroll · tab switch · i/esc close")
+		return m.pinBottomBare(b.String(), "↑/↓/wheel scroll · tab switch · i/esc close")
 	}
 	m.overviewTab(&b, session)
-	return m.pinBottom(b.String(), "tab switch · i/esc close · ctrl+c quit")
+	return m.pinBottomBare(b.String(), "tab switch · i/esc close · ctrl+c quit")
 }
 
 func (m model) overviewTab(b *strings.Builder, session Session) {
