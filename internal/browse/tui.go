@@ -25,6 +25,8 @@ var (
 	styleUnbacked = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#C0392B", Dark: "#FF6B6B"})
 	styleRecover  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#8E44AD", Dark: "#C39BD3"})
 	styleFooter   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#666666", Dark: "#999999"})
+	styleUserMsg  = lipgloss.NewStyle().Background(lipgloss.AdaptiveColor{Light: "#E8E8E8", Dark: "#262626"}).Foreground(lipgloss.AdaptiveColor{Light: "#111111", Dark: "#E6E6E6"})
+	styleBold     = lipgloss.NewStyle().Bold(true)
 )
 
 type model struct {
@@ -807,7 +809,7 @@ func (m model) renderTail(b *strings.Builder, page int) {
 
 func (m *model) buildTailLines() {
 	m.tailWidth = m.width
-	width := max(min(m.width-4, 110), 40)
+	width := max(min(m.width-6, 110), 40)
 	style := styles.DarkStyleConfig
 	margin := uint(0)
 	style.Document.Margin = &margin
@@ -821,17 +823,22 @@ func (m *model) buildTailLines() {
 	var lines []string
 	for _, msg := range m.detailData.Transcript {
 		if msg.Role == "tool" {
-			lines = append(lines, styleDim.Render("  ⏺ "+msg.Text))
+			name, detail, hasDetail := strings.Cut(msg.Text, ": ")
+			line := "  " + styleOK.Render("●") + " " + styleBold.Render(name)
+			if hasDetail {
+				line += styleDim.Render("(" + truncate(detail, width-len(name)-8) + ")")
+			}
+			lines = append(lines, line)
 			continue
 		}
 		if msg.Role == "user" {
-			wrapped := wrapPreserve(msg.Text, width-2, 400)
-			for i, line := range wrapped {
+			// Full-width highlighted bar, like the agent's own prompt echo.
+			for i, line := range wrapPreserve(msg.Text, width-4, 400) {
+				prefix := "  "
 				if i == 0 {
-					lines = append(lines, styleActive.Render("❯ ")+line)
-				} else {
-					lines = append(lines, "  "+line)
+					prefix = "❯ "
 				}
+				lines = append(lines, styleUserMsg.Render(fmt.Sprintf(" %s%-*s ", prefix, width-4, line)))
 			}
 			lines = append(lines, "")
 			continue
@@ -842,8 +849,14 @@ func (m *model) buildTailLines() {
 				rendered = out
 			}
 		}
+		first := true
 		for _, line := range strings.Split(strings.Trim(rendered, "\n"), "\n") {
-			lines = append(lines, line)
+			if first && strings.TrimSpace(line) != "" {
+				lines = append(lines, "● "+line)
+				first = false
+			} else {
+				lines = append(lines, "  "+line)
+			}
 		}
 		lines = append(lines, "")
 	}
