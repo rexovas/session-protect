@@ -451,13 +451,13 @@ func (m model) allSessionRow(session Session, active bool) string {
 	state, style := sessionState(session.State)
 	live := " "
 	if session.LiveStatus != "" {
-		live = styleOK.Render("▶")
+		live = styleUnless(active, styleOK, "▶")
 	}
 	row := fmt.Sprintf("%s%s  %s %-7s %8s  %-8s %s",
-		live, style.Render(state), sessionTitle(session, m.titleWidth()), session.Target,
-		formatBytes(session.Size), ago(session.Modified), styleDim.Render(truncate(m.relOfRoot(session), 30)))
+		live, styleUnless(active, style, state), sessionTitle(session, m.titleWidth(), active), session.Target,
+		formatBytes(session.Size), ago(session.Modified), styleUnless(active, styleDim, truncate(m.relOfRoot(session), 30)))
 	if active {
-		return styleCursor.Render(row)
+		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}
 	return row
 }
@@ -621,6 +621,15 @@ func (m model) relOfRoot(session Session) string {
 	return "."
 }
 
+// styleUnless returns text styled normally, or plain when the row is
+// selected — nested colors would break the full-row cursor highlight.
+func styleUnless(active bool, style lipgloss.Style, text string) string {
+	if active {
+		return text
+	}
+	return style.Render(text)
+}
+
 func (m model) folderRow(folder Folder, active bool) string {
 	glyph, glyphStyle := activityGlyph(folder.Latest)
 	name := truncate(folder.Name, m.nameWidth()-1) + "/"
@@ -630,25 +639,25 @@ func (m model) folderRow(folder Folder, active bool) string {
 
 	health := ""
 	if folder.Open > 0 {
-		health += styleOK.Render(fmt.Sprintf(" ▶%d", folder.Open))
+		health += styleUnless(active, styleOK, fmt.Sprintf(" ▶%d", folder.Open))
 	}
 	if folder.Stale > 0 {
-		health += styleStale.Render(fmt.Sprintf(" ~%d", folder.Stale))
+		health += styleUnless(active, styleStale, fmt.Sprintf(" ~%d", folder.Stale))
 	}
 	if folder.Unbacked > 0 {
-		health += styleUnbacked.Render(fmt.Sprintf(" !%d", folder.Unbacked))
+		health += styleUnless(active, styleUnbacked, fmt.Sprintf(" !%d", folder.Unbacked))
 	}
 	if folder.RecoverOnly > 0 {
-		health += styleRecover.Render(fmt.Sprintf(" ✝%d", folder.RecoverOnly))
+		health += styleUnless(active, styleRecover, fmt.Sprintf(" ✝%d", folder.RecoverOnly))
 	}
 	if health == "" {
-		health = styleOK.Render(" ok")
+		health = styleUnless(active, styleOK, " ok")
 	}
 
 	row := fmt.Sprintf(" %s %-*s  %8d  %8s  %-9s%s",
-		glyphStyle.Render(glyph), m.nameWidth(), name, folder.Sessions, formatBytes(folder.SizeBytes), ago(folder.Latest), health)
+		styleUnless(active, glyphStyle, glyph), m.nameWidth(), name, folder.Sessions, formatBytes(folder.SizeBytes), ago(folder.Latest), health)
 	if active {
-		return styleCursor.Render(row)
+		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}
 	return row
 }
@@ -657,27 +666,27 @@ func (m model) sessionRow(session Session, active bool) string {
 	state, style := sessionState(session.State)
 	live := " "
 	if session.LiveStatus != "" {
-		live = styleOK.Render("▶")
+		live = styleUnless(active, styleOK, "▶")
 	}
 	row := fmt.Sprintf("%s%s  %s %-7s %8s  %s",
-		live, style.Render(state), sessionTitle(session, m.titleWidth()), session.Target,
+		live, styleUnless(active, style, state), sessionTitle(session, m.titleWidth(), active), session.Target,
 		formatBytes(session.Size), ago(session.Modified))
 	if active {
-		return styleCursor.Render(row)
+		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}
 	return row
 }
 
 // sessionTitle renders the display title in a fixed-width cell: custom names
-// bright, first-prompt fallback dim.
-func sessionTitle(session Session, width int) string {
+// bright, first-prompt fallback dim, plain when the row is selected.
+func sessionTitle(session Session, width int, active bool) string {
 	switch {
 	case session.CustomName != "":
 		return fmt.Sprintf("%-*s", width, truncate(session.CustomName, width))
 	case session.Title != "":
-		return styleDim.Render(fmt.Sprintf("%-*s", width, truncate(session.Title, width)))
+		return styleUnless(active, styleDim, fmt.Sprintf("%-*s", width, truncate(session.Title, width)))
 	default:
-		return styleDim.Render(fmt.Sprintf("%-*s", width, "(not set)"))
+		return styleUnless(active, styleDim, fmt.Sprintf("%-*s", width, "(not set)"))
 	}
 }
 
