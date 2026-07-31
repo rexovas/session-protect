@@ -276,7 +276,21 @@ func (m *model) setCursor(position int) {
 	}
 }
 
-func (m model) pageSize() int { return max(4, m.height-6) }
+func (m model) pageSize() int { return max(4, m.height-7) }
+
+// nameWidth is the flexible folder-name column: everything the fixed
+// columns don't use.
+func (m model) nameWidth() int { return max(24, m.width-46) }
+
+// titleWidth is the flexible session-title column; the all pane reserves
+// room for the IN column.
+func (m model) titleWidth() int {
+	width := m.width - 41
+	if m.showAll {
+		width -= 31
+	}
+	return max(24, width)
+}
 
 func clampOffset(offset int, cursor int, page int) int {
 	if cursor < offset {
@@ -294,11 +308,12 @@ func (m model) View() string {
 	}
 	var b strings.Builder
 
-	title := "Session Explorer"
-	legend := styleDim.Render("  ") + styleOK.Render("●") + styleDim.Render(" <1h  ") +
-		styleStale.Render("●") + styleDim.Render(" today  ") + styleDim.Render("○ older  ") +
-		styleOK.Render("▶") + styleDim.Render(" open now")
-	b.WriteString(styleHeader.Render(title) + legend + "\n")
+	titleLeft := styleHeader.Render("Session Explorer")
+	titleRight := m.tabBar()
+	if pad := m.width - lipgloss.Width(titleLeft) - lipgloss.Width(titleRight); pad > 0 {
+		titleLeft += strings.Repeat(" ", pad)
+	}
+	b.WriteString(titleLeft + titleRight + "\n")
 
 	total := 0
 	for _, folder := range m.folders {
@@ -314,32 +329,28 @@ func (m model) View() string {
 	if m.showAll {
 		countStyle = styleCursor // the all pane is exactly this set
 	}
-	left := styleHeader.Render("▸ "+truncate(name, 40)) + countStyle.Render(beneath)
-	right := m.tabBar()
-	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
-		left += strings.Repeat(" ", pad)
-	}
-	b.WriteString(left + right + "\n")
+	b.WriteString(styleHeader.Render("▸ "+truncate(name, 40)) + countStyle.Render(beneath) + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
 
 	cursor := m.currentCursor()
 	switch {
 	case m.showAll:
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-50s %-7s %8s  %-8s %s",
-			"STATE", "TITLE", "AGENT", "SIZE", "MODIFIED", "IN")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-*s %-7s %8s  %-8s %s",
+			"STATE", m.titleWidth(), "TITLE", "AGENT", "SIZE", "MODIFIED", "IN")) + "\n")
 		end := min(len(m.allSessions), m.aOffset+m.pageSize())
 		for i := m.aOffset; i < end; i++ {
 			b.WriteString(m.allSessionRow(m.allSessions[i], i == cursor) + "\n")
 		}
 	case m.showSessions:
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-50s %-7s %8s  %s",
-			"STATE", "TITLE", "AGENT", "SIZE", "MODIFIED")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %-11s  %-*s %-7s %8s  %s",
+			"STATE", m.titleWidth(), "TITLE", "AGENT", "SIZE", "MODIFIED")) + "\n")
 		end := min(m.sessionCount(), m.sOffset+m.pageSize())
 		for i := m.sOffset; i < end; i++ {
 			b.WriteString(m.sessionRow(m.here.Sessions[i], i == cursor) + "\n")
 		}
 	default:
-		b.WriteString(styleDim.Render(fmt.Sprintf("   %-38s  %8s  %8s  %-9s%s",
-			"FOLDER", "SESSIONS", "SIZE", "ACTIVITY", " BACKUP")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("   %-*s  %8s  %8s  %-9s%s",
+			m.nameWidth(), "FOLDER", "SESSIONS", "SIZE", "ACTIVITY", " BACKUP")) + "\n")
 		end := min(len(m.folders), m.fOffset+m.pageSize())
 		for i := m.fOffset; i < end; i++ {
 			b.WriteString(m.folderRow(m.folders[i], i == cursor) + "\n")
@@ -356,13 +367,21 @@ func (m model) View() string {
 	return m.pinBottom(b.String(), help)
 }
 
-// pinBottom pads the content so the separator, key help, and — on the very
-// last line of the window — the current path are anchored to the bottom.
+// pinBottom pads the content so the footer block hugs the window bottom:
+// path (left) with the activity legend (right), a separator, then key help
+// on the very last line.
 func (m model) pinBottom(content string, help string) string {
+	legend := styleOK.Render("●") + styleDim.Render(" <1h  ") +
+		styleStale.Render("●") + styleDim.Render(" today  ") + styleDim.Render("○ older  ") +
+		styleOK.Render("▶") + styleDim.Render(" open now ")
+	pathLine := styleDim.Render(" " + truncate(m.root, m.width-lipgloss.Width(legend)-3))
+	if pad := m.width - lipgloss.Width(pathLine) - lipgloss.Width(legend); pad > 0 {
+		pathLine += strings.Repeat(" ", pad)
+	}
 	footer := []string{
-		styleFooter.Render(strings.Repeat("─", min(m.width, 120))),
+		pathLine + legend,
+		styleFooter.Render(strings.Repeat("─", max(m.width, 10))),
 		styleFooter.Render(" " + help),
-		styleDim.Render(" " + truncate(m.root, m.width-2)),
 	}
 	used := strings.Count(content, "\n")
 	if pad := m.height - used - len(footer); pad > 0 {
@@ -393,7 +412,7 @@ func (m model) allSessionRow(session Session, active bool) string {
 		live = styleOK.Render("▶")
 	}
 	row := fmt.Sprintf("%s%s  %s %-7s %8s  %-8s %s",
-		live, style.Render(state), sessionTitle(session, 50), session.Target,
+		live, style.Render(state), sessionTitle(session, m.titleWidth()), session.Target,
 		formatBytes(session.Size), ago(session.Modified), styleDim.Render(truncate(m.relOfRoot(session), 30)))
 	if active {
 		return styleCursor.Render(row)
@@ -562,9 +581,9 @@ func (m model) relOfRoot(session Session) string {
 
 func (m model) folderRow(folder Folder, active bool) string {
 	glyph, glyphStyle := activityGlyph(folder.Latest)
-	name := truncate(folder.Name, 37) + "/"
+	name := truncate(folder.Name, m.nameWidth()-1) + "/"
 	if folder.Pseudo {
-		name = truncate(folder.Name, 38)
+		name = truncate(folder.Name, m.nameWidth())
 	}
 
 	health := ""
@@ -584,8 +603,8 @@ func (m model) folderRow(folder Folder, active bool) string {
 		health = styleOK.Render(" ok")
 	}
 
-	row := fmt.Sprintf(" %s %-38s  %8d  %8s  %-9s%s",
-		glyphStyle.Render(glyph), name, folder.Sessions, formatBytes(folder.SizeBytes), ago(folder.Latest), health)
+	row := fmt.Sprintf(" %s %-*s  %8d  %8s  %-9s%s",
+		glyphStyle.Render(glyph), m.nameWidth(), name, folder.Sessions, formatBytes(folder.SizeBytes), ago(folder.Latest), health)
 	if active {
 		return styleCursor.Render(row)
 	}
@@ -599,7 +618,7 @@ func (m model) sessionRow(session Session, active bool) string {
 		live = styleOK.Render("▶")
 	}
 	row := fmt.Sprintf("%s%s  %s %-7s %8s  %s",
-		live, style.Render(state), sessionTitle(session, 50), session.Target,
+		live, style.Render(state), sessionTitle(session, m.titleWidth()), session.Target,
 		formatBytes(session.Size), ago(session.Modified))
 	if active {
 		return styleCursor.Render(row)
