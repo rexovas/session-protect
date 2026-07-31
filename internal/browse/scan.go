@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/guard"
 	"github.com/rexovas/session-protect/internal/targets"
@@ -20,13 +21,14 @@ import (
 type Session struct {
 	Target         string
 	ID             string
-	Title          string // first prompt of the session, from agent history
-	CustomName     string // user-assigned name, from custom-title events
-	LiveStatus     string // non-empty when open in a running agent process
-	ProjectPath    string // set on aggregated (AllUnder) sessions for display
-	Prompts        int    // for LOST sessions: prompt count from history
-	LastModel      string // most recent model seen in the transcript
-	State          string // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE | LOST
+	Title          string    // first prompt of the session, from agent history
+	CustomName     string    // user-assigned name, from custom-title events
+	LiveStatus     string    // non-empty when open in a running agent process
+	ProjectPath    string    // set on aggregated (AllUnder) sessions for display
+	Prompts        int       // for LOST sessions: prompt count from history
+	LastModel      string    // most recent model seen in the transcript
+	State          string    // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE | LOST (+ synthesized ACTIVE | OPEN | RESTORED)
+	RestoredAt     time.Time // last restore recorded in the audit log, badge or not
 	Modified       time.Time
 	BackupModified time.Time
 	Size           int64
@@ -92,6 +94,12 @@ func Scan(cfg config.Config) []*Project {
 
 	titles := historyTitles()
 	open := guard.Live(guard.RegistryDir())
+	restoredAt := map[string]time.Time{}
+	for _, entry := range audit.Read(cfg.BackupRoot) {
+		if entry.Action == "restore" && entry.SessionID != "" && entry.Time.After(restoredAt[entry.SessionID]) {
+			restoredAt[entry.SessionID] = entry.Time
+		}
+	}
 	projects := make([]*Project, 0, len(byPath))
 	for _, project := range byPath {
 		for i := range project.Sessions {
@@ -118,6 +126,15 @@ func Scan(cfg config.Config) []*Project {
 			if session.State == "OK" && session.LiveStatus != "" {
 				session.State = "OPEN"
 			}
+			// Came back from the dead: badge until the session sees new
+			// live writes, after which it is just a normal session again.
+			// The audit log keeps the permanent record either way.
+			if when, ok := restoredAt[session.ID]; ok {
+				session.RestoredAt = when
+				if session.State == "OK" && !session.Modified.After(when) {
+					session.State = "RESTORED"
+				}
+			}
 		}
 		sort.Slice(project.Sessions, func(i, j int) bool {
 			return newest(project.Sessions[i]).After(newest(project.Sessions[j]))
@@ -128,7 +145,7 @@ func Scan(cfg config.Config) []*Project {
 			}
 			project.SizeBytes += session.Size
 			switch session.State {
-			case "OK", "ACTIVE", "OPEN": // open/active still count as protected
+			case "OK", "ACTIVE", "OPEN", "RESTORED": // all protected states
 				project.OK++
 				if session.State == "ACTIVE" {
 					project.Active++

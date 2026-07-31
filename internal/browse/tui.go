@@ -3,6 +3,7 @@ package browse
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/version"
 )
@@ -59,6 +61,12 @@ type model struct {
 	tailOffset   int // lines scrolled up from the bottom
 	stats        *Stats
 	showStats    bool
+
+	// The activity pane lists the audit log — every action the tool has
+	// taken on the user's behalf — newest first.
+	showActivity bool
+	activity     []audit.Entry
+	actOffset    int
 
 	// confirmRestore holds the recoverable session awaiting a y/enter before
 	// its backup copy is written back into the live tree; notice is the
@@ -198,12 +206,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.MouseButtonWheelUp:
 			if m.detail != nil {
 				m.scrollTail(3)
+			} else if m.showActivity {
+				m.actOffset = max(0, m.actOffset-3)
 			} else if !m.showStats {
 				m.setCursor(m.currentCursor() - 3)
 			}
 		case tea.MouseButtonWheelDown:
 			if m.detail != nil {
 				m.scrollTail(-3)
+			} else if m.showActivity {
+				m.actOffset = min(max(0, len(m.activity)-m.pageSize()), m.actOffset+3)
 			} else if !m.showStats {
 				m.setCursor(m.currentCursor() + 3)
 			}
@@ -254,6 +266,24 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.showActivity {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "a", "esc", "q", "backspace", "h", "left", "enter":
+			m.showActivity = false
+			m.actOffset = 0
+		case "up", "k":
+			m.actOffset = max(0, m.actOffset-1)
+		case "down", "j":
+			m.actOffset = min(max(0, len(m.activity)-m.pageSize()), m.actOffset+1)
+		case "pgup":
+			m.actOffset = max(0, m.actOffset-m.pageSize())
+		case "pgdown":
+			m.actOffset = min(max(0, len(m.activity)-m.pageSize()), m.actOffset+m.pageSize())
+		}
+		return m, nil
+	}
 	if m.confirmRestore != nil {
 		session := *m.confirmRestore
 		m.confirmRestore = nil
@@ -280,7 +310,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "s":
 		m.stats = LoadStats()
+		m.activity = audit.Read(m.cfg.BackupRoot)
 		m.showStats = true
+	case "a":
+		entries := audit.Read(m.cfg.BackupRoot)
+		for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+			entries[i], entries[j] = entries[j], entries[i]
+		}
+		m.activity = entries
+		m.actOffset = 0
+		m.showActivity = true
 	case "x":
 		m.showLost = !m.showLost
 		m.rebuild()
@@ -486,6 +525,9 @@ func (m model) View() string {
 	if m.showStats {
 		return m.statsView()
 	}
+	if m.showActivity {
+		return m.activityView()
+	}
 	var b strings.Builder
 
 	total := 0
@@ -547,7 +589,7 @@ func (m model) View() string {
 		b.WriteString("\n " + noticeStyle.Render(truncate(m.notice, m.width-2)) + "\n")
 	}
 
-	help := "↑/↓ move · enter open · ← up · tab sessions · ctrl+a all · s stats · x lost · q quit"
+	help := "↑/↓ move · enter open · ← up · tab sessions · ctrl+a all · s stats · a activity · x lost · q quit"
 	if m.showSessions || m.showAll {
 		help = "↑/↓ move · i info · r restore · ← folders · ctrl+a all · x lost · q quit"
 	}
@@ -562,6 +604,52 @@ func (m model) statsView() string {
 	var b strings.Builder
 	b.WriteString(styleHeader.Render("Session Explorer ▸ usage stats") + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
+
+	var ok, stale, unbacked, recoverable, lost, restored int
+	for _, project := range m.projects {
+		for _, session := range project.Sessions {
+			switch session.State {
+			case "OK", "ACTIVE", "OPEN":
+				ok++
+			case "RESTORED":
+				ok++
+				restored++
+			case "STALE_BACKUP":
+				stale++
+			case "MISSING_BACKUP":
+				unbacked++
+			case "MISSING_SOURCE":
+				recoverable++
+			case "LOST":
+				lost++
+			}
+		}
+	}
+	protection := "  " + styleOK.Render(fmt.Sprintf("● %d ok", ok)) +
+		styleStale.Render(fmt.Sprintf("   ~ %d stale", stale)) +
+		styleUnbacked.Render(fmt.Sprintf("   ! %d unbacked", unbacked)) +
+		styleRecover.Render(fmt.Sprintf("   ✝ %d recoverable", recoverable)) +
+		styleDim.Render(fmt.Sprintf("   ✕ %d lost", lost))
+	if restored > 0 {
+		protection += styleRecover.Render(fmt.Sprintf("   ✚ %d restored", restored))
+	}
+	b.WriteString(styleDim.Render("  PROTECTION") + "\n" + protection + "\n")
+	restores, restoredIDs, lastRestore := 0, map[string]bool{}, time.Time{}
+	for _, entry := range m.activity {
+		if entry.Action == "restore" {
+			restores++
+			restoredIDs[entry.SessionID] = true
+			if entry.Time.After(lastRestore) {
+				lastRestore = entry.Time
+			}
+		}
+	}
+	if restores > 0 {
+		b.WriteString(styleDim.Render(fmt.Sprintf(
+			"  %d restore(s) across %d session(s) all-time · last %s · press a for the activity log",
+			restores, len(restoredIDs), ago(lastRestore))) + "\n")
+	}
+	b.WriteString("\n")
 
 	if m.stats == nil {
 		b.WriteString(styleDim.Render("  no stats available (claude stats cache not found)") + "\n")
@@ -604,6 +692,42 @@ func (m model) statsView() string {
 		m.stats.TotalSessions, m.stats.LastComputed)) + "\n")
 
 	return m.pinBottom(b.String(), "s/esc close · ctrl+c quit")
+}
+
+// activityView lists the audit log — every action the tool has taken on
+// the user's behalf — newest first.
+func (m model) activityView() string {
+	var b strings.Builder
+	b.WriteString(styleHeader.Render("Session Explorer ▸ activity log") + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
+
+	if len(m.activity) == 0 {
+		b.WriteString(styleDim.Render("  no recorded actions yet — restores and repairs will appear here") + "\n")
+		return m.pinBottom(b.String(), "a/esc close · ctrl+c quit")
+	}
+
+	b.WriteString(styleDim.Render(fmt.Sprintf("  %-17s %-9s %-7s %-37s %s",
+		"WHEN", "ACTION", "AGENT", "SESSION", "DETAIL")) + "\n")
+	end := min(len(m.activity), m.actOffset+m.pageSize())
+	for _, entry := range m.activity[m.actOffset:end] {
+		style := styleDim
+		if entry.Action == "restore" {
+			style = styleRecover
+		}
+		detail := tildePath(entry.To)
+		if entry.Overwrote {
+			detail += " · overwrote, safety copy kept"
+		}
+		b.WriteString(fmt.Sprintf("  %-17s %s %-7s %-37s %s\n",
+			entry.Time.Format("2006-01-02 15:04"),
+			style.Render(fmt.Sprintf("%-9s", entry.Action)),
+			entry.Target,
+			truncate(entry.SessionID, 37),
+			styleDim.Render(truncate(detail, max(10, m.width-78)))))
+	}
+	b.WriteString(styleDim.Render(fmt.Sprintf("\n  %d action(s) recorded · %s",
+		len(m.activity), tildePath(filepath.Join(m.cfg.BackupRoot, "audit.log")))) + "\n")
+	return m.pinBottom(b.String(), "↑/↓/wheel scroll · a/esc close · ctrl+c quit")
 }
 
 // humanTokens renders token counts compactly (1.2k, 3.4M, 1.1B).
@@ -776,6 +900,10 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 			note += styleDim.Render("  ·  last " + extra)
 		}
 		kv("compactions", note)
+	}
+	if !session.RestoredAt.IsZero() {
+		kv("restored", styleRecover.Render("✚ ")+session.RestoredAt.Format("2006-01-02 15:04")+
+			styleDim.Render("  ·  from backup ("+ago(session.RestoredAt)+")"))
 	}
 	kvPath := func(key string, path string) {
 		if path == "" {
@@ -1176,6 +1304,8 @@ func sessionState(state string) (string, lipgloss.Style) {
 		return "~ stale    ", styleStale
 	case "MISSING_BACKUP":
 		return "! unbacked ", styleUnbacked
+	case "RESTORED":
+		return "✚ restored ", styleRecover
 	case "LOST":
 		return "✕ lost     ", styleDim
 	default:

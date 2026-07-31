@@ -103,8 +103,8 @@ func TestRestoreMissingSessions(t *testing.T) {
 			t.Errorf("restored file missing: %s", path)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(cfg.BackupRoot, "restore.log")); err != nil {
-		t.Errorf("restore log missing: %v", err)
+	if _, err := os.Stat(filepath.Join(cfg.BackupRoot, "audit.log")); err != nil {
+		t.Errorf("audit log missing: %v", err)
 	}
 }
 

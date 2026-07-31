@@ -1,7 +1,6 @@
 package restore
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/lock"
 	"github.com/rexovas/session-protect/internal/project"
@@ -259,22 +259,23 @@ func copyFile(src string, dest string) error {
 	return os.Chtimes(dest, info.ModTime(), info.ModTime())
 }
 
-// logRestore appends an audit line per restored file; failures to log never
-// fail the restore itself.
+// logRestore records each restored file in the audit log.
 func logRestore(cfg config.Config, items []Item) {
-	path := filepath.Join(cfg.BackupRoot, "restore.log")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-	enc := json.NewEncoder(file)
+	now := time.Now()
+	entries := make([]audit.Entry, 0, len(items))
 	for _, item := range items {
-		_ = enc.Encode(struct {
-			Time string `json:"time"`
-			Item
-		}{time.Now().Format(time.RFC3339), item})
+		entries = append(entries, audit.Entry{
+			Time:       now,
+			Action:     "restore",
+			Target:     item.Target,
+			SessionID:  item.SessionID,
+			From:       item.From,
+			To:         item.To,
+			Overwrote:  item.Overwriting,
+			SafetyCopy: item.SafetyCopy,
+		})
 	}
+	audit.Append(cfg.BackupRoot, entries)
 }
 
 func usage(out io.Writer) {

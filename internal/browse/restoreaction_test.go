@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
 )
 
@@ -89,7 +90,8 @@ func TestRestoreSessionRoundTrip(t *testing.T) {
 	if want := filepath.Join(source, "projects", "p", "abc.jsonl"); dest != want {
 		t.Fatalf("dest = %s, want %s", dest, want)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.BackupRoot, "restore.log")); err != nil {
-		t.Fatalf("restore should append an audit log: %v", err)
+	entries := audit.Read(cfg.BackupRoot)
+	if len(entries) != 1 || entries[0].Action != "restore" || entries[0].SessionID != "abc" {
+		t.Fatalf("restore should append an audit entry, got %+v", entries)
 	}
 }
