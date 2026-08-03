@@ -135,12 +135,16 @@ func (m *model) rebuild() {
 	if m.showAll {
 		m.allSessions = m.filterQuery(m.filterLost(AllUnder(m.projects, m.root)))
 	}
-	// Show the pane that has content when the other is empty.
-	if len(m.folders) == 0 && m.sessionCount() > 0 {
-		m.showSessions = true
-	}
-	if m.sessionCount() == 0 && len(m.folders) > 0 {
-		m.showSessions = false
+	// Show the pane that has content when the other is empty — but never
+	// while a query is active: a search with no matches yet must not yank
+	// the user out of the pane they are searching.
+	if m.query == "" {
+		if len(m.folders) == 0 && m.sessionCount() > 0 {
+			m.showSessions = true
+		}
+		if m.sessionCount() == 0 && len(m.folders) > 0 {
+			m.showSessions = false
+		}
 	}
 	m.setCursor(m.currentCursor())
 }
@@ -678,7 +682,11 @@ func (m model) View() string {
 		}
 	}
 	if m.itemCount() == 0 {
-		b.WriteString(styleDim.Render("  nothing here") + "\n")
+		empty := "  nothing here"
+		if m.query != "" {
+			empty = "  no matches for /" + m.query + " in this pane"
+		}
+		b.WriteString(styleDim.Render(empty) + "\n")
 	}
 	if m.confirmRestore != nil {
 		b.WriteString("\n" + m.confirmRestoreBox(*m.confirmRestore) + "\n")
