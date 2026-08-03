@@ -43,10 +43,9 @@ type model struct {
 	here    *Project  // project whose sessions live exactly at root
 	visible []Session // here's sessions, filtered by the lost toggle
 
-	// expanded folders render their children indented in place. Keyed by
-	// path so state survives rescans; a collapsed parent hides but keeps
-	// its children's expansions for when it is reopened.
-	expanded map[string]bool
+	// expandAll renders every folder's subtree indented in place; one
+	// toggle for the whole view rather than per-folder state.
+	expandAll bool
 
 	// showLost reveals sessions known only from prompt history. Hidden by
 	// default so losses don't crowd the living sessions.
@@ -109,7 +108,7 @@ func newModel(cfg config.Config) model {
 	if err != nil {
 		start = string(os.PathSeparator)
 	}
-	m := model{cfg: cfg, projects: projects, start: start, width: 100, height: 32, expanded: map[string]bool{}}
+	m := model{cfg: cfg, projects: projects, start: start, width: 100, height: 32}
 	m.root = NearestRoot(projects, start)
 	m.rebuild()
 	return m
@@ -136,14 +135,14 @@ func (m *model) rebuild() {
 	m.setCursor(m.currentCursor())
 }
 
-// treeRows flattens the folder tree for display, descending into folders
-// the user expanded in place.
+// treeRows flattens the folder tree for display, descending everywhere
+// when the expand-all toggle is on.
 func (m *model) treeRows(folders []Folder, depth int) []Folder {
 	var out []Folder
 	for _, folder := range folders {
 		folder.Depth = depth
 		out = append(out, folder)
-		if m.expanded[folder.Path] {
+		if m.expandAll {
 			out = append(out, m.treeRows(ChildrenOf(m.projects, folder.Path, m.start), depth+1)...)
 		}
 	}
@@ -370,26 +369,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.aCursor, m.aOffset = 0, 0
 		}
 		m.setCursor(m.currentCursor())
-	case " ", "ctrl+right", "ctrl+left":
-		if m.showSessions || m.showAll || m.fCursor >= len(m.folders) {
-			break
-		}
-		folder := m.folders[m.fCursor]
-		switch msg.String() {
-		case "ctrl+right":
-			if m.expanded[folder.Path] {
-				break
-			}
-			fallthrough
-		case " ":
-			if m.expanded[folder.Path] {
-				delete(m.expanded, folder.Path)
-			} else if len(ChildrenOf(m.projects, folder.Path, m.start)) > 0 {
-				m.expanded[folder.Path] = true
-			}
-		default: // ctrl+left collapses only
-			delete(m.expanded, folder.Path)
-		}
+	case "ctrl+e":
+		m.expandAll = !m.expandAll
 		m.rebuild()
 	case "up", "k":
 		m.setCursor(m.currentCursor() - 1)
@@ -809,7 +790,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("← · esc", "back — leave pane, then go up a folder")
 	key("tab", "switch between folders and sessions")
 	key("ctrl+a", "all sessions beneath this folder")
-	key("space", "expand / collapse a folder's subfolders in place")
+	key("ctrl+e", "expand / collapse the whole folder tree in place")
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
