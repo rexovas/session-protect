@@ -53,6 +53,15 @@ type model struct {
 	query     string
 	searching bool
 
+	// Content search (ctrl+s on a query) counts transcript hits per
+	// session under the current root and shows them as their own pane.
+	showHits  bool
+	hitsBusy  bool
+	hitsQuery string
+	hits      []Hit
+	hCursor   int
+	hOffset   int
+
 	// showLost reveals sessions known only from prompt history. Hidden by
 	// default so losses don't crowd the living sessions.
 	showLost bool
@@ -97,6 +106,8 @@ type model struct {
 }
 
 type rescanMsg []*Project
+
+type hitsMsg []Hit
 
 type tickMsg time.Time
 
@@ -221,6 +232,8 @@ func (m model) filterLost(sessions []Session) []Session {
 
 func (m model) itemCount() int {
 	switch {
+	case m.showHits:
+		return len(m.hits)
 	case m.showAll:
 		return len(m.allSessions)
 	case m.showSessions:
@@ -232,6 +245,8 @@ func (m model) itemCount() int {
 
 func (m model) currentCursor() int {
 	switch {
+	case m.showHits:
+		return m.hCursor
 	case m.showAll:
 		return m.aCursor
 	case m.showSessions:
@@ -267,6 +282,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scanning = false
 		m.projects = msg
 		m.rebuild()
+		return m, nil
+	case hitsMsg:
+		m.hitsBusy = false
+		m.hits = msg
+		m.showHits = true
+		m.hCursor, m.hOffset = 0, 0
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -379,6 +400,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rebuild()
 		case "enter":
 			m.searching = false
+		case "ctrl+s":
+			if m.query != "" && !m.hitsBusy {
+				m.searching = false
+				return m.fireContentSearch()
+			}
 		case "backspace":
 			if runes := []rune(m.query); len(runes) > 0 {
 				m.query = string(runes[:len(runes)-1])
@@ -437,6 +463,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
 	case "tab":
+		if m.showHits {
+			break
+		}
 		if m.showAll {
 			m.showAll = false
 			m.showSessions = len(m.folders) == 0 && m.sessionCount() > 0
@@ -445,6 +474,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.setCursor(m.currentCursor())
 	case "ctrl+a":
+		if m.showHits {
+			break
+		}
 		if len(m.folders) == 0 {
 			break // sessions here ARE all nested sessions; nothing to add
 		}
@@ -458,9 +490,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.expandAll = !m.expandAll
 		m.rebuild()
 	case "/":
+		if m.showHits {
+			m.showHits = false
+		}
 		m.searching = true
 		m.query = ""
 		m.rebuild()
+	case "ctrl+s":
+		if m.query != "" && !m.hitsBusy {
+			return m.fireContentSearch()
+		}
 	case "up", "k":
 		m.setCursor(m.currentCursor() - 1)
 	case "down", "j":
@@ -474,7 +513,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		m.setCursor(1 << 30)
 	case "enter", "l", "right":
-		if m.showSessions || m.showAll {
+		if m.showHits || m.showSessions || m.showAll {
 			(&m).openDetail()
 		} else if m.fCursor < len(m.folders) {
 			m.trail = append(m.trail, m.root)
@@ -483,6 +522,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rebuild()
 		}
 	case "esc", "backspace", "h", "left":
+		if m.showHits {
+			m.showHits = false
+			return m, nil
+		}
 		if m.query != "" {
 			m.query = ""
 			m.rebuild()
@@ -508,6 +551,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) selectedSession() *Session {
 	switch {
+	case m.showHits:
+		if m.hCursor < len(m.hits) {
+			return &m.hits[m.hCursor].Session
+		}
 	case m.showAll:
 		if m.aCursor < len(m.allSessions) {
 			return &m.allSessions[m.aCursor]
@@ -563,6 +610,9 @@ func (m *model) setCursor(position int) {
 		position = max(0, m.itemCount()-1)
 	}
 	switch {
+	case m.showHits:
+		m.hCursor = position
+		m.hOffset = clampOffset(m.hOffset, position, m.pageSize())
 	case m.showAll:
 		m.aCursor = position
 		m.aOffset = clampOffset(m.aOffset, position, m.pageSize())
@@ -633,6 +683,9 @@ func (m model) View() string {
 	if m.showMenu {
 		return m.menuView()
 	}
+	if m.showHits {
+		return m.hitsView()
+	}
 	var b strings.Builder
 
 	total := 0
@@ -700,14 +753,27 @@ func (m model) View() string {
 
 	help := "↑/↓ move · enter open · ← back · tab panes · ctrl+a all · m menu · q quit"
 	if m.searching {
-		help = "/" + m.query + "▌   ↑/↓ move · enter keep filter · esc cancel"
+		help = "/" + m.query + "▌   ↑/↓ move · enter keep filter · ctrl+s transcripts · esc cancel"
 	} else if m.query != "" {
-		help = "/" + m.query + "   ↑/↓ move · enter open · esc clear filter"
+		help = "/" + m.query + "   ↑/↓ move · enter open · ctrl+s transcripts · esc clear filter"
+	}
+	if m.hitsBusy {
+		help = "searching transcripts for /" + m.hitsQuery + " … (first run builds the text index)"
 	}
 	if m.confirmRestore != nil {
 		help = "y/enter restore · esc cancel"
 	}
 	return m.pinBottom(b.String(), help)
+}
+
+// fireContentSearch kicks the transcript search off in the background;
+// the first run also builds the extracted-text cache.
+func (m model) fireContentSearch() (tea.Model, tea.Cmd) {
+	m.hitsBusy = true
+	m.hitsQuery = m.query
+	cfg, query := m.cfg, m.query
+	scope := AllUnder(m.projects, m.root)
+	return m, func() tea.Msg { return hitsMsg(ContentSearch(cfg, scope, query)) }
 }
 
 // openDetail loads the inspector for the selected session.
@@ -847,6 +913,53 @@ func (m model) statsBody(b *strings.Builder) {
 		m.stats.TotalSessions, m.stats.LastComputed)) + "\n")
 }
 
+// hitsView lists content-search results ranked by hit count; the
+// selected row's best matching line shows above the footer.
+func (m model) hitsView() string {
+	var b strings.Builder
+	left := styleHeader.Render("Session Explorer ▸ transcript hits") +
+		styleDim.Render(fmt.Sprintf("  /%s · %d session(s) ", m.hitsQuery, len(m.hits)))
+	b.WriteString(left + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
+
+	if len(m.hits) == 0 {
+		b.WriteString(styleDim.Render("  no transcript matches for /"+m.hitsQuery) + "\n")
+		return m.pinBottomBare(b.String(), "esc back · / new search · ctrl+c quit")
+	}
+
+	b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-*s %-7s %s",
+		"HITS", m.titleWidth(), "TITLE", "AGENT", "IN")) + "\n")
+	end := min(len(m.hits), m.hOffset+m.pageSize())
+	for i := m.hOffset; i < end; i++ {
+		b.WriteString(m.hitRow(m.hits[i], i == m.hCursor) + "\n")
+	}
+	if m.hCursor < len(m.hits) {
+		if snippet := m.hits[m.hCursor].Snippet; snippet != "" {
+			b.WriteString("\n " + styleDim.Render("❯ "+truncate(snippet, m.width-4)) + "\n")
+		}
+	}
+	return m.pinBottomBare(b.String(), "↑/↓ move · enter open · esc back · / new search")
+}
+
+func (m model) hitRow(hit Hit, active bool) string {
+	title := hit.Session.CustomName
+	if title == "" {
+		title = hit.Session.Title
+	}
+	if title == "" {
+		title = hit.Session.ID
+	}
+	in := tildePath(hit.Session.ProjectPath)
+	row := fmt.Sprintf("  %6d  %-*s %-7s %s",
+		hit.Count, m.titleWidth(), truncate(title, m.titleWidth()),
+		hit.Session.Target,
+		styleUnless(active, styleDim, truncate(in, max(10, m.width-m.titleWidth()-22))))
+	if active {
+		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
+	}
+	return row
+}
+
 // activityBody lists the audit log — every action the tool has taken on
 // the user's behalf — newest first.
 func (m model) activityBody(b *strings.Builder) {
@@ -895,6 +1008,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("ctrl+a", "all sessions beneath this folder")
 	key("ctrl+e", "expand / collapse the whole folder tree in place")
 	key("/", "filter the current pane — folder tree or session list")
+	key("ctrl+s", "search transcripts for the query, ranked by hit count")
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
