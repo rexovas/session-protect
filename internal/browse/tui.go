@@ -47,6 +47,12 @@ type model struct {
 	// toggle for the whole view rather than per-folder state.
 	expandAll bool
 
+	// query filters the current pane: the folder tree prunes to matching
+	// branches (auto-expanded down to each match), session panes to
+	// matching names/titles/ids. searching is true while / input is live.
+	query     string
+	searching bool
+
 	// showLost reveals sessions known only from prompt history. Hidden by
 	// default so losses don't crowd the living sessions.
 	showLost bool
@@ -115,15 +121,19 @@ func newModel(cfg config.Config) model {
 }
 
 func (m *model) rebuild() {
-	m.folders = m.treeRows(ChildrenOf(m.projects, m.root, m.start), 0)
+	if m.query != "" {
+		m.folders = m.filteredTree(ChildrenOf(m.projects, m.root, m.start), 0)
+	} else {
+		m.folders = m.treeRows(ChildrenOf(m.projects, m.root, m.start), 0)
+	}
 	m.here = ProjectAt(m.projects, m.root)
 	m.visible = nil
 	if m.here != nil {
 		LoadCustomNames(m.here)
-		m.visible = m.filterLost(m.here.Sessions)
+		m.visible = m.filterQuery(m.filterLost(m.here.Sessions))
 	}
 	if m.showAll {
-		m.allSessions = m.filterLost(AllUnder(m.projects, m.root))
+		m.allSessions = m.filterQuery(m.filterLost(AllUnder(m.projects, m.root)))
 	}
 	// Show the pane that has content when the other is empty.
 	if len(m.folders) == 0 && m.sessionCount() > 0 {
@@ -149,13 +159,51 @@ func (m *model) treeRows(folders []Folder, depth int) []Folder {
 	return out
 }
 
+// filteredTree prunes the folder tree to branches whose names match the
+// query (case-insensitive), auto-expanded down to each match; ancestors
+// of a match stay visible as path context.
+func (m *model) filteredTree(folders []Folder, depth int) []Folder {
+	query := strings.ToLower(m.query)
+	var out []Folder
+	for _, folder := range folders {
+		children := m.filteredTree(ChildrenOf(m.projects, folder.Path, m.start), depth+1)
+		if len(children) == 0 && !strings.Contains(strings.ToLower(folder.Name), query) {
+			continue
+		}
+		folder.Depth = depth
+		out = append(out, folder)
+		out = append(out, children...)
+	}
+	return out
+}
+
+// filterQuery keeps sessions whose custom name, title, or id contains the
+// query, case-insensitively.
+func (m model) filterQuery(sessions []Session) []Session {
+	if m.query == "" {
+		return sessions
+	}
+	query := strings.ToLower(m.query)
+	var out []Session
+	for _, session := range sessions {
+		if strings.Contains(strings.ToLower(session.CustomName), query) ||
+			strings.Contains(strings.ToLower(session.Title), query) ||
+			strings.Contains(strings.ToLower(session.ID), query) {
+			out = append(out, session)
+		}
+	}
+	return out
+}
+
 func (m model) sessionCount() int {
 	return len(m.visible)
 }
 
-// filterLost hides history-only sessions unless the toggle is on.
+// filterLost hides history-only sessions unless the toggle is on. An
+// active search overrides the toggle: a lost session is the one you most
+// need to be able to find.
 func (m model) filterLost(sessions []Session) []Session {
-	if m.showLost {
+	if m.showLost || m.query != "" {
 		return sessions
 	}
 	var out []Session
@@ -317,6 +365,39 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.searching {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.searching = false
+			m.query = ""
+			m.rebuild()
+		case "enter":
+			m.searching = false
+		case "backspace":
+			if runes := []rune(m.query); len(runes) > 0 {
+				m.query = string(runes[:len(runes)-1])
+			}
+			m.rebuild()
+			m.setCursor(0)
+		case "up":
+			m.setCursor(m.currentCursor() - 1)
+		case "down":
+			m.setCursor(m.currentCursor() + 1)
+		case "pgup":
+			m.setCursor(m.currentCursor() - m.pageSize())
+		case "pgdown":
+			m.setCursor(m.currentCursor() + m.pageSize())
+		default:
+			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+				m.query += msg.String()
+				m.rebuild()
+				m.setCursor(0)
+			}
+		}
+		return m, nil
+	}
 	m.notice = ""
 
 	switch msg.String() {
@@ -372,6 +453,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+e":
 		m.expandAll = !m.expandAll
 		m.rebuild()
+	case "/":
+		m.searching = true
+		m.query = ""
+		m.rebuild()
 	case "up", "k":
 		m.setCursor(m.currentCursor() - 1)
 	case "down", "j":
@@ -394,6 +479,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rebuild()
 		}
 	case "esc", "backspace", "h", "left":
+		if m.query != "" {
+			m.query = ""
+			m.rebuild()
+			return m, nil
+		}
 		// Leave the current pane first, but never land on an empty pane:
 		// at a leaf folder (sessions only) back means up.
 		if m.showAll {
@@ -601,6 +691,11 @@ func (m model) View() string {
 	}
 
 	help := "↑/↓ move · enter open · ← back · tab panes · ctrl+a all · m menu · q quit"
+	if m.searching {
+		help = "/" + m.query + "▌   ↑/↓ move · enter keep filter · esc cancel"
+	} else if m.query != "" {
+		help = "/" + m.query + "   ↑/↓ move · enter open · esc clear filter"
+	}
 	if m.confirmRestore != nil {
 		help = "y/enter restore · esc cancel"
 	}
@@ -791,6 +886,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("tab", "switch between folders and sessions")
 	key("ctrl+a", "all sessions beneath this folder")
 	key("ctrl+e", "expand / collapse the whole folder tree in place")
+	key("/", "filter the current pane — folder tree or session list")
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
