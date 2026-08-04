@@ -15,6 +15,7 @@ import (
 	"github.com/rexovas/session-protect/internal/restore"
 	"github.com/rexovas/session-protect/internal/schedule"
 	"github.com/rexovas/session-protect/internal/status"
+	"github.com/rexovas/session-protect/internal/transplant"
 	"github.com/rexovas/session-protect/internal/update"
 	"github.com/rexovas/session-protect/internal/version"
 )
@@ -32,6 +33,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return backup.Run(args[1:], stdout, stderr, true)
 	case "restore":
 		return restore.Run(args[1:], os.Stdin, stdout, stderr)
+	case "transplant":
+		return transplant.Run(args[1:], os.Stdin, stdout, stderr)
 	case "schedule":
 		return schedule.Run(args[1:], stdout, stderr)
 	case "hook":
@@ -81,6 +84,8 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  session-protect sync [claude|codex]   (mirror without committing)")
 	fmt.Fprintln(out, "  session-protect restore [--missing] [--target claude|codex] [--project PATH]")
 	fmt.Fprintln(out, "                          [--session ID] [--overwrite] [--dry-run] [--yes]")
+	fmt.Fprintln(out, "  session-protect transplant (--session ID | --project PATH) --to DIR")
+	fmt.Fprintln(out, "                             [--copy] [--memory keep-both|skip|replace] [--dry-run] [--yes]")
 	fmt.Fprintln(out, "  session-protect schedule install|status|uninstall")
 	fmt.Fprintln(out, "  session-protect hook install|status|uninstall [claude]")
 	fmt.Fprintln(out, "  session-protect browse   (interactive session browser; alias: ui)")
