@@ -54,9 +54,15 @@ type model struct {
 	query     string
 	searching bool
 
+	// AI find (ctrl+g) is its own page: a free-text prompt that queries
+	// on enter. askInput persists so a follow-up refines the last ask.
+	showAsk    bool
+	askInput   string
+	askBackend string
+
 	// Content search (ctrl+s on a query) counts transcript hits per
 	// session under the current root and shows them as their own pane.
-	// AI find (ctrl+g) reuses the pane with hitsMode "ask": ranked
+	// AI find results reuse the pane with hitsMode "ask": ranked
 	// matches whose snippet line is the model's reasoning.
 	showHits  bool
 	hitsBusy  bool
@@ -414,6 +420,28 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.showAsk {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc", "ctrl+g":
+			m.showAsk = false
+		case "enter":
+			if strings.TrimSpace(m.askInput) != "" && !m.hitsBusy {
+				m.showAsk = false
+				return m.fireAsk()
+			}
+		case "backspace":
+			if runes := []rune(m.askInput); len(runes) > 0 {
+				m.askInput = string(runes[:len(runes)-1])
+			}
+		default:
+			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+				m.askInput += msg.String()
+			}
+		}
+		return m, nil
+	}
 	if m.searching {
 		switch msg.String() {
 		case "ctrl+c":
@@ -430,10 +458,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.fireContentSearch()
 			}
 		case "ctrl+g":
-			if m.query != "" && !m.hitsBusy {
-				m.searching = false
-				return m.fireAsk()
-			}
+			m.searching = false
+			return m.openAsk()
 		case "backspace":
 			if runes := []rune(m.query); len(runes) > 0 {
 				m.query = string(runes[:len(runes)-1])
@@ -530,9 +556,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.fireContentSearch()
 		}
 	case "ctrl+g":
-		if m.query != "" && !m.hitsBusy {
-			return m.fireAsk()
-		}
+		return m.openAsk()
 	case "up", "k":
 		m.setCursor(m.currentCursor() - 1)
 	case "down", "j":
@@ -716,6 +740,9 @@ func (m model) View() string {
 	if m.showMenu {
 		return m.menuView()
 	}
+	if m.showAsk {
+		return m.askView()
+	}
 	if m.showHits {
 		return m.hitsView()
 	}
@@ -786,9 +813,9 @@ func (m model) View() string {
 
 	help := "↑/↓ move · enter open · ← back · tab panes · ctrl+a all · m menu · q quit"
 	if m.searching {
-		help = "/" + m.query + "▌   enter keep · ctrl+s transcripts · ctrl+g ai find · esc cancel"
+		help = "/" + m.query + "▌   enter keep · ctrl+s transcripts · esc cancel"
 	} else if m.query != "" {
-		help = "/" + m.query + "   enter open · ctrl+s transcripts · ctrl+g ai find · esc clear"
+		help = "/" + m.query + "   enter open · ctrl+s transcripts · esc clear"
 	}
 	if m.hitsBusy {
 		help = "searching transcripts for /" + m.hitsQuery + " … (first run builds the text index)"
@@ -812,6 +839,24 @@ func (m model) fireContentSearch() (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg { return hitsMsg(ContentSearch(cfg, scope, query)) }
 }
 
+// openAsk shows the ai find page, seeding the prompt with an active
+// filter query when the prompt is empty. The backend is probed once here,
+// never per frame.
+func (m model) openAsk() (tea.Model, tea.Cmd) {
+	backend := assist.Detect(m.cfg.Assist)
+	if backend == nil {
+		m.notice = "ai find needs ollama running or the claude CLI on PATH (assist.backend in config)"
+		m.noticeErr = true
+		return m, nil
+	}
+	m.askBackend = backend.Name()
+	if m.askInput == "" {
+		m.askInput = m.query
+	}
+	m.showAsk = true
+	return m, nil
+}
+
 // fireAsk asks the configured local model which sessions match the
 // description, grounded on keyword-scored candidates with excerpts.
 func (m model) fireAsk() (tea.Model, tea.Cmd) {
@@ -823,8 +868,8 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 	}
 	m.hitsBusy = true
 	m.hitsMode = "ask"
-	m.hitsQuery = m.query
-	cfg, query := m.cfg, m.query
+	m.hitsQuery = m.askInput
+	cfg, query := m.cfg, m.askInput
 	scope := AllUnder(m.projects, m.root)
 	return m, func() tea.Msg {
 		candidates := BuildCandidates(cfg, scope, query)
@@ -983,6 +1028,26 @@ func (m model) statsBody(b *strings.Builder) {
 		m.stats.TotalSessions, m.stats.LastComputed)) + "\n")
 }
 
+// askView is the ai find page: describe the session in free text, enter
+// asks the configured backend.
+func (m model) askView() string {
+	var b strings.Builder
+	b.WriteString(styleHeader.Render("Session Explorer ▸ ai find") +
+		styleDim.Render("  backend: "+m.askBackend+" ") + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n\n")
+
+	b.WriteString(styleDim.Render(" describe the session you're looking for — project names, topics,"+
+		" anything you remember") + "\n")
+	width := max(min(m.width, 110), 40)
+	inner := width - 6
+	prompt := m.askInput + "▌"
+	b.WriteString(detailBox(width).Render(styleActive.Render("❯ ")+
+		strings.Join(wrapPreserve(prompt, inner, 8), "\n  ")) + "\n")
+	b.WriteString(styleDim.Render(" matches are grounded in your transcripts and ranked with a short"+
+		" reason each") + "\n")
+	return m.pinBottomBare(b.String(), "enter ask · esc close")
+}
+
 // hitsView lists content-search results ranked by hit count; the
 // selected row's best matching line shows above the footer.
 func (m model) hitsView() string {
@@ -1099,7 +1164,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("ctrl+e", "expand / collapse the whole folder tree in place")
 	key("/", "filter the current pane — folder tree or session list")
 	key("ctrl+s", "search transcripts for the query, ranked by hit count")
-	key("ctrl+g", "ai find: describe the session, a local model ranks likely matches")
+	key("ctrl+g", "ai find page: describe a session, enter asks a local model")
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
