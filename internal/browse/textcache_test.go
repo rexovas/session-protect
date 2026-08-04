@@ -3,6 +3,7 @@ package browse
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,5 +90,55 @@ func TestTextCacheRefreshesOnMtimeOnly(t *testing.T) {
 	third, _ := os.Stat(extract)
 	if third.ModTime().Equal(first.ModTime()) {
 		t.Fatal("extract not refreshed after the source changed")
+	}
+}
+
+func TestCodexDetailAndExtract(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "rollout.jsonl")
+	lines := `{"timestamp":"2026-07-09T07:30:37.837Z","type":"session_meta","payload":{"id":"x","cwd":"/w"}}
+{"timestamp":"2026-07-09T07:31:26.190Z","type":"turn_context","payload":{"model":"gpt-5.5"}}
+{"timestamp":"2026-07-09T07:31:26.199Z","type":"event_msg","payload":{"type":"user_message","message":"fix the MEGATRON build"}}
+{"timestamp":"2026-07-09T07:31:30.070Z","type":"event_msg","payload":{"type":"agent_message","message":"On it - megatron first."}}
+{"timestamp":"2026-07-09T07:32:44.306Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make build\"}"}}
+{"timestamp":"2026-07-09T07:32:45.000Z","type":"response_item","payload":{"type":"function_call_output","output":"exit 0\nmore"}}
+{"timestamp":"2026-07-09T20:00:32.195Z","type":"compacted","payload":{"message":""}}
+{"timestamp":"2026-07-09T20:01:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":50}}}}
+`
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d := LoadDetailKeep(Session{Target: "codex", SourcePath: path}, 300)
+	if d.FirstPrompt != "fix the MEGATRON build" || d.LastResponse != "On it - megatron first." {
+		t.Fatalf("prompts wrong: %q / %q", d.FirstPrompt, d.LastResponse)
+	}
+	if len(d.Models) != 1 || d.Models[0] != "gpt-5.5" {
+		t.Fatalf("model missing: %v", d.Models)
+	}
+	if d.Compactions != 1 || d.Messages != 2 {
+		t.Fatalf("counts wrong: compactions=%d messages=%d", d.Compactions, d.Messages)
+	}
+	if d.Tokens.Input != 400 || d.Tokens.CacheRead != 600 || d.Tokens.Output != 50 {
+		t.Fatalf("token split wrong: %+v", d.Tokens)
+	}
+	roles := map[string]int{}
+	for _, msg := range d.Transcript {
+		roles[msg.Role]++
+	}
+	if roles["tool"] != 1 || roles["result"] != 1 || roles["compact"] != 1 {
+		t.Fatalf("transcript roles wrong: %v", roles)
+	}
+
+	if _, model := scanFileMeta(path); model != "gpt-5.5" {
+		t.Fatalf("scanFileMeta model = %q", model)
+	}
+
+	text := extractText(path)
+	if !strings.Contains(text, "MEGATRON build") || !strings.Contains(text, "megatron first") {
+		t.Fatalf("extract missing conversation: %q", text)
+	}
+	if strings.Contains(text, "make build") {
+		t.Fatal("tool call leaked into extract")
 	}
 }

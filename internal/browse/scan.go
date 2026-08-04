@@ -423,6 +423,9 @@ func LoadDetail(session Session) Detail {
 
 // LoadDetailKeep loads detail keeping up to keep transcript messages.
 func LoadDetailKeep(session Session, keep int) Detail {
+	if session.Target == "codex" {
+		return loadCodexDetail(session, keep)
+	}
 	var detail Detail
 	path := session.SourcePath
 	if path == "" {
@@ -547,6 +550,177 @@ type transcriptLine struct {
 // contentText extracts human text from a message content field that may be a
 // plain string or a list of typed blocks. Tool results and system-tagged
 // content are skipped.
+// codexLine is one line of a codex rollout file: a typed envelope with
+// the details in payload.
+type codexLine struct {
+	Timestamp string          `json:"timestamp"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// loadCodexDetail streams a codex rollout: user/agent messages and tool
+// calls into the transcript, model from turn_context, cumulative usage
+// from the last token_count event.
+func loadCodexDetail(session Session, keep int) Detail {
+	var detail Detail
+	path := session.SourcePath
+	if path == "" {
+		path = session.BackupPath
+	}
+	if path == "" {
+		return detail
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return detail
+	}
+	defer file.Close()
+
+	detail.PerModel = map[string]TokenTotals{}
+	appendMsg := func(role string, text string) {
+		detail.TranscriptTotal++
+		detail.Transcript = append(detail.Transcript, TranscriptMsg{Role: role, Text: text})
+		if len(detail.Transcript) > keep {
+			detail.Transcript = detail.Transcript[1:]
+		}
+	}
+	model := ""
+	var totals struct {
+		Input  int64 `json:"input_tokens"`
+		Cached int64 `json:"cached_input_tokens"`
+		Output int64 `json:"output_tokens"`
+	}
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var line codexLine
+		if json.Unmarshal(scanner.Bytes(), &line) != nil {
+			continue
+		}
+		if detail.Created.IsZero() && line.Timestamp != "" {
+			if t, err := time.Parse(time.RFC3339, line.Timestamp); err == nil {
+				detail.Created = t
+			}
+		}
+		switch line.Type {
+		case "turn_context":
+			var ctx struct {
+				Model string `json:"model"`
+			}
+			if json.Unmarshal(line.Payload, &ctx) == nil && ctx.Model != "" && ctx.Model != model {
+				model = ctx.Model
+				known := false
+				for _, m := range detail.Models {
+					if m == model {
+						known = true
+					}
+				}
+				if !known {
+					detail.Models = append(detail.Models, model)
+				}
+			}
+		case "compacted":
+			detail.Compactions++
+			appendMsg("compact", "auto")
+		case "event_msg":
+			var event struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+				Info    struct {
+					Total struct {
+						Input  int64 `json:"input_tokens"`
+						Cached int64 `json:"cached_input_tokens"`
+						Output int64 `json:"output_tokens"`
+					} `json:"total_token_usage"`
+				} `json:"info"`
+			}
+			if json.Unmarshal(line.Payload, &event) != nil {
+				continue
+			}
+			switch event.Type {
+			case "user_message":
+				if event.Message == "" {
+					continue
+				}
+				detail.Messages++
+				if detail.FirstPrompt == "" {
+					detail.FirstPrompt = event.Message
+				}
+				detail.LastPrompt = event.Message
+				appendMsg("user", event.Message)
+			case "agent_message":
+				if event.Message == "" {
+					continue
+				}
+				detail.Messages++
+				detail.LastResponse = event.Message
+				appendMsg("assistant", event.Message)
+			case "token_count":
+				// Cumulative — the last one is the session total.
+				totals.Input = event.Info.Total.Input
+				totals.Cached = event.Info.Total.Cached
+				totals.Output = event.Info.Total.Output
+			}
+		case "response_item":
+			var item struct {
+				Type      string `json:"type"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+				Output    string `json:"output"`
+			}
+			if json.Unmarshal(line.Payload, &item) != nil {
+				continue
+			}
+			switch item.Type {
+			case "function_call", "custom_tool_call":
+				name := item.Name
+				var args struct {
+					Cmd string `json:"cmd"`
+				}
+				if json.Unmarshal([]byte(item.Arguments), &args) == nil && args.Cmd != "" {
+					name += "(" + truncate(cleanText(args.Cmd), 80) + ")"
+				}
+				appendMsg("tool", name)
+			case "function_call_output", "custom_tool_call_output":
+				if line := firstLine(item.Output); line != "" {
+					appendMsg("result", truncate(line, 120))
+				}
+			}
+		}
+	}
+
+	// input_tokens includes the cached portion; split it out so the usage
+	// table reads like the claude one.
+	detail.Tokens = TokenTotals{
+		Input:     max64(0, totals.Input-totals.Cached),
+		CacheRead: totals.Cached,
+		Output:    totals.Output,
+	}
+	if model != "" {
+		detail.PerModel[model] = detail.Tokens
+		if len(detail.Models) == 0 {
+			detail.Models = []string{model}
+		}
+	}
+	return detail
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		s = s[:idx]
+	}
+	return strings.TrimSpace(s)
+}
+
+func max64(a int64, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func contentText(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -986,6 +1160,7 @@ func scanFileMeta(path string) (name string, model string) {
 
 	titlePattern := []byte(`"custom-title"`)
 	modelPattern := []byte(`"model":"claude`)
+	turnPattern := []byte(`"turn_context"`)
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 	for scanner.Scan() {
@@ -1003,6 +1178,17 @@ func scanFileMeta(path string) (name string, model string) {
 			rest := line[idx+len(`"model":"`):]
 			if end := bytes.IndexByte(rest, '"'); end > 0 {
 				model = string(rest[:end])
+			}
+		}
+		if bytes.Contains(line, turnPattern) {
+			var event struct {
+				Type    string `json:"type"`
+				Payload struct {
+					Model string `json:"model"`
+				} `json:"payload"`
+			}
+			if json.Unmarshal(line, &event) == nil && event.Type == "turn_context" && event.Payload.Model != "" {
+				model = event.Payload.Model
 			}
 		}
 	}

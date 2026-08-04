@@ -151,6 +151,22 @@ func extractText(path string) string {
 		if json.Unmarshal(scanner.Bytes(), &event) != nil {
 			continue
 		}
+		if event.Type == "event_msg" {
+			// codex rollout: conversation text lives in event payloads.
+			var line codexLine
+			if json.Unmarshal(scanner.Bytes(), &line) == nil {
+				var payload struct {
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				}
+				if json.Unmarshal(line.Payload, &payload) == nil && payload.Message != "" &&
+					(payload.Type == "user_message" || payload.Type == "agent_message") {
+					b.WriteString(payload.Message)
+					b.WriteByte('\n')
+				}
+			}
+			continue
+		}
 		switch event.Type {
 		case "user":
 			if event.IsCompactSummary {
