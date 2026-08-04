@@ -14,7 +14,9 @@ import (
 
 	"github.com/rexovas/session-protect/internal/assist"
 	"github.com/rexovas/session-protect/internal/audit"
+	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/transplant"
 	"github.com/rexovas/session-protect/internal/version"
 )
 
@@ -53,6 +55,18 @@ type model struct {
 	// matching names/titles/ids. searching is true while / input is live.
 	query     string
 	searching bool
+
+	// Transplant (t) is a two-stage page: type a target dir, enter plans,
+	// enter again applies. tab toggles move/copy. Session scope from
+	// session panes, project scope from folder rows.
+	showTransplant bool
+	tpSessionID    string // "" = project scope
+	tpSource       string // source label (id or project path)
+	tpProject      string
+	tpInput        string
+	tpCopy         bool
+	tpPlan         *transplant.Plan
+	tpBusy         bool
 
 	// AI find (ctrl+g) is its own page: a free-text prompt that queries
 	// on enter. askInput persists so a follow-up refines the last ask.
@@ -119,6 +133,13 @@ type model struct {
 type rescanMsg []*Project
 
 type hitsMsg []Hit
+
+type transplantMsg struct {
+	err    error
+	moved  int
+	target string
+	copied bool
+}
 
 type askMsg struct {
 	hits    []Hit
@@ -307,6 +328,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showHits = true
 		m.hCursor, m.hOffset = 0, 0
 		return m, nil
+	case transplantMsg:
+		m.tpBusy = false
+		m.showTransplant = false
+		m.tpPlan = nil
+		if msg.err != nil {
+			m.notice, m.noticeErr = "transplant failed: "+msg.err.Error(), true
+			return m, nil
+		}
+		verb := "moved"
+		if msg.copied {
+			verb = "copied"
+		}
+		m.notice = fmt.Sprintf("%s %d session(s) to %s", verb, msg.moved, msg.target)
+		m.scanning = true
+		cfg := m.cfg
+		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
 	case askMsg:
 		m.hitsBusy = false
 		if msg.err != nil {
@@ -417,6 +454,50 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scanning = true
 			cfg := m.cfg
 			return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
+		}
+		return m, nil
+	}
+	if m.showTransplant {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			if m.tpPlan != nil {
+				m.tpPlan = nil
+			} else if !m.tpBusy {
+				m.showTransplant = false
+			}
+		case "tab":
+			if !m.tpBusy {
+				m.tpCopy = !m.tpCopy
+				m.tpPlan = nil
+			}
+		case "enter":
+			if m.tpBusy {
+				break
+			}
+			if m.tpPlan != nil {
+				return m.fireTransplant()
+			}
+			if strings.TrimSpace(m.tpInput) != "" {
+				plan, err := transplant.Build(m.cfg, m.transplantOptions())
+				if err != nil {
+					m.notice, m.noticeErr = err.Error(), true
+					break
+				}
+				m.notice = ""
+				m.tpPlan = plan
+			}
+		case "backspace":
+			if m.tpPlan == nil {
+				if runes := []rune(m.tpInput); len(runes) > 0 {
+					m.tpInput = string(runes[:len(runes)-1])
+				}
+			}
+		default:
+			if m.tpPlan == nil && (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) {
+				m.tpInput += msg.String()
+			}
 		}
 		return m, nil
 	}
@@ -557,6 +638,34 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "ctrl+g":
 		return m.openAsk()
+	case "t":
+		if m.showSessions || m.showAll || m.showHits {
+			session := m.selectedSession()
+			if session == nil {
+				break
+			}
+			if session.Target != "claude" {
+				m.notice, m.noticeErr = "transplant supports claude sessions for now", true
+				break
+			}
+			if session.State == "LOST" {
+				m.notice, m.noticeErr = "lost sessions have no transcript to transplant", true
+				break
+			}
+			m.tpSessionID = session.ID
+			m.tpSource = "session " + session.ID
+		} else {
+			if m.fCursor >= len(m.folders) || m.folders[m.fCursor].Pseudo {
+				break
+			}
+			m.tpSessionID = ""
+			m.tpProject = m.folders[m.fCursor].Path
+			m.tpSource = "project " + tildePath(m.tpProject)
+		}
+		m.tpInput = m.root + string(os.PathSeparator)
+		m.tpPlan = nil
+		m.tpCopy = false
+		m.showTransplant = true
 	case "up", "k":
 		m.setCursor(m.currentCursor() - 1)
 	case "down", "j":
@@ -740,6 +849,9 @@ func (m model) View() string {
 	if m.showMenu {
 		return m.menuView()
 	}
+	if m.showTransplant {
+		return m.transplantView()
+	}
 	if m.showAsk {
 		return m.askView()
 	}
@@ -837,6 +949,30 @@ func (m model) fireContentSearch() (tea.Model, tea.Cmd) {
 	cfg, query := m.cfg, m.query
 	scope := AllUnder(m.projects, m.root)
 	return m, func() tea.Msg { return hitsMsg(ContentSearch(cfg, scope, query)) }
+}
+
+func (m model) transplantOptions() transplant.Options {
+	return transplant.Options{
+		SessionID: m.tpSessionID,
+		Project:   m.tpProject,
+		To:        strings.TrimSpace(m.tpInput),
+		Copy:      m.tpCopy,
+	}
+}
+
+// fireTransplant syncs the source to backup, then applies the plan.
+func (m model) fireTransplant() (tea.Model, tea.Cmd) {
+	m.tpBusy = true
+	cfg, plan, opts := m.cfg, m.tpPlan, m.transplantOptions()
+	return m, func() tea.Msg {
+		if _, err := backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true}); err != nil {
+			return transplantMsg{err: fmt.Errorf("pre-move backup sync: %w", err)}
+		}
+		if err := transplant.Apply(cfg, plan, opts); err != nil {
+			return transplantMsg{err: err}
+		}
+		return transplantMsg{moved: len(plan.Sessions), target: plan.TargetPath, copied: opts.Copy}
+	}
 }
 
 // openAsk shows the ai find page, seeding the prompt with an active
@@ -1028,6 +1164,69 @@ func (m model) statsBody(b *strings.Builder) {
 		m.stats.TotalSessions, m.stats.LastComputed)) + "\n")
 }
 
+// transplantView is the two-stage transplant page: target input, then a
+// plan preview that applies on enter.
+func (m model) transplantView() string {
+	var b strings.Builder
+	mode := "move"
+	if m.tpCopy {
+		mode = "copy"
+	}
+	b.WriteString(styleHeader.Render("Session Explorer ▸ transplant") +
+		styleDim.Render("  "+m.tpSource+" ") + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n\n")
+
+	width := max(min(m.width, 110), 40)
+	inner := width - 6
+	modeLine := " mode: " + styleBold.Render(mode) + styleDim.Render("  (tab toggles move/copy)")
+	if m.tpCopy {
+		modeLine += styleDim.Render("  · copies mint a fresh session id")
+	}
+	b.WriteString(modeLine + "\n\n")
+	b.WriteString(styleDim.Render(" target directory") + "\n")
+	prompt := m.tpInput
+	if m.tpPlan == nil {
+		prompt += "▌"
+	}
+	b.WriteString(detailBox(width).Render(styleActive.Render("❯ ")+truncate(prompt, inner)) + "\n")
+
+	help := "enter plan · tab mode · esc close"
+	if m.tpPlan != nil {
+		plan := m.tpPlan
+		var lines []string
+		lines = append(lines, styleBold.Render(fmt.Sprintf("%d session(s)", len(plan.Sessions)))+
+			styleDim.Render("  "+tildePath(plan.SourcePath)+" → "+tildePath(plan.TargetPath)))
+		for i, session := range plan.Sessions {
+			if i == 4 && len(plan.Sessions) > 5 {
+				lines = append(lines, styleDim.Render(fmt.Sprintf("  … and %d more", len(plan.Sessions)-i)))
+				break
+			}
+			line := "  " + session.ID
+			if session.NewID != "" {
+				line += styleDim.Render(" → " + session.NewID)
+			}
+			lines = append(lines, line)
+		}
+		switch plan.MemoryAction {
+		case "none":
+			lines = append(lines, styleDim.Render("memory: none at source"))
+		case "keep-both":
+			lines = append(lines, styleStale.Render("memory: target already has memory — incoming lands beside it"))
+		case "replace":
+			lines = append(lines, styleUnbacked.Render("memory: REPLACES target memory (safety copy kept)"))
+		default:
+			lines = append(lines, styleDim.Render("memory: "+plan.MemoryAction+"s with the sessions"))
+		}
+		b.WriteString("\n" + styleDim.Render(" plan") + "\n")
+		b.WriteString(detailBox(width).Render(strings.Join(lines, "\n")) + "\n")
+		help = "enter " + mode + " · esc back · tab mode"
+	}
+	if m.tpBusy {
+		help = "transplanting… (source synced to backup first)"
+	}
+	return m.pinBottomBare(b.String(), help)
+}
+
 // askView is the ai find page: describe the session in free text, enter
 // asks the configured backend.
 func (m model) askView() string {
@@ -1169,6 +1368,7 @@ func (m model) keysBody(b *strings.Builder) {
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
 	key("r", "restore a ✝ recover session, with confirmation")
+	key("t", "transplant: move/copy a session or project to another dir")
 	key("x", "show or hide ✕ lost sessions")
 	section("GLOBAL")
 	key("m", "this menu · s and a jump straight to stats / activity")
