@@ -84,15 +84,20 @@ func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int
 		return 1
 	}
 
-	// The pre-transplant state must be recoverable before anything moves.
-	if _, err := backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true}); err != nil {
-		fmt.Fprintf(stderr, "transplant refused: pre-move backup sync failed: %v\n", err)
+	// The pre-transplant state is committed to backup before anything
+	// moves, and the transplanted state immediately after — both ends of
+	// the operation are durable git history, not just a mirror.
+	if _, err := backup.Execute(cfg, backup.Options{AllowUnencrypted: true, Action: "pre-transplant"}); err != nil {
+		fmt.Fprintf(stderr, "transplant refused: pre-move backup failed: %v\n", err)
 		return 1
 	}
 
 	if err := Apply(cfg, plan, opts); err != nil {
 		fmt.Fprintf(stderr, "transplant failed: %v\n", err)
 		return 1
+	}
+	if _, err := backup.Execute(cfg, backup.Options{AllowUnencrypted: true, Action: "post-transplant"}); err != nil {
+		fmt.Fprintf(stderr, "warning: post-transplant backup failed: %v\n", err)
 	}
 	verb := "Moved"
 	if opts.Copy {

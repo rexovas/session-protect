@@ -39,6 +39,9 @@ type Options struct {
 	AllowUnencrypted bool
 	// SyncOnly mirrors files into the repo working tree without committing.
 	SyncOnly bool
+	// Action labels the backup commits (default "backup") so operations
+	// like transplant leave their own mark in the repo history.
+	Action string
 }
 
 // Run handles both `backup` and `sync`. In sync mode a held lock is a quiet
@@ -172,14 +175,18 @@ func Execute(cfg config.Config, opts Options) ([]Result, error) {
 		if len(indexes) == 1 {
 			scope = results[indexes[0]].Target
 		}
-		committed, err := gitrepo.Commit(repo, subject(scope, "backup"), body(scope, "backup"))
+		action := opts.Action
+		if action == "" {
+			action = "backup"
+		}
+		committed, err := gitrepo.Commit(repo, subject(scope, action), body(scope, action))
 		if err != nil {
 			return nil, fmt.Errorf("commit %s: %w", repo, err)
 		}
 
 		if paths := stale[repo]; len(paths) > 0 {
 			removed := gitrepo.RemoveFiles(repo, paths)
-			deletionsCommitted, err := gitrepo.Commit(repo, subject(scope, "backup-deletions"), body(scope, "backup-deletions"))
+			deletionsCommitted, err := gitrepo.Commit(repo, subject(scope, action+"-deletions"), body(scope, action+"-deletions"))
 			if err != nil {
 				return nil, fmt.Errorf("commit deletions %s: %w", repo, err)
 			}

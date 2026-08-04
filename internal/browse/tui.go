@@ -960,16 +960,20 @@ func (m model) transplantOptions() transplant.Options {
 	}
 }
 
-// fireTransplant syncs the source to backup, then applies the plan.
+// fireTransplant commits the pre-move state to backup, applies the plan,
+// then commits the transplanted state — both ends land in git history.
 func (m model) fireTransplant() (tea.Model, tea.Cmd) {
 	m.tpBusy = true
 	cfg, plan, opts := m.cfg, m.tpPlan, m.transplantOptions()
 	return m, func() tea.Msg {
-		if _, err := backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true}); err != nil {
-			return transplantMsg{err: fmt.Errorf("pre-move backup sync: %w", err)}
+		if _, err := backup.Execute(cfg, backup.Options{AllowUnencrypted: true, Action: "pre-transplant"}); err != nil {
+			return transplantMsg{err: fmt.Errorf("pre-move backup: %w", err)}
 		}
 		if err := transplant.Apply(cfg, plan, opts); err != nil {
 			return transplantMsg{err: err}
+		}
+		if _, err := backup.Execute(cfg, backup.Options{AllowUnencrypted: true, Action: "post-transplant"}); err != nil {
+			return transplantMsg{err: fmt.Errorf("moved, but post-transplant backup failed: %w", err)}
 		}
 		return transplantMsg{moved: len(plan.Sessions), target: plan.TargetPath, copied: opts.Copy}
 	}
