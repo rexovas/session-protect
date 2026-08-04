@@ -813,9 +813,9 @@ func (m model) View() string {
 
 	help := "↑/↓ move · enter open · ← back · tab panes · ctrl+a all · m menu · q quit"
 	if m.searching {
-		help = "/" + m.query + "▌   enter keep · ctrl+s transcripts · esc cancel"
+		help = "/" + m.query + "▌   enter keep · ctrl+s transcripts · ctrl+g ai find · esc cancel"
 	} else if m.query != "" {
-		help = "/" + m.query + "   enter open · ctrl+s transcripts · esc clear"
+		help = "/" + m.query + "   enter open · ctrl+s transcripts · ctrl+g ai find · esc clear"
 	}
 	if m.hitsBusy {
 		help = "searching transcripts for /" + m.hitsQuery + " … (first run builds the text index)"
