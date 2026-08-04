@@ -53,6 +53,7 @@ type Plan struct {
 	MemoryDst    string // where incoming memory lands
 	MemoryAction string // move | copy | keep-both | skip | replace | none
 	Emptied      bool   // the move drains the source project entirely
+	CreatesDir   bool   // the target directory does not exist yet (mkdir -p)
 }
 
 // claudeSlug replicates the agent's project-path encoding: every character
@@ -94,6 +95,15 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 	root := projectsRoot(cfg)
 
 	plan := &Plan{TargetPath: target, TargetSlug: claudeSlug(target)}
+	if info, err := os.Stat(target); err == nil {
+		if !info.IsDir() {
+			return nil, fmt.Errorf("target %s exists and is not a directory", target)
+		}
+	} else if os.IsNotExist(err) {
+		plan.CreatesDir = true
+	} else {
+		return nil, err
+	}
 
 	if opts.Project != "" {
 		source, err := filepath.Abs(opts.Project)
@@ -214,6 +224,11 @@ func Apply(cfg config.Config, plan *Plan, opts Options) error {
 	}
 	defer release()
 
+	if plan.CreatesDir {
+		if err := os.MkdirAll(plan.TargetPath, 0o755); err != nil {
+			return fmt.Errorf("create target directory: %w", err)
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(plan.Sessions[0].DstFile), 0o700); err != nil {
 		return err
 	}

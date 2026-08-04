@@ -186,6 +186,37 @@ func TestMemoryKeepBothNeverOverwrites(t *testing.T) {
 	}
 }
 
+func TestCreatesMissingTargetDir(t *testing.T) {
+	cfg, _, source, _ := setup(t)
+	target := filepath.Join(t.TempDir(), "deep", "nested", "new-home")
+	opts := Options{Project: source, To: target, Copy: true}
+	plan, err := Build(cfg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.CreatesDir {
+		t.Fatal("plan should flag the missing target directory")
+	}
+	if err := Apply(cfg, plan, opts); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(target)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("target directory not created: %v", err)
+	}
+}
+
+func TestRefusesFileTarget(t *testing.T) {
+	cfg, _, source, _ := setup(t)
+	file := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(cfg, Options{Project: source, To: file}); err == nil {
+		t.Fatal("file target must be refused")
+	}
+}
+
 func TestRefusesSameProjectAndMissingSession(t *testing.T) {
 	cfg, _, source, _ := setup(t)
 	if _, err := Build(cfg, Options{Project: source, To: source}); err == nil {

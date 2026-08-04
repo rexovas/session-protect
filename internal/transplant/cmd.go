@@ -120,6 +120,9 @@ func printPlan(out io.Writer, plan *Plan, opts Options) {
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  source  %s\n", plan.SourcePath)
 	fmt.Fprintf(out, "  target  %s\n", plan.TargetPath)
+	if plan.CreatesDir {
+		fmt.Fprintf(out, "  create  target directory does not exist — will create it (mkdir -p)\n")
+	}
 	fmt.Fprintln(out)
 	for _, session := range plan.Sessions {
 		line := "  session " + session.ID

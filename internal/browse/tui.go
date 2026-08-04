@@ -1200,6 +1200,9 @@ func (m model) transplantView() string {
 		var lines []string
 		lines = append(lines, styleBold.Render(fmt.Sprintf("%d session(s)", len(plan.Sessions)))+
 			styleDim.Render("  "+tildePath(plan.SourcePath)+" → "+tildePath(plan.TargetPath)))
+		if plan.CreatesDir {
+			lines = append(lines, styleStale.Render("will create "+tildePath(plan.TargetPath)))
+		}
 		for i, session := range plan.Sessions {
 			if i == 4 && len(plan.Sessions) > 5 {
 				lines = append(lines, styleDim.Render(fmt.Sprintf("  … and %d more", len(plan.Sessions)-i)))
