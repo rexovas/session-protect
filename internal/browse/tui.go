@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rexovas/session-protect/internal/assist"
 	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/version"
@@ -55,8 +56,12 @@ type model struct {
 
 	// Content search (ctrl+s on a query) counts transcript hits per
 	// session under the current root and shows them as their own pane.
+	// AI find (ctrl+g) reuses the pane with hitsMode "ask": ranked
+	// matches whose snippet line is the model's reasoning.
 	showHits  bool
 	hitsBusy  bool
+	hitsMode  string // "hits" | "ask"
+	hitsNote  string // backend name for ask results
 	hitsQuery string
 	hits      []Hit
 	hCursor   int
@@ -108,6 +113,12 @@ type model struct {
 type rescanMsg []*Project
 
 type hitsMsg []Hit
+
+type askMsg struct {
+	hits    []Hit
+	backend string
+	err     error
+}
 
 type tickMsg time.Time
 
@@ -285,7 +296,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case hitsMsg:
 		m.hitsBusy = false
+		m.hitsMode = "hits"
 		m.hits = msg
+		m.showHits = true
+		m.hCursor, m.hOffset = 0, 0
+		return m, nil
+	case askMsg:
+		m.hitsBusy = false
+		if msg.err != nil {
+			m.notice, m.noticeErr = "ai find failed: "+msg.err.Error(), true
+			return m, nil
+		}
+		m.hitsMode = "ask"
+		m.hitsNote = msg.backend
+		m.hits = msg.hits
 		m.showHits = true
 		m.hCursor, m.hOffset = 0, 0
 		return m, nil
@@ -405,6 +429,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.searching = false
 				return m.fireContentSearch()
 			}
+		case "ctrl+g":
+			if m.query != "" && !m.hitsBusy {
+				m.searching = false
+				return m.fireAsk()
+			}
 		case "backspace":
 			if runes := []rune(m.query); len(runes) > 0 {
 				m.query = string(runes[:len(runes)-1])
@@ -499,6 +528,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+s":
 		if m.query != "" && !m.hitsBusy {
 			return m.fireContentSearch()
+		}
+	case "ctrl+g":
+		if m.query != "" && !m.hitsBusy {
+			return m.fireAsk()
 		}
 	case "up", "k":
 		m.setCursor(m.currentCursor() - 1)
@@ -753,12 +786,15 @@ func (m model) View() string {
 
 	help := "↑/↓ move · enter open · ← back · tab panes · ctrl+a all · m menu · q quit"
 	if m.searching {
-		help = "/" + m.query + "▌   ↑/↓ move · enter keep filter · ctrl+s transcripts · esc cancel"
+		help = "/" + m.query + "▌   enter keep · ctrl+s transcripts · ctrl+g ai find · esc cancel"
 	} else if m.query != "" {
-		help = "/" + m.query + "   ↑/↓ move · enter open · ctrl+s transcripts · esc clear filter"
+		help = "/" + m.query + "   enter open · ctrl+s transcripts · ctrl+g ai find · esc clear"
 	}
 	if m.hitsBusy {
 		help = "searching transcripts for /" + m.hitsQuery + " … (first run builds the text index)"
+		if m.hitsMode == "ask" {
+			help = "asking the local model about \"" + m.hitsQuery + "\" …"
+		}
 	}
 	if m.confirmRestore != nil {
 		help = "y/enter restore · esc cancel"
@@ -774,6 +810,40 @@ func (m model) fireContentSearch() (tea.Model, tea.Cmd) {
 	cfg, query := m.cfg, m.query
 	scope := AllUnder(m.projects, m.root)
 	return m, func() tea.Msg { return hitsMsg(ContentSearch(cfg, scope, query)) }
+}
+
+// fireAsk asks the configured local model which sessions match the
+// description, grounded on keyword-scored candidates with excerpts.
+func (m model) fireAsk() (tea.Model, tea.Cmd) {
+	backend := assist.Detect(m.cfg.Assist)
+	if backend == nil {
+		m.notice = "ai find needs ollama running or the claude CLI on PATH (assist.backend in config)"
+		m.noticeErr = true
+		return m, nil
+	}
+	m.hitsBusy = true
+	m.hitsMode = "ask"
+	m.hitsQuery = m.query
+	cfg, query := m.cfg, m.query
+	scope := AllUnder(m.projects, m.root)
+	return m, func() tea.Msg {
+		candidates := BuildCandidates(cfg, scope, query)
+		matches, err := backend.Rank(query, candidates)
+		if err != nil {
+			return askMsg{backend: backend.Name(), err: err}
+		}
+		byID := map[string]Session{}
+		for _, session := range scope {
+			byID[session.ID] = session
+		}
+		var hits []Hit
+		for _, match := range matches {
+			if session, ok := byID[match.ID]; ok {
+				hits = append(hits, Hit{Session: session, Snippet: match.Reason})
+			}
+		}
+		return askMsg{hits: hits, backend: backend.Name()}
+	}
 }
 
 // openDetail loads the inspector for the selected session.
@@ -917,31 +987,47 @@ func (m model) statsBody(b *strings.Builder) {
 // selected row's best matching line shows above the footer.
 func (m model) hitsView() string {
 	var b strings.Builder
-	left := styleHeader.Render("Session Explorer ▸ transcript hits") +
-		styleDim.Render(fmt.Sprintf("  /%s · %d session(s) ", m.hitsQuery, len(m.hits)))
-	b.WriteString(left + "\n")
+	heading := "Session Explorer ▸ transcript hits"
+	note := fmt.Sprintf("  /%s · %d session(s) ", m.hitsQuery, len(m.hits))
+	if m.hitsMode == "ask" {
+		heading = "Session Explorer ▸ ai find"
+		note = fmt.Sprintf("  \"%s\" · %d match(es) via %s ", m.hitsQuery, len(m.hits), m.hitsNote)
+	}
+	b.WriteString(styleHeader.Render(heading) + styleDim.Render(note) + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
 
 	if len(m.hits) == 0 {
-		b.WriteString(styleDim.Render("  no transcript matches for /"+m.hitsQuery) + "\n")
+		empty := "  no transcript matches for /" + m.hitsQuery
+		if m.hitsMode == "ask" {
+			empty = "  the model found no likely sessions for that description"
+		}
+		b.WriteString(styleDim.Render(empty) + "\n")
 		return m.pinBottomBare(b.String(), "esc back · / new search · ctrl+c quit")
 	}
 
+	countHeader := "HITS"
+	if m.hitsMode == "ask" {
+		countHeader = "RANK"
+	}
 	b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-*s %-7s %s",
-		"HITS", m.titleWidth(), "TITLE", "AGENT", "IN")) + "\n")
+		countHeader, m.titleWidth(), "TITLE", "AGENT", "IN")) + "\n")
 	end := min(len(m.hits), m.hOffset+m.pageSize())
 	for i := m.hOffset; i < end; i++ {
-		b.WriteString(m.hitRow(m.hits[i], i == m.hCursor) + "\n")
+		b.WriteString(m.hitRow(m.hits[i], i, i == m.hCursor) + "\n")
 	}
 	if m.hCursor < len(m.hits) {
 		if snippet := m.hits[m.hCursor].Snippet; snippet != "" {
-			b.WriteString("\n " + styleDim.Render("❯ "+truncate(snippet, m.width-4)) + "\n")
+			prefix := "❯ "
+			if m.hitsMode == "ask" {
+				prefix = "why: "
+			}
+			b.WriteString("\n " + styleDim.Render(prefix+truncate(snippet, m.width-4-len(prefix))) + "\n")
 		}
 	}
 	return m.pinBottomBare(b.String(), "↑/↓ move · enter open · esc back · / new search")
 }
 
-func (m model) hitRow(hit Hit, active bool) string {
+func (m model) hitRow(hit Hit, index int, active bool) string {
 	title := hit.Session.CustomName
 	if title == "" {
 		title = hit.Session.Title
@@ -949,9 +1035,13 @@ func (m model) hitRow(hit Hit, active bool) string {
 	if title == "" {
 		title = hit.Session.ID
 	}
+	count := hit.Count
+	if m.hitsMode == "ask" {
+		count = index + 1
+	}
 	in := tildePath(hit.Session.ProjectPath)
 	row := fmt.Sprintf("  %6d  %-*s %-7s %s",
-		hit.Count, m.titleWidth(), truncate(title, m.titleWidth()),
+		count, m.titleWidth(), truncate(title, m.titleWidth()),
 		hit.Session.Target,
 		styleUnless(active, styleDim, truncate(in, max(10, m.width-m.titleWidth()-22))))
 	if active {
@@ -1009,6 +1099,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("ctrl+e", "expand / collapse the whole folder tree in place")
 	key("/", "filter the current pane — folder tree or session list")
 	key("ctrl+s", "search transcripts for the query, ranked by hit count")
+	key("ctrl+g", "ai find: describe the session, a local model ranks likely matches")
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")

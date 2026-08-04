@@ -20,7 +20,19 @@ type Config struct {
 
 	Encryption Encryption              `toml:"encryption" json:"encryption"`
 	Schedule   Schedule                `toml:"schedule" json:"schedule"`
+	Assist     Assist                  `toml:"assist" json:"assist"`
 	Targets    map[string]TargetConfig `toml:"targets" json:"targets"`
+}
+
+// Assist configures the optional AI find backend. No vendor is required
+// or bundled: auto probes a local ollama server first, then a claude CLI
+// on PATH, and the feature hides entirely when neither exists.
+type Assist struct {
+	Backend string `toml:"backend" json:"backend"` // auto | ollama | claude | none
+	// Model is the ollama model to use; empty picks the first installed.
+	Model string `toml:"model" json:"model,omitempty"`
+	// URL is the ollama server address.
+	URL string `toml:"url" json:"url,omitempty"`
 }
 
 type Schedule struct {
@@ -92,6 +104,7 @@ func Defaults() Config {
 			KeyPath: filepath.Join(home, ".config", "session-protect", "git-crypt.key"),
 		},
 		Schedule: Schedule{Time: "12:00"},
+		Assist:   Assist{Backend: "auto", URL: "http://localhost:11434"},
 		Targets:  map[string]TargetConfig{},
 	}
 }
@@ -147,6 +160,11 @@ func (c Config) validate() error {
 	}
 	if _, _, err := c.Schedule.Clock(); err != nil {
 		return err
+	}
+	switch c.Assist.Backend {
+	case "auto", "ollama", "claude", "none", "":
+	default:
+		return fmt.Errorf("invalid assist.backend %q (want auto, ollama, claude, or none)", c.Assist.Backend)
 	}
 	return nil
 }
