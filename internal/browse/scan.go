@@ -385,8 +385,11 @@ type Detail struct {
 	Compactions    int
 	LastCompact    string // trigger of the most recent compaction
 	LastCompactPre int64  // context tokens at that compaction
-	// Transcript holds the most recent text messages for the tail viewer.
-	Transcript []TranscriptMsg
+	// Transcript holds the most recent text messages for the tail viewer;
+	// TranscriptTotal is how many the whole session has, so the viewer
+	// knows when older messages exist beyond the loaded window.
+	Transcript      []TranscriptMsg
+	TranscriptTotal int
 }
 
 type TranscriptMsg struct {
@@ -394,7 +397,8 @@ type TranscriptMsg struct {
 	Text string
 }
 
-// transcriptKeep bounds how much of the tail the inspector loads.
+// transcriptKeep bounds how much of the tail the inspector loads at
+// first; scrolling past the top reloads with a larger window.
 const transcriptKeep = 300
 
 // TokenTotals sums per-message usage across a session.
@@ -414,6 +418,11 @@ func (t TokenTotals) Zero() bool {
 // summed from assistant messages. Formats vary per agent and version, so
 // extraction is best-effort.
 func LoadDetail(session Session) Detail {
+	return LoadDetailKeep(session, transcriptKeep)
+}
+
+// LoadDetailKeep loads detail keeping up to keep transcript messages.
+func LoadDetailKeep(session Session, keep int) Detail {
 	var detail Detail
 	path := session.SourcePath
 	if path == "" {
@@ -431,8 +440,9 @@ func LoadDetail(session Session) Detail {
 
 	detail.PerModel = map[string]TokenTotals{}
 	appendMsg := func(role string, text string) {
+		detail.TranscriptTotal++
 		detail.Transcript = append(detail.Transcript, TranscriptMsg{Role: role, Text: text})
-		if len(detail.Transcript) > transcriptKeep {
+		if len(detail.Transcript) > keep {
 			detail.Transcript = detail.Transcript[1:]
 		}
 	}
@@ -755,6 +765,7 @@ func LoadLostDetail(id string) Detail {
 		}
 		detail.LastPrompt = entry.Display
 		detail.Transcript = append(detail.Transcript, TranscriptMsg{Role: "user", Text: entry.Display})
+		detail.TranscriptTotal++
 		if len(detail.Transcript) > transcriptKeep {
 			detail.Transcript = detail.Transcript[1:]
 		}

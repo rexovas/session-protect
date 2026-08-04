@@ -100,6 +100,7 @@ type model struct {
 	detail       *Session
 	detailData   Detail
 	detailTab    int // 0 overview · 1 usage · 2 tail
+	tailKeep     int // transcript window; grows when scrolling past the top
 	tailLines    []string
 	tailWidth    int
 	tailOffset   int // lines scrolled up from the bottom
@@ -383,11 +384,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // scrollTail moves the tail viewport; positive is toward earlier lines.
+// Pushing past the top of a truncated transcript reloads with a larger
+// window — the offset is anchored to the bottom, so the view stays put
+// while older messages appear above.
 func (m *model) scrollTail(delta int) {
 	if m.detailTab != 2 {
 		return
 	}
-	m.tailOffset = max(0, min(m.tailOffset+delta, max(0, len(m.tailLines)-3)))
+	limit := max(0, len(m.tailLines)-3)
+	if delta > 0 && m.tailOffset >= limit && m.detail != nil &&
+		m.detailData.TranscriptTotal > len(m.detailData.Transcript) && m.detail.State != "LOST" {
+		m.tailKeep *= 4
+		m.detailData = LoadDetailKeep(*m.detail, m.tailKeep)
+		m.buildTailLines()
+		limit = max(0, len(m.tailLines)-3)
+	}
+	m.tailOffset = max(0, min(m.tailOffset+delta, limit))
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1038,6 +1050,7 @@ func (m *model) openDetail() {
 		return
 	}
 	m.detail = session
+	m.tailKeep = transcriptKeep
 	if session.State == "LOST" {
 		m.detailData = LoadLostDetail(session.ID)
 	} else {
@@ -1725,6 +1738,12 @@ func (m *model) buildTailLines() {
 	)
 
 	var lines []string
+	if hidden := m.detailData.TranscriptTotal - len(m.detailData.Transcript); hidden > 0 {
+		lines = append(lines, styleDim.Render(fmt.Sprintf(
+			"── %d earlier message(s) — keep scrolling up to load ──", hidden)), "")
+	} else if len(m.detailData.Transcript) > 0 {
+		lines = append(lines, styleDim.Render("── session start ──"), "")
+	}
 	for _, msg := range m.detailData.Transcript {
 		if msg.Role == "compact" {
 			lines = append(lines, "", styleDim.Render("── conversation compacted ("+msg.Text+") ──"), "")
