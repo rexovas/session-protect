@@ -91,10 +91,31 @@ func Scan(cfg config.Config) []*Project {
 			Prompts:  ghost.Count,
 		})
 	}
+	// Codex history records no project path, so its lost sessions
+	// surface under one pseudo-folder at the start root.
+	for id, ghost := range codexHistorySessions() {
+		if seen[id] {
+			continue
+		}
+		const bucket = "codex · lost sessions"
+		project := byPath[bucket]
+		if project == nil {
+			project = &Project{Path: bucket}
+			byPath[bucket] = project
+		}
+		project.Sessions = append(project.Sessions, Session{
+			Target:   "codex",
+			ID:       id,
+			Title:    ghost.Title,
+			State:    "LOST",
+			Modified: ghost.Last,
+			Prompts:  ghost.Count,
+		})
+	}
 
 	titles := historyTitles()
 	open := guard.Live(guard.RegistryDir())
-	codexIDs, codexCwds := liveCodex()
+	codexIDs, codexCwds := guard.LiveCodex()
 	if codexIDs == nil {
 		codexIDs = map[string]bool{}
 	}
@@ -893,6 +914,67 @@ type lostInfo struct {
 // claudeHistorySessions indexes the claude prompt history by session id.
 // This is the only record of sessions whose transcripts were pruned before
 // any backup existed.
+// codexHistorySessions reads codex prompt history: session id, unix
+// seconds, and prompt text per line.
+func codexHistorySessions() map[string]lostInfo {
+	sessions := map[string]lostInfo{}
+	file, err := os.Open(filepath.Join(targets.DetectCodex().Source, "history.jsonl"))
+	if err != nil {
+		return sessions
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var entry struct {
+			SessionID string `json:"session_id"`
+			Ts        int64  `json:"ts"`
+			Text      string `json:"text"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.SessionID == "" {
+			continue
+		}
+		info := sessions[entry.SessionID]
+		info.Count++
+		if info.Title == "" {
+			info.Title = strings.Join(strings.Fields(entry.Text), " ")
+		}
+		at := time.Unix(entry.Ts, 0)
+		if info.First.IsZero() || at.Before(info.First) {
+			info.First = at
+		}
+		if at.After(info.Last) {
+			info.Last = at
+		}
+		sessions[entry.SessionID] = info
+	}
+	return sessions
+}
+
+// codexThreadNames reads codex's session index: the latest thread_name
+// per session id, codex's own equivalent of a custom title.
+func codexThreadNames() map[string]string {
+	names := map[string]string{}
+	file, err := os.Open(filepath.Join(targets.DetectCodex().Source, "session_index.jsonl"))
+	if err != nil {
+		return names
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var entry struct {
+			ID         string `json:"id"`
+			ThreadName string `json:"thread_name"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &entry) == nil && entry.ID != "" && entry.ThreadName != "" {
+			names[entry.ID] = entry.ThreadName
+		}
+	}
+	return names
+}
+
 func claudeHistorySessions() map[string]lostInfo {
 	sessions := map[string]lostInfo{}
 	file, err := os.Open(filepath.Join(targets.DetectClaude().Source, "history.jsonl"))

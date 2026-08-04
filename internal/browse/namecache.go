@@ -42,10 +42,16 @@ func applyNames(cfg config.Config, projects []*Project) {
 		cache = map[string]nameEntry{}
 	}
 
+	codexNames := codexThreadNames()
 	dirty := false
 	for _, project := range projects {
 		for i := range project.Sessions {
 			session := &project.Sessions[i]
+			if session.Target == "codex" {
+				if name, ok := codexNames[session.ID]; ok {
+					session.CustomName = name
+				}
+			}
 			file := session.SourcePath
 			if file == "" {
 				file = session.BackupPath

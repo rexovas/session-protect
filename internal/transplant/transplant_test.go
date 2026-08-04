@@ -226,3 +226,92 @@ func TestRefusesSameProjectAndMissingSession(t *testing.T) {
 		t.Fatal("unknown session must be refused")
 	}
 }
+
+const codexID = "019f0000-1111-2222-3333-444444444444"
+
+func setupCodex(t *testing.T, home string, source string) string {
+	t.Helper()
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "08", "01")
+	path := filepath.Join(dir, "rollout-2026-08-01T10-00-00-"+codexID+".jsonl")
+	lines := `{"timestamp":"t","type":"session_meta","payload":{"id":"` + codexID + `","session_id":"` + codexID + `","cwd":"` + source + `"}}
+{"timestamp":"t","type":"turn_context","payload":{"cwd":"` + source + `","workspace_roots":["` + source + `"],"model":"gpt-5.5"}}
+{"timestamp":"t","type":"event_msg","payload":{"type":"user_message","message":"hello from ` + source + `/sub"}}
+`
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestCodexMoveRewritesInPlace(t *testing.T) {
+	cfg, home, source, target := setup(t)
+	path := setupCodex(t, home, source)
+
+	opts := Options{Project: source, To: target}
+	plan, err := Build(cfg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var codexPlan *SessionPlan
+	for i := range plan.Sessions {
+		if plan.Sessions[i].Target == "codex" {
+			codexPlan = &plan.Sessions[i]
+		}
+	}
+	if codexPlan == nil || !codexPlan.InPlace || codexPlan.ID != codexID {
+		t.Fatalf("codex session not planned in place: %+v", plan.Sessions)
+	}
+	if !plan.Emptied {
+		t.Fatal("moving every session of the project should empty it")
+	}
+	if err := Apply(cfg, plan, opts); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("in-place codex file missing after move: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"cwd":"`+target+`"`) || !strings.Contains(text, `["`+target+`"]`) {
+		t.Fatalf("cwd/workspace_roots not rewritten: %s", text)
+	}
+	// Message content mentioning the old path is history — untouched.
+	if !strings.Contains(text, "hello from "+source+"/sub") {
+		t.Fatal("message content must not be rewritten")
+	}
+}
+
+func TestCodexCopyMintsSibling(t *testing.T) {
+	cfg, home, source, target := setup(t)
+	path := setupCodex(t, home, source)
+
+	opts := Options{SessionID: codexID, To: target, Copy: true}
+	plan, err := Build(cfg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Sessions) != 1 || plan.Sessions[0].Target != "codex" || plan.Sessions[0].NewID == "" {
+		t.Fatalf("unexpected plan: %+v", plan.Sessions)
+	}
+	if err := Apply(cfg, plan, opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("copy removed the original: %v", err)
+	}
+	data, err := os.ReadFile(plan.Sessions[0].DstFile)
+	if err != nil {
+		t.Fatalf("copied codex session missing: %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, codexID) {
+		t.Fatal("old id survives inside the codex copy")
+	}
+	if !strings.Contains(text, plan.Sessions[0].NewID) || !strings.Contains(text, `"cwd":"`+target+`"`) {
+		t.Fatal("copy not rewritten to new id/target")
+	}
+}

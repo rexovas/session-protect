@@ -656,10 +656,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if session == nil {
 				break
 			}
-			if session.Target != "claude" {
-				m.notice, m.noticeErr = "transplant supports claude sessions for now", true
-				break
-			}
 			if session.State == "LOST" {
 				m.notice, m.noticeErr = "lost sessions have no transcript to transplant", true
 				break

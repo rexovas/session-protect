@@ -33,6 +33,7 @@ type Options struct {
 
 // SessionPlan is one session's part of the plan.
 type SessionPlan struct {
+	Target  string `json:"target"` // claude | codex
 	ID      string `json:"id"`
 	NewID   string `json:"new_id,omitempty"` // copies get a fresh identity
 	SrcFile string `json:"src_file"`
@@ -40,6 +41,9 @@ type SessionPlan struct {
 	SrcDir  string `json:"src_dir,omitempty"` // sidecar dir (subagents etc.)
 	DstDir  string `json:"dst_dir,omitempty"`
 	Open    bool   `json:"open,omitempty"` // live in a running agent
+	// InPlace marks codex moves: the file stays where it is (codex keys
+	// sessions by date, not project) and only its cwd fields rewrite.
+	InPlace bool `json:"in_place,omitempty"`
 }
 
 // Plan is everything a transplant will do, computable without writing.
@@ -68,6 +72,16 @@ func claudeSlug(path string) string {
 		}
 	}
 	return b.String()
+}
+
+func codexSessionsRoot(cfg config.Config) string {
+	for _, target := range cfg.ResolveTargets() {
+		if target.Name == "codex" {
+			return filepath.Join(target.Source, "sessions")
+		}
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex", "sessions")
 }
 
 func projectsRoot(cfg config.Config) string {
@@ -105,6 +119,7 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 		return nil, err
 	}
 
+	codexRoot := codexSessionsRoot(cfg)
 	if opts.Project != "" {
 		source, err := filepath.Abs(opts.Project)
 		if err != nil {
@@ -112,58 +127,96 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 		}
 		plan.SourcePath = source
 		plan.SourceSlug = claudeSlug(source)
+	} else if path, err := findCodexSession(codexRoot, opts.SessionID); err == nil {
+		plan.SourcePath = codexCwd(path)
+		plan.SourceSlug = claudeSlug(plan.SourcePath)
 	} else {
 		slug, err := findSessionSlug(root, opts.SessionID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("session %s not found in claude or codex storage", opts.SessionID)
 		}
 		plan.SourceSlug = slug
 		plan.SourcePath = sessionCwd(filepath.Join(root, slug, opts.SessionID+".jsonl"))
 	}
-	if plan.SourceSlug == plan.TargetSlug {
+	if plan.SourcePath == plan.TargetPath || plan.SourceSlug == plan.TargetSlug {
 		return nil, fmt.Errorf("source and target are the same project")
 	}
 
-	srcDir := filepath.Join(root, plan.SourceSlug)
-	entries, err := os.ReadDir(srcDir)
-	if err != nil {
-		return nil, fmt.Errorf("no agent state for source project: %w", err)
-	}
-	dstDir := filepath.Join(root, plan.TargetSlug)
 	live := guard.Live(guard.RegistryDir())
+	liveCodexIDs, liveCodexCwds := guard.LiveCodex()
+	codexOpen := func(id string) bool {
+		if liveCodexIDs[id] {
+			return true
+		}
+		for _, cwd := range liveCodexCwds {
+			if cwd == plan.SourcePath {
+				return true
+			}
+		}
+		return false
+	}
 
+	srcDir := filepath.Join(root, plan.SourceSlug)
+	dstDir := filepath.Join(root, plan.TargetSlug)
 	remaining := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") {
-			continue
+	if entries, err := os.ReadDir(srcDir); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			id := strings.TrimSuffix(name, ".jsonl")
+			if opts.SessionID != "" && id != opts.SessionID {
+				remaining++
+				continue
+			}
+			session := SessionPlan{
+				Target:  "claude",
+				ID:      id,
+				SrcFile: filepath.Join(srcDir, name),
+				DstFile: filepath.Join(dstDir, name),
+			}
+			if _, open := live[id]; open {
+				session.Open = true
+			}
+			if opts.Copy {
+				session.NewID = newUUID()
+				session.DstFile = filepath.Join(dstDir, session.NewID+".jsonl")
+			}
+			if info, err := os.Stat(filepath.Join(srcDir, id)); err == nil && info.IsDir() {
+				session.SrcDir = filepath.Join(srcDir, id)
+				session.DstDir = filepath.Join(dstDir, id)
+				if session.NewID != "" {
+					session.DstDir = filepath.Join(dstDir, session.NewID)
+				}
+			}
+			plan.Sessions = append(plan.Sessions, session)
 		}
-		id := strings.TrimSuffix(name, ".jsonl")
-		if opts.SessionID != "" && id != opts.SessionID {
-			remaining++
-			continue
-		}
+	}
+
+	// Codex sessions live in date dirs, keyed to projects by their cwd
+	// fields alone — a move rewrites in place, a copy lands beside the
+	// original under a fresh id.
+	for _, path := range codexSessionsFor(codexRoot, plan.SourcePath, opts.SessionID) {
+		base := filepath.Base(path)
+		id := codexIDFromName(base)
 		session := SessionPlan{
+			Target:  "codex",
 			ID:      id,
-			SrcFile: filepath.Join(srcDir, name),
-			DstFile: filepath.Join(dstDir, name),
-		}
-		if _, open := live[id]; open {
-			session.Open = true
+			SrcFile: path,
+			DstFile: path,
+			InPlace: !opts.Copy,
+			Open:    codexOpen(id),
 		}
 		if opts.Copy {
 			session.NewID = newUUID()
-			session.DstFile = filepath.Join(dstDir, session.NewID+".jsonl")
-		}
-		if info, err := os.Stat(filepath.Join(srcDir, id)); err == nil && info.IsDir() {
-			session.SrcDir = filepath.Join(srcDir, id)
-			session.DstDir = filepath.Join(dstDir, id)
-			if session.NewID != "" {
-				session.DstDir = filepath.Join(dstDir, session.NewID)
-			}
+			session.DstFile = filepath.Join(filepath.Dir(path),
+				strings.Replace(base, id, session.NewID, 1))
+			session.InPlace = false
 		}
 		plan.Sessions = append(plan.Sessions, session)
 	}
+
 	if len(plan.Sessions) == 0 {
 		return nil, fmt.Errorf("no sessions to transplant")
 	}
@@ -172,7 +225,14 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 			return nil, fmt.Errorf("session %s is open in a running agent; close it first (copy is allowed)", session.ID)
 		}
 	}
-	plan.Emptied = !opts.Copy && remaining == 0
+	codexInPlan := 0
+	for _, session := range plan.Sessions {
+		if session.Target == "codex" {
+			codexInPlan++
+		}
+	}
+	codexRemaining := len(codexSessionsFor(codexRoot, plan.SourcePath, "")) - codexInPlan
+	plan.Emptied = !opts.Copy && remaining == 0 && codexRemaining <= 0
 
 	// Memory: project scope always carries it; session scope copies it
 	// (the source project still needs it) unless the move drains the
@@ -229,20 +289,26 @@ func Apply(cfg config.Config, plan *Plan, opts Options) error {
 			return fmt.Errorf("create target directory: %w", err)
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(plan.Sessions[0].DstFile), 0o700); err != nil {
-		return err
-	}
 
 	for i := range plan.Sessions {
 		session := &plan.Sessions[i]
-		if _, err := os.Stat(session.DstFile); err == nil {
+		write := session.DstFile
+		if session.InPlace {
+			write = session.SrcFile + ".transplant"
+		} else if _, err := os.Stat(session.DstFile); err == nil {
 			return fmt.Errorf("target already has session file %s", filepath.Base(session.DstFile))
 		}
-		if err := rewriteSession(session.SrcFile, session.DstFile, plan.SourcePath, plan.TargetPath, session.ID, session.NewID); err != nil {
+		if err := rewriteSession(session.SrcFile, write, session.Target, plan.SourcePath, plan.TargetPath, session.ID, session.NewID); err != nil {
 			return fmt.Errorf("session %s: %w", session.ID, err)
 		}
-		if err := verifyLineCount(session.SrcFile, session.DstFile); err != nil {
+		if err := verifyLineCount(session.SrcFile, write); err != nil {
+			_ = os.Remove(write)
 			return fmt.Errorf("session %s: %w", session.ID, err)
+		}
+		if session.InPlace {
+			if err := os.Rename(write, session.SrcFile); err != nil {
+				return fmt.Errorf("session %s: %w", session.ID, err)
+			}
 		}
 		if session.SrcDir != "" {
 			if err := copyTree(session.SrcDir, session.DstDir); err != nil {
@@ -275,6 +341,9 @@ func Apply(cfg config.Config, plan *Plan, opts Options) error {
 	// backup regardless.
 	if !opts.Copy {
 		for _, session := range plan.Sessions {
+			if session.InPlace {
+				continue // codex move: already rewritten where it lives
+			}
 			if err := os.Remove(session.SrcFile); err != nil {
 				return fmt.Errorf("remove %s: %w", session.SrcFile, err)
 			}
@@ -299,7 +368,7 @@ func Apply(cfg config.Config, plan *Plan, opts Options) error {
 // fields under the source path and (for copies) the session identity.
 // Lines are decoded with UseNumber so numeric fields survive untouched;
 // anything unparseable passes through verbatim.
-func rewriteSession(src string, dst string, fromPath string, toPath string, oldID string, newID string) error {
+func rewriteSession(src string, dst string, target string, fromPath string, toPath string, oldID string, newID string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -318,7 +387,13 @@ func rewriteSession(src string, dst string, fromPath string, toPath string, oldI
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		rewritten, changed := rewriteLine(line, fromPath, toPath, oldID, newID)
+		var rewritten []byte
+		var changed bool
+		if target == "codex" {
+			rewritten, changed = rewriteCodexLine(line, fromPath, toPath, oldID, newID)
+		} else {
+			rewritten, changed = rewriteLine(line, fromPath, toPath, oldID, newID)
+		}
 		if changed {
 			line = rewritten
 		}
@@ -367,6 +442,81 @@ func rewriteLine(line []byte, fromPath string, toPath string, oldID string, newI
 			changed = true
 		}
 	}
+	if !changed {
+		return nil, false
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
+// rewriteCodexLine retargets cwd/workspace_roots values (recursively —
+// codex nests them inside payloads) and, for copies, id/session_id
+// fields matching the old identity.
+func rewriteCodexLine(line []byte, fromPath string, toPath string, oldID string, newID string) ([]byte, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.UseNumber()
+	var event map[string]any
+	if decoder.Decode(&event) != nil {
+		return nil, false
+	}
+	retarget := func(value string) (string, bool) {
+		if fromPath == "" {
+			return value, false
+		}
+		if value == fromPath {
+			return toPath, true
+		}
+		if strings.HasPrefix(value, fromPath+string(os.PathSeparator)) {
+			return toPath + value[len(fromPath):], true
+		}
+		return value, false
+	}
+	changed := false
+	var walk func(node any)
+	walk = func(node any) {
+		object, ok := node.(map[string]any)
+		if !ok {
+			if list, ok := node.([]any); ok {
+				for _, item := range list {
+					walk(item)
+				}
+			}
+			return
+		}
+		for key, value := range object {
+			switch key {
+			case "cwd":
+				if path, ok := value.(string); ok {
+					if next, hit := retarget(path); hit {
+						object[key] = next
+						changed = true
+					}
+				}
+			case "workspace_roots":
+				if roots, ok := value.([]any); ok {
+					for i, root := range roots {
+						if path, ok := root.(string); ok {
+							if next, hit := retarget(path); hit {
+								roots[i] = next
+								changed = true
+							}
+						}
+					}
+				}
+			case "id", "session_id":
+				if id, ok := value.(string); ok && newID != "" && id == oldID {
+					object[key] = newID
+					changed = true
+				}
+			default:
+				walk(value)
+			}
+		}
+	}
+	walk(event)
 	if !changed {
 		return nil, false
 	}
@@ -431,6 +581,79 @@ func copyTree(src string, dst string) error {
 	})
 }
 
+// findCodexSession walks the date-keyed codex sessions tree for the file
+// carrying a session id.
+func findCodexSession(root string, id string) (string, error) {
+	var found string
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(entry.Name(), id+".jsonl") {
+			found = path
+		}
+		return nil
+	})
+	if found == "" {
+		return "", fmt.Errorf("session %s not found in codex storage", id)
+	}
+	return found, nil
+}
+
+// codexSessionsFor lists codex session files whose recorded cwd is the
+// project path; sessionID narrows to one session when set.
+func codexSessionsFor(root string, projectPath string, sessionID string) []string {
+	if projectPath == "" {
+		return nil
+	}
+	var out []string
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			return nil
+		}
+		if sessionID != "" && !strings.HasSuffix(entry.Name(), sessionID+".jsonl") {
+			return nil
+		}
+		if codexCwd(path) == projectPath {
+			out = append(out, path)
+		}
+		return nil
+	})
+	return out
+}
+
+// codexIDFromName pulls the session uuid from a rollout filename.
+func codexIDFromName(name string) string {
+	name = strings.TrimSuffix(name, ".jsonl")
+	if len(name) > 36 {
+		return name[len(name)-36:]
+	}
+	return name
+}
+
+// codexCwd reads the session's working directory from its meta line.
+func codexCwd(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var line struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Cwd string `json:"cwd"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &line) == nil && line.Type == "session_meta" {
+			return line.Payload.Cwd
+		}
+	}
+	return ""
+}
+
 // findSessionSlug locates which project dir holds a session id.
 func findSessionSlug(root string, id string) (string, error) {
 	entries, err := os.ReadDir(root)
@@ -490,7 +713,7 @@ func logTransplant(cfg config.Config, plan *Plan, opts Options) {
 		entries = append(entries, audit.Entry{
 			Time:      now,
 			Action:    action,
-			Target:    "claude",
+			Target:    session.Target,
 			SessionID: session.ID,
 			From:      session.SrcFile,
 			To:        session.DstFile,

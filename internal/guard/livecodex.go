@@ -1,4 +1,4 @@
-package browse
+package guard
 
 import (
 	"os/exec"
@@ -17,7 +17,7 @@ var uuidPattern = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 
 // liveCodex returns session ids known to be open and the working
 // directories of codex processes whose session id is not in their args.
-func liveCodex() (ids map[string]bool, cwds []string) {
+func LiveCodex() (ids map[string]bool, cwds []string) {
 	if runtime.GOOS == "windows" {
 		return nil, nil
 	}
