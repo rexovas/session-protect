@@ -94,6 +94,25 @@ func Scan(cfg config.Config) []*Project {
 
 	titles := historyTitles()
 	open := guard.Live(guard.RegistryDir())
+	codexIDs, codexCwds := liveCodex()
+	if codexIDs == nil {
+		codexIDs = map[string]bool{}
+	}
+	for _, cwd := range codexCwds {
+		project := byPath[cwd]
+		if project == nil {
+			continue
+		}
+		bestID, bestTime := "", time.Time{}
+		for _, session := range project.Sessions {
+			if session.Target == "codex" && session.Modified.After(bestTime) {
+				bestID, bestTime = session.ID, session.Modified
+			}
+		}
+		if bestID != "" {
+			codexIDs[bestID] = true
+		}
+	}
 	restoredAt := map[string]time.Time{}
 	for _, entry := range audit.Read(cfg.BackupRoot) {
 		if entry.Action == "restore" && entry.SessionID != "" && entry.Time.After(restoredAt[entry.SessionID]) {
@@ -107,6 +126,9 @@ func Scan(cfg config.Config) []*Project {
 			session.Title = titles[session.ID]
 			if info, ok := open[session.ID]; ok {
 				session.LiveStatus = info.Status
+				project.Open++
+			} else if codexIDs[session.ID] {
+				session.LiveStatus = "open"
 				project.Open++
 			}
 			// An open session with fresh writes is expected to run ahead

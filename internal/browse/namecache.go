@@ -22,11 +22,24 @@ func ScanNamed(cfg config.Config) []*Project {
 	return projects
 }
 
+// metaCacheVersion invalidates the cache when the extractor learns new
+// tricks (v2: codex models from turn_context).
+const metaCacheVersion = 2
+
+type metaCache struct {
+	Version int                  `json:"version"`
+	Entries map[string]nameEntry `json:"entries"`
+}
+
 func applyNames(cfg config.Config, projects []*Project) {
 	path := filepath.Join(cfg.BackupRoot, ".session-meta.json")
-	cache := map[string]nameEntry{}
+	stored := metaCache{}
 	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &cache)
+		_ = json.Unmarshal(data, &stored)
+	}
+	cache := stored.Entries
+	if stored.Version != metaCacheVersion || cache == nil {
+		cache = map[string]nameEntry{}
 	}
 
 	dirty := false
@@ -58,7 +71,7 @@ func applyNames(cfg config.Config, projects []*Project) {
 	if !dirty {
 		return
 	}
-	data, err := json.Marshal(cache)
+	data, err := json.Marshal(metaCache{Version: metaCacheVersion, Entries: cache})
 	if err != nil {
 		return
 	}
