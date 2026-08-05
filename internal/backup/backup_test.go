@@ -265,3 +265,31 @@ func TestSyncOnlyDoesNotCommit(t *testing.T) {
 		t.Fatal("sync created a commit")
 	}
 }
+
+func TestRunCLI(t *testing.T) {
+	setupEnv(t)
+
+	var out, errOut strings.Builder
+	if code := Run([]string{"--bogus"}, &out, &errOut, false); code != 2 {
+		t.Fatalf("bad flag exit = %d", code)
+	}
+
+	out.Reset()
+	if code := Run([]string{"--dry-run"}, &out, &errOut, false); code != 0 {
+		t.Fatalf("dry-run exit %d: %s", code, errOut.String())
+	}
+
+	out.Reset()
+	if code := Run([]string{"--json"}, &out, &errOut, false); code != 0 {
+		t.Fatalf("backup exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), `"target"`) {
+		t.Fatalf("json output missing: %s", out.String())
+	}
+
+	// Sync mode after a backup: quiet no-op, still exit 0.
+	out.Reset()
+	if code := Run(nil, &out, &errOut, true); code != 0 {
+		t.Fatalf("sync exit %d: %s", code, errOut.String())
+	}
+}

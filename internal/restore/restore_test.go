@@ -3,6 +3,7 @@ package restore
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rexovas/session-protect/internal/backup"
@@ -141,5 +142,58 @@ func TestRestoreRefusesLiveSessionsWithoutOverwrite(t *testing.T) {
 	}
 	if _, err := os.Stat(items[0].SafetyCopy); err != nil {
 		t.Fatalf("safety copy missing: %v", err)
+	}
+}
+
+func TestRunCLI(t *testing.T) {
+	_, projectPath, _ := setupEnv(t)
+
+	// Bad flag exits 2.
+	var out, errOut strings.Builder
+	if code := Run([]string{"--bogus"}, strings.NewReader(""), &out, &errOut); code != 2 {
+		t.Fatalf("bad flag exit = %d", code)
+	}
+
+	// Nothing missing: clean no-op.
+	out.Reset()
+	if code := Run([]string{"--project", projectPath}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("no-op restore exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Nothing to restore") {
+		t.Fatalf("output = %s", out.String())
+	}
+
+	// Dry run after a deletion prints the plan and writes nothing back.
+	codexPath := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", "2026", "sess-2.jsonl")
+	if err := os.Remove(codexPath); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := Run([]string{"--project", projectPath, "--dry-run"}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("dry run exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "dry run") || !strings.Contains(out.String(), "sess-2") {
+		t.Fatalf("dry-run plan missing: %s", out.String())
+	}
+	if _, err := os.Stat(codexPath); !os.IsNotExist(err) {
+		t.Fatal("dry run wrote the file back")
+	}
+
+	// Declining the confirmation aborts without writing.
+	out.Reset()
+	if code := Run([]string{"--project", projectPath}, strings.NewReader("n\n"), &out, &errOut); code != 1 {
+		t.Fatalf("declined confirm exit = %d", code)
+	}
+	if _, err := os.Stat(codexPath); !os.IsNotExist(err) {
+		t.Fatal("declined confirm wrote the file back")
+	}
+
+	// --yes applies for real.
+	out.Reset()
+	if code := Run([]string{"--project", projectPath, "--yes"}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("restore exit %d: %s", code, errOut.String())
+	}
+	if _, err := os.Stat(codexPath); err != nil {
+		t.Fatal("restore did not bring the file back")
 	}
 }
