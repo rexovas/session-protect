@@ -337,3 +337,115 @@ func TestResizeRebuildsLayout(t *testing.T) {
 		t.Fatal("view broken after resize")
 	}
 }
+
+func TestResumeDialogFlow(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab) // app sessions pane
+
+	var spawned []string
+	spawnWindow = func(command string) error {
+		spawned = append(spawned, command)
+		return nil
+	}
+	defer func() { spawnWindow = nil }()
+
+	// o on a closed session arms the dialog, Cancel pre-selected.
+	m = press(t, m, "o")
+	if m.confirmResume == nil || m.confirmYes {
+		t.Fatalf("dialog state: %v yes=%v", m.confirmResume != nil, m.confirmYes)
+	}
+	view := m.View()
+	for _, want := range []string{"Open session?", "Open", "Cancel", "runs", "terminal window"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("dialog missing %q", want)
+		}
+	}
+
+	// Reflexive enter on the default selection must NOT spawn.
+	m = press(t, m, tea.KeyEnter)
+	if m.confirmResume != nil || len(spawned) != 0 {
+		t.Fatalf("enter on Cancel spawned: %v", spawned)
+	}
+
+	// Arrow to Open, enter spawns with the right command.
+	m = press(t, m, "o", tea.KeyLeft, tea.KeyEnter)
+	if len(spawned) != 1 || !strings.Contains(spawned[0], "claude --resume aaaa1111") ||
+		!strings.Contains(spawned[0], "cd '") {
+		t.Fatalf("spawned = %v", spawned)
+	}
+	if m.notice == "" || m.noticeErr {
+		t.Fatalf("no success notice: %q err=%v", m.notice, m.noticeErr)
+	}
+
+	// esc cancels, y confirms directly.
+	m = press(t, m, "o", tea.KeyEsc)
+	if m.confirmResume != nil {
+		t.Fatal("esc did not cancel")
+	}
+	m = press(t, m, "o", "y")
+	if len(spawned) != 2 {
+		t.Fatal("y shortcut did not spawn")
+	}
+}
+
+func TestRestoreDialogFlow(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab)
+	// Fabricate a recover-state session in place.
+	m.visible[0].State = "MISSING_SOURCE"
+	m.visible[0].SourcePath = ""
+	m.visible[0].BackupPath = "/tmp/backup/fake.jsonl"
+
+	m = press(t, m, "r")
+	if m.confirmRestore == nil || m.confirmYes {
+		t.Fatalf("restore dialog state: %v yes=%v", m.confirmRestore != nil, m.confirmYes)
+	}
+	view := m.View()
+	for _, want := range []string{"Restore session?", "Restore", "Cancel", "fake.jsonl"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("restore dialog missing %q", want)
+		}
+	}
+	// tab toggles the selection; enter on Cancel closes without restoring.
+	m = press(t, m, tea.KeyTab)
+	if !m.confirmYes {
+		t.Fatal("tab did not select Restore")
+	}
+	m = press(t, m, tea.KeyTab, tea.KeyEnter)
+	if m.confirmRestore != nil {
+		t.Fatal("enter on Cancel did not close")
+	}
+}
+
+func TestJumpUsesLivePID(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab)
+	m.visible[0].LiveStatus = "open"
+	m.visible[0].LivePID = 4242
+
+	var focused []int
+	focusSession = func(pid int) error {
+		focused = append(focused, pid)
+		return nil
+	}
+	defer func() { focusSession = nil }()
+
+	m = press(t, m, "o")
+	if len(focused) != 1 || focused[0] != 4242 {
+		t.Fatalf("focused = %v", focused)
+	}
+	if m.confirmResume != nil {
+		t.Fatal("open sessions must jump, not dialog")
+	}
+}
+
+func TestResumeCommandPerAgent(t *testing.T) {
+	claude := resumeCommand(Session{Target: "claude", ID: "abc"}, "/p/x")
+	if claude != `cd '/p/x' && claude --resume abc` {
+		t.Fatalf("claude command = %s", claude)
+	}
+	codex := resumeCommand(Session{Target: "codex", ID: "def"}, "/p y")
+	if codex != `cd '/p y' && codex resume def` {
+		t.Fatalf("codex command = %s", codex)
+	}
+}

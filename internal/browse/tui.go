@@ -137,6 +137,13 @@ type model struct {
 	height int
 }
 
+// Focus actions are indirected so tests can observe them without
+// raising real windows.
+var (
+	focusSession = focus.Session
+	spawnWindow  = focus.SpawnInNewWindow
+)
+
 type rescanMsg []*Project
 
 type hitsMsg []Hit
@@ -478,7 +485,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if project == "" {
 				project = m.root
 			}
-			if err := focus.SpawnInNewWindow(resumeCommand(session, project)); err != nil {
+			if err := spawnWindow(resumeCommand(session, project)); err != nil {
 				m.noticeErr = true
 				if errors.Is(err, focus.ErrNotAuthorized) {
 					focus.OpenAutomationSettings()
@@ -713,7 +720,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case session.LiveStatus != "" && session.LivePID > 0:
 			// Open somewhere: jump to its window.
-			if err := focus.Session(session.LivePID); err != nil {
+			if err := focusSession(session.LivePID); err != nil {
 				m.noticeErr = true
 				if errors.Is(err, focus.ErrNotAuthorized) {
 					focus.OpenAutomationSettings()
