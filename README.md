@@ -171,4 +171,4 @@ and releases work.
 
 ## License
 
-See [LICENSE](LICENSE).
+[Apache-2.0](LICENSE) © Rexovas Group Technologies LLC
