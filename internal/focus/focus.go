@@ -7,6 +7,8 @@
 package focus
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -15,17 +17,30 @@ import (
 	"time"
 )
 
+// ErrNotAuthorized means macOS has a stored Automation denial for the
+// hosting app; the system never re-prompts, so the user must flip the
+// toggle in Privacy & Security → Automation.
+var ErrNotAuthorized = errors.New("macOS automation permission denied")
+
 // Session raises the window of the terminal hosting pid.
 func Session(pid int) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("jump-to-session is macOS-only for now")
 	}
 	if tty := ttyOf(pid); tty != "" {
-		if err := runScript(iterm2Script(tty)); err == nil {
+		err := runScript(iterm2Script(tty))
+		if err == nil {
 			return nil
 		}
-		if err := runScript(terminalScript(tty)); err == nil {
+		if errors.Is(err, ErrNotAuthorized) {
+			return err
+		}
+		err = runScript(terminalScript(tty))
+		if err == nil {
 			return nil
+		}
+		if errors.Is(err, ErrNotAuthorized) {
+			return err
 		}
 	}
 	// Unscriptable terminal: raise the hosting application itself.
@@ -115,6 +130,8 @@ end tell`
 
 func runScript(script string) error {
 	cmd := exec.Command("osascript", "-e", script)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -122,6 +139,16 @@ func runScript(script string) error {
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
+		if err == nil {
+			return nil
+		}
+		detail := strings.TrimSpace(stderr.String())
+		if strings.Contains(detail, "-1743") || strings.Contains(detail, "Not authorized") {
+			return ErrNotAuthorized
+		}
+		if detail != "" {
+			return fmt.Errorf("%s", detail)
+		}
 		return err
 	case <-time.After(15 * time.Second):
 		// Long timeout: the first run can sit behind the macOS
@@ -129,4 +156,11 @@ func runScript(script string) error {
 		_ = cmd.Process.Kill()
 		return fmt.Errorf("timed out talking to the terminal")
 	}
+}
+
+// OpenAutomationSettings opens the Privacy & Security → Automation pane,
+// where a cached denial can be flipped.
+func OpenAutomationSettings() {
+	_ = exec.Command("open",
+		"x-apple.systempreferences:com.apple.preference.security?Privacy_Automation").Start()
 }

@@ -1,6 +1,7 @@
 package browse
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -657,7 +658,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if err := focus.Session(session.LivePID); err != nil {
-			m.notice, m.noticeErr = "jump failed: "+err.Error(), true
+			if errors.Is(err, focus.ErrNotAuthorized) {
+				focus.OpenAutomationSettings()
+				m.notice = "macOS blocked the jump — in the Settings pane just opened, " +
+					"enable your terminal under Automation, then press o again"
+				m.noticeErr = true
+			} else {
+				m.notice, m.noticeErr = "jump failed: "+err.Error(), true
+			}
 		} else {
 			m.notice = "brought the session's window to the front"
 		}
