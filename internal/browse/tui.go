@@ -121,6 +121,7 @@ type model struct {
 	// until the next keypress.
 	confirmRestore *Session
 	confirmResume  *Session
+	confirmYes     bool // dialog button selection; always starts on No
 	notice         string
 	noticeErr      bool
 	fCursor        int
@@ -456,12 +457,23 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.confirmResume != nil {
-		session := *m.confirmResume
-		m.confirmResume = nil
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "y", "enter", "o":
+		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
+			m.confirmYes = !m.confirmYes
+		case "esc", "n":
+			m.confirmResume = nil
+		case "y":
+			m.confirmYes = true
+			fallthrough
+		case "enter":
+			if !m.confirmYes {
+				m.confirmResume = nil
+				break
+			}
+			session := *m.confirmResume
+			m.confirmResume = nil
 			project := session.ProjectPath
 			if project == "" {
 				project = m.root
@@ -482,12 +494,23 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.confirmRestore != nil {
-		session := *m.confirmRestore
-		m.confirmRestore = nil
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "y", "enter":
+		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
+			m.confirmYes = !m.confirmYes
+		case "esc", "n":
+			m.confirmRestore = nil
+		case "y":
+			m.confirmYes = true
+			fallthrough
+		case "enter":
+			if !m.confirmYes {
+				m.confirmRestore = nil
+				break
+			}
+			session := *m.confirmRestore
+			m.confirmRestore = nil
 			dest, err := RestoreSession(m.cfg, session)
 			if err != nil {
 				m.notice, m.noticeErr = "restore failed: "+err.Error(), true
@@ -636,6 +659,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session := m.selectedSession(); session != nil && session.State == "MISSING_SOURCE" {
 			copied := *session
 			m.confirmRestore = &copied
+			m.confirmYes = false
 		}
 	case "ctrl+r":
 		m.scanning = true
@@ -709,6 +733,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Closed: confirm before spawning a window to resume it.
 			copied := *session
 			m.confirmResume = &copied
+			m.confirmYes = false
 		}
 	case "t":
 		if m.showSessions || m.showAll || m.showHits {
@@ -914,6 +939,47 @@ func (m model) View() string {
 	if m.detail != nil {
 		return m.detailView()
 	}
+	if m.confirmResume != nil {
+		session := *m.confirmResume
+		title := session.CustomName
+		if title == "" {
+			title = session.Title
+		}
+		if title == "" {
+			title = session.ID
+		}
+		project := session.ProjectPath
+		if project == "" {
+			project = m.root
+		}
+		return m.dialog("Open session?",
+			[]string{
+				truncate(title, 70),
+				styleDim.Render("in    ") + truncate(tildePath(project), 64),
+				styleDim.Render("runs  ") + truncate(resumeCommand(session, project), 64),
+				styleDim.Render("      in a new " + session.Target + " terminal window"),
+			}, "Open", "Cancel")
+	}
+	if m.confirmRestore != nil {
+		session := *m.confirmRestore
+		dest, _, err := restoreDest(m.cfg, session)
+		if err != nil {
+			dest = "unresolvable: " + err.Error()
+		}
+		title := session.CustomName
+		if title == "" {
+			title = session.Title
+		}
+		if title == "" {
+			title = session.ID
+		}
+		return m.dialog("Restore session?",
+			[]string{
+				styleRecover.Render("✝ ") + truncate(title, 68),
+				styleDim.Render("from  ") + truncate(tildePath(session.BackupPath), 64),
+				styleDim.Render("to    ") + truncate(tildePath(dest), 64),
+			}, "Restore", "Cancel")
+	}
 	if m.showMenu {
 		return m.menuView()
 	}
@@ -981,11 +1047,7 @@ func (m model) View() string {
 		}
 		b.WriteString(styleDim.Render(empty) + "\n")
 	}
-	if m.confirmResume != nil {
-		b.WriteString("\n" + m.confirmResumeBox(*m.confirmResume) + "\n")
-	} else if m.confirmRestore != nil {
-		b.WriteString("\n" + m.confirmRestoreBox(*m.confirmRestore) + "\n")
-	} else if m.notice != "" {
+	if m.notice != "" {
 		noticeStyle := styleOK
 		if m.noticeErr {
 			noticeStyle = styleUnbacked
@@ -1005,12 +1067,7 @@ func (m model) View() string {
 			help = "asking the local model about \"" + m.hitsQuery + "\" …"
 		}
 	}
-	if m.confirmRestore != nil {
-		help = "y/enter restore · esc cancel"
-	}
-	if m.confirmResume != nil {
-		help = "y/enter open · esc cancel"
-	}
+
 	return m.pinBottom(b.String(), help)
 }
 
@@ -1733,48 +1790,32 @@ func (m model) usageTab(b *strings.Builder) {
 	}
 }
 
-// confirmRestoreBox previews exactly what a pending restore will write, so
-// the y/enter lands on a visible plan rather than an implied one.
-func (m model) confirmRestoreBox(session Session) string {
-	dest, _, err := restoreDest(m.cfg, session)
-	if err != nil {
-		dest = "unresolvable: " + err.Error()
+// dialog renders a centered modal: title, body, and a Yes/No button row
+// driven by arrow keys, defaulting to No.
+func (m model) dialog(title string, body []string, yesLabel string, noLabel string) string {
+	button := func(label string, active bool) string {
+		if active {
+			return styleCursor.Render("  " + label + "  ")
+		}
+		return styleDim.Render("  " + label + "  ")
 	}
-	title := session.CustomName
-	if title == "" {
-		title = session.Title
-	}
-	if title == "" {
-		title = session.ID
-	}
-	width := min(m.width, 100)
-	inner := width - 12
-	body := styleRecover.Render("✝ ") + styleBold.Render("restore ") + truncate(title, inner) + "\n" +
-		styleDim.Render("from  ") + truncate(session.BackupPath, inner) + "\n" +
-		styleDim.Render("to    ") + truncate(dest, inner)
-	return detailBox(width).Render(body)
-}
+	buttons := button(yesLabel, m.confirmYes) + "   " + button(noLabel, !m.confirmYes)
 
-// confirmResumeBox previews the resume a y/enter will launch.
-func (m model) confirmResumeBox(session Session) string {
-	title := session.CustomName
-	if title == "" {
-		title = session.Title
-	}
-	if title == "" {
-		title = session.ID
-	}
-	project := session.ProjectPath
-	if project == "" {
-		project = m.root
-	}
-	width := min(m.width, 100)
-	inner := width - 12
-	body := styleOK.Render("▶ ") + styleBold.Render("open session ") + truncate(title, inner) + "\n" +
-		styleDim.Render("in    ") + truncate(tildePath(project), inner) + "\n" +
-		styleDim.Render("runs  ") + truncate(resumeCommand(session, project), inner) + "\n" +
-		styleDim.Render("      in a new terminal window")
-	return detailBox(width).Render(body)
+	inner := 76
+	var lines []string
+	lines = append(lines, lipgloss.PlaceHorizontal(inner, lipgloss.Center, styleBold.Render(title)), "")
+	lines = append(lines, body...)
+	lines = append(lines, "", lipgloss.PlaceHorizontal(inner, lipgloss.Center, buttons), "",
+		lipgloss.PlaceHorizontal(inner, lipgloss.Center,
+			styleDim.Render("←/→ choose · enter confirm · esc cancel")))
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.AdaptiveColor{Light: "#5A56E0", Dark: "#7D79F6"}).
+		Padding(1, 2).
+		Width(min(inner+4, m.width-2)).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(max(m.width, 20), max(m.height, 10), lipgloss.Center, lipgloss.Center, box)
 }
 
 // detailBox is the rounded frame used by the inspector's sections.
