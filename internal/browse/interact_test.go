@@ -449,3 +449,49 @@ func TestResumeCommandPerAgent(t *testing.T) {
 		t.Fatalf("codex command = %s", codex)
 	}
 }
+
+func TestUpdateOfferFlow(t *testing.T) {
+	m := buildEnv(t)
+	applied := []string{}
+	updateApply = func(tag string) (string, error) {
+		applied = append(applied, tag)
+		return "/fake/bin/session-protect", nil
+	}
+	defer func() { updateApply = nil }()
+
+	next, _ := m.Update(updateAvailableMsg("v1.2.3"))
+	m = next.(model)
+	if m.updateOffer != "v1.2.3" || m.confirmYes {
+		t.Fatalf("offer state: %q yes=%v", m.updateOffer, m.confirmYes)
+	}
+	view := m.View()
+	for _, want := range []string{"Update to v1.2.3?", "latest", "v1.2.3", "Update", "Later"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("update dialog missing %q", want)
+		}
+	}
+
+	// Reflexive enter = Later: dismissed, nothing applied.
+	m = press(t, m, tea.KeyEnter)
+	if m.updateOffer != "" || len(applied) != 0 {
+		t.Fatalf("enter on Later applied: %v", applied)
+	}
+
+	// Offer again; arrow to Update; enter applies and quits to relaunch.
+	next, _ = m.Update(updateAvailableMsg("v1.2.3"))
+	m = next.(model)
+	m = press(t, m, tea.KeyLeft)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if !m.updateBusy || cmd == nil {
+		t.Fatal("accept did not start the update")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	if len(applied) != 1 || applied[0] != "v1.2.3" {
+		t.Fatalf("applied = %v", applied)
+	}
+	if m.restartPath != "/fake/bin/session-protect" {
+		t.Fatalf("restartPath = %q", m.restartPath)
+	}
+}

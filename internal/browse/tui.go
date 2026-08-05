@@ -19,6 +19,7 @@ import (
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/focus"
 	"github.com/rexovas/session-protect/internal/transplant"
+	"github.com/rexovas/session-protect/internal/update"
 	"github.com/rexovas/session-protect/internal/version"
 )
 
@@ -122,14 +123,20 @@ type model struct {
 	confirmRestore *Session
 	confirmResume  *Session
 	confirmYes     bool // dialog button selection; always starts on No
-	notice         string
-	noticeErr      bool
-	fCursor        int
-	fOffset        int
-	sCursor        int
-	sOffset        int
-	aCursor        int
-	aOffset        int
+
+	// A newer release triggers a launch-time offer; accepting swaps the
+	// binary and relaunches into it.
+	updateOffer string // version tag, "" when none
+	updateBusy  bool
+	restartPath string // set after a successful update: exec this on exit
+	notice      string
+	noticeErr   bool
+	fCursor     int
+	fOffset     int
+	sCursor     int
+	sOffset     int
+	aCursor     int
+	aOffset     int
 
 	scanning bool // a background rescan is in flight
 
@@ -144,9 +151,23 @@ var (
 	spawnWindow  = focus.SpawnInNewWindow
 )
 
+// Update plumbing, seam-injected for tests. The check runs at most once
+// a day and only for release-channel binaries with update.check enabled.
+var (
+	updateCheck = update.ThrottledCheck
+	updateApply = update.Apply
+)
+
 type rescanMsg []*Project
 
 type hitsMsg []Hit
+
+type updateAvailableMsg string // the newer version tag
+
+type updateDoneMsg struct {
+	path string
+	err  error
+}
 
 type transplantMsg struct {
 	err    error
@@ -312,7 +333,16 @@ func (m model) currentCursor() int {
 // itself stays fast (names arrive from cache or the first background pass).
 func (m model) Init() tea.Cmd {
 	cfg := m.cfg
-	return tea.Batch(tick(), func() tea.Msg { return rescanMsg(ScanNamed(cfg)) })
+	commands := []tea.Cmd{tick(), func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }}
+	if version.Channel == "release" && cfg.Update.CheckEnabled() {
+		commands = append(commands, func() tea.Msg {
+			if latest, newer := updateCheck(cfg.BackupRoot, 24*time.Hour); newer {
+				return updateAvailableMsg(latest)
+			}
+			return nil
+		})
+	}
+	return tea.Batch(commands...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -335,6 +365,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projects = msg
 		m.rebuild()
 		return m, nil
+	case updateAvailableMsg:
+		m.updateOffer = string(msg)
+		m.confirmYes = false
+		return m, nil
+	case updateDoneMsg:
+		m.updateBusy = false
+		m.updateOffer = ""
+		if msg.err != nil {
+			m.notice, m.noticeErr = "update failed: "+msg.err.Error(), true
+			return m, nil
+		}
+		// Relaunch into the new binary the moment the TUI exits.
+		m.restartPath = msg.path
+		return m, tea.Quit
 	case hitsMsg:
 		m.hitsBusy = false
 		m.hitsMode = "hits"
@@ -460,6 +504,38 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.actOffset = max(0, m.actOffset-m.pageSize())
 		case "pgdown":
 			m.actOffset = min(max(0, len(m.activity)-m.pageSize()), m.actOffset+m.pageSize())
+		}
+		return m, nil
+	}
+	if m.updateOffer != "" {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
+			if !m.updateBusy {
+				m.confirmYes = !m.confirmYes
+			}
+		case "esc", "n":
+			if !m.updateBusy {
+				m.updateOffer = ""
+			}
+		case "y":
+			m.confirmYes = true
+			fallthrough
+		case "enter":
+			if m.updateBusy {
+				break
+			}
+			if !m.confirmYes {
+				m.updateOffer = ""
+				break
+			}
+			m.updateBusy = true
+			tag := m.updateOffer
+			return m, func() tea.Msg {
+				path, err := updateApply(tag)
+				return updateDoneMsg{path: path, err: err}
+			}
 		}
 		return m, nil
 	}
@@ -948,6 +1024,18 @@ func clampOffset(offset int, cursor int, page int) int {
 func (m model) View() string {
 	if m.detail != nil {
 		return m.detailView()
+	}
+	if m.updateOffer != "" {
+		body := []string{
+			"A new version of SessionProtect is available.",
+			"",
+			styleDim.Render("current  ") + version.Version,
+			styleDim.Render("latest   ") + styleOK.Render(m.updateOffer),
+		}
+		if m.updateBusy {
+			body = append(body, "", styleDim.Render("updating …"))
+		}
+		return m.dialog("Update to "+m.updateOffer+"?", body, "Update", "Later")
 	}
 	if m.confirmResume != nil {
 		session := *m.confirmResume

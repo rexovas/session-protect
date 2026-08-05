@@ -21,6 +21,7 @@ type Config struct {
 	Encryption Encryption              `toml:"encryption" json:"encryption"`
 	Schedule   Schedule                `toml:"schedule" json:"schedule"`
 	Assist     Assist                  `toml:"assist" json:"assist"`
+	Update     Update                  `toml:"update" json:"update"`
 	Targets    map[string]TargetConfig `toml:"targets" json:"targets"`
 }
 
@@ -33,6 +34,18 @@ type Assist struct {
 	Model string `toml:"model" json:"model,omitempty"`
 	// URL is the ollama server address.
 	URL string `toml:"url" json:"url,omitempty"`
+}
+
+// Update controls the launch-time new-version check. It is the one
+// outbound network call the tool ever makes (GitHub's releases API) and
+// can be disabled entirely.
+type Update struct {
+	Check *bool `toml:"check" json:"check,omitempty"` // default true
+}
+
+// CheckEnabled reports whether the update check may run.
+func (u Update) CheckEnabled() bool {
+	return u.Check == nil || *u.Check
 }
 
 type Schedule struct {

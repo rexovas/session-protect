@@ -67,8 +67,12 @@ sp schedule install         # daily committing backup (macOS)
 sp browse                   # the session explorer
 ```
 
-`sp doctor` checks the environment; `sp update` rebuilds from the
-current source checkout.
+`sp doctor` checks the environment. `sp update` updates in place:
+release installs download the latest release (checksum-verified) and
+swap the binary; source installs rebuild from their checkout. The
+explorer also checks for new releases at launch (at most once a day)
+and offers the specific version before touching anything — disable
+with `update.check = false`.
 
 ## The explorer
 
@@ -128,6 +132,9 @@ time = "12:00"           # daily backup, local time
 backend = "auto"         # auto | ollama | claude | none
 model = ""               # ollama model; empty = first installed
 
+[update]
+check = true             # daily new-release check + explorer prompt
+
 [targets.codex]
 enabled = true           # per-agent enable/source overrides
 ```
@@ -147,6 +154,9 @@ enabled = true           # per-agent enable/source overrides
   history files; lost sessions stay marked lost even after recovery.
 - **Everything is local.** Sessions never leave your machine. AI find
   talks only to your own local ollama server or your own claude CLI.
+  The sole outbound call the tool ever makes is the release check
+  against GitHub (once a day, version numbers only, off with
+  `update.check = false`).
 - **Encryption is opt-in** because local backups mirror data the agents
   already store unencrypted on the same disk; enable git-crypt when
   backups will leave the machine.

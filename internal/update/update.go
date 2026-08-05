@@ -19,6 +19,9 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 
+	if version.Channel == "release" {
+		return selfUpdate(stdout, stderr)
+	}
 	if !sourceUpdateAvailable() {
 		fmt.Fprintln(stderr, "session-protect update is not configured for this binary")
 		fmt.Fprintln(stderr, "Install with scripts/install.sh first so the binary records its source checkout and install prefix.")
@@ -41,6 +44,19 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 func check(stdout io.Writer) int {
 	fmt.Fprintln(stdout, "SessionProtect update")
 	fmt.Fprintf(stdout, "  Channel        %s\n", version.Channel)
+	fmt.Fprintf(stdout, "  Version        %s\n", version.Version)
+	if version.Channel == "release" {
+		current, latest, newer, err := NewerAvailable()
+		switch {
+		case err != nil:
+			fmt.Fprintf(stdout, "  Status         check failed (%v)\n", err)
+		case newer:
+			fmt.Fprintf(stdout, "  Status         %s available (current %s) — run: session-protect update\n", latest, current)
+		default:
+			fmt.Fprintf(stdout, "  Status         up to date (latest %s)\n", latest)
+		}
+		return 0
+	}
 	fmt.Fprintf(stdout, "  Source         %s\n", version.SourceDir)
 	fmt.Fprintf(stdout, "  Install prefix %s\n", version.InstallPrefix)
 	if sourceUpdateAvailable() {
@@ -48,6 +64,27 @@ func check(stdout io.Writer) int {
 	} else {
 		fmt.Fprintln(stdout, "  Status         not configured")
 	}
+	return 0
+}
+
+// selfUpdate replaces the running release binary with the latest one.
+func selfUpdate(stdout io.Writer, stderr io.Writer) int {
+	current, latest, newer, err := NewerAvailable()
+	if err != nil {
+		fmt.Fprintf(stderr, "update check failed: %v\n", err)
+		return 1
+	}
+	if !newer {
+		fmt.Fprintf(stdout, "Already up to date (%s).\n", current)
+		return 0
+	}
+	fmt.Fprintf(stdout, "Updating %s → %s …\n", current, latest)
+	path, err := Apply(latest)
+	if err != nil {
+		fmt.Fprintf(stderr, "update failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Updated %s to %s.\n", path, latest)
 	return 0
 }
 

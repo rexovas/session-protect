@@ -40,9 +40,17 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 
 	program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithOutput(stderr))
-	if _, err := program.Run(); err != nil {
+	final, err := program.Run()
+	if err != nil {
 		fmt.Fprintf(stderr, "browse failed: %v\n", err)
 		return 1
+	}
+	// A completed self-update relaunches straight into the new binary so
+	// the user never sees a stale explorer.
+	if done, ok := final.(model); ok && done.restartPath != "" {
+		if err := relaunch(done.restartPath); err != nil {
+			fmt.Fprintf(stderr, "updated, but relaunch failed: %v — run sp again\n", err)
+		}
 	}
 	return 0
 }

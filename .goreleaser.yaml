@@ -21,7 +21,10 @@ builds:
       - -X github.com/rexovas/session-protect/internal/version.Channel=release
 
 archives:
-  - formats: [tar.gz]
+  # name_template is a contract: the self-updater reconstructs these
+  # names to find its platform's asset.
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
     format_overrides:
       - goos: windows
         formats: [zip]
