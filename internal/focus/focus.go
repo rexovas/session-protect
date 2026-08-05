@@ -1,45 +1,41 @@
 // Package focus brings the terminal window hosting a live session to the
-// foreground — without AppleScript or any automation permission. We know
-// the session's tty, and terminals interpret escape sequences arriving on
-// it: iTerm2's StealFocus escape focuses the exact window/tab/session
-// owning the tty, and the standard XTWINOPS raise covers xterm-compatible
-// terminals on macOS and Linux alike. Writing to your own tty devices
-// needs no special rights, and terminals that recognize neither sequence
-// simply ignore the invisible bytes.
+// foreground. On macOS one mechanism covers every terminal: AppleScript.
+// iTerm2 and Terminal.app are scriptable down to the exact window/tab
+// owning a tty, and anything else gets raised app-level through System
+// Events. The first use prompts for macOS Automation permission, once
+// per hosting app.
 package focus
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// focusSequence is what we write to the session's tty:
-// OSC 1337 StealFocus (iTerm2), then XTWINOPS de-iconify + raise.
-const focusSequence = "\x1b]1337;StealFocus\x07\x1b[1t\x1b[5t"
-
-// Session raises the terminal window hosting pid by writing focus escapes
-// to its controlling tty.
+// Session raises the window of the terminal hosting pid.
 func Session(pid int) error {
-	tty := ttyOf(pid)
-	if tty == "" {
-		return fmt.Errorf("pid %d has no controlling terminal", pid)
+	if runtime.GOOS != "darwin" {
+		return fmt.Errorf("jump-to-session is macOS-only for now")
 	}
-	file, err := os.OpenFile(tty, os.O_WRONLY, 0)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", tty, err)
+	if tty := ttyOf(pid); tty != "" {
+		if err := runScript(iterm2Script(tty)); err == nil {
+			return nil
+		}
+		if err := runScript(terminalScript(tty)); err == nil {
+			return nil
+		}
 	}
-	defer file.Close()
-	if _, err := file.WriteString(focusSequence); err != nil {
-		return fmt.Errorf("write to %s: %w", tty, err)
+	// Unscriptable terminal: raise the hosting application itself.
+	if app := guiAncestor(pid); app > 0 {
+		return runScript(frontmostScript(app))
 	}
-	return nil
+	return fmt.Errorf("could not locate a terminal window for pid %d", pid)
 }
 
-// ttyOf returns the controlling terminal device of a process, e.g.
-// /dev/ttys032 on macOS or /dev/pts/3 on Linux.
+// ttyOf returns the controlling terminal device, e.g. /dev/ttys032.
 func ttyOf(pid int) string {
 	out, err := exec.Command("ps", "-o", "tty=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
@@ -50,4 +46,87 @@ func ttyOf(pid int) string {
 		return ""
 	}
 	return "/dev/" + tty
+}
+
+// guiAncestor walks parents until the process launched by launchd (pid 1),
+// which is the GUI application on macOS.
+func guiAncestor(pid int) int {
+	for range [12]int{} {
+		out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+		if err != nil {
+			return 0
+		}
+		parent, err := strconv.Atoi(strings.TrimSpace(string(out)))
+		if err != nil || parent <= 0 {
+			return 0
+		}
+		if parent == 1 {
+			return pid
+		}
+		pid = parent
+	}
+	return 0
+}
+
+// iterm2Script selects the iTerm2 session owning tty, erroring when absent
+// so the caller can try the next terminal.
+func iterm2Script(tty string) string {
+	return `tell application "iTerm2"
+	repeat with w in windows
+		repeat with t in tabs of w
+			repeat with s in sessions of t
+				if tty of s is "` + tty + `" then
+					select w
+					select t
+					select s
+					activate
+					return
+				end if
+			end repeat
+		end repeat
+	end repeat
+end tell
+error "tty not found"`
+}
+
+// terminalScript selects the Terminal.app tab owning tty.
+func terminalScript(tty string) string {
+	return `tell application "Terminal"
+	repeat with w in windows
+		repeat with t in tabs of w
+			if tty of t is "` + tty + `" then
+				set selected of t to true
+				set index of w to 1
+				activate
+				return
+			end if
+		end repeat
+	end repeat
+end tell
+error "tty not found"`
+}
+
+// frontmostScript raises an application by its unix pid.
+func frontmostScript(pid int) string {
+	return `tell application "System Events"
+	set frontmost of (first process whose unix id is ` + strconv.Itoa(pid) + `) to true
+end tell`
+}
+
+func runScript(script string) error {
+	cmd := exec.Command("osascript", "-e", script)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(15 * time.Second):
+		// Long timeout: the first run can sit behind the macOS
+		// Automation permission dialog.
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("timed out talking to the terminal")
+	}
 }

@@ -174,7 +174,13 @@ func TestLostToggleAndSearchOverride(t *testing.T) {
 	if len(m.visible) != base+1 {
 		t.Fatalf("x did not reveal the lost session: %d → %d", base, len(m.visible))
 	}
-	if state, _ := sessionState(m.visible[len(m.visible)-1].State); !strings.Contains(state, "lost") {
+	lostShown := false
+	for _, session := range m.visible {
+		if session.State == "LOST" {
+			lostShown = true
+		}
+	}
+	if !lostShown {
 		t.Fatal("revealed session should be lost")
 	}
 	m = press(t, m, "x")
