@@ -35,6 +35,21 @@ archives:
 checksum:
   name_template: checksums.txt
 
+brews:
+  - repository:
+      owner: rexovas
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/rexovas/session-protect
+    description: "Protect, explore, and command your AI coding-agent sessions"
+    license: Apache-2.0
+    install: |
+      bin.install "session-protect"
+      bin.install_symlink "session-protect" => "sp"
+    test: |
+      system "#{bin}/session-protect", "version"
+
 changelog:
   use: github-native
 

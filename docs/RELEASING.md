@@ -30,6 +30,16 @@ single source of truth — no version constants to edit.
 
 `session-protect version` prints it; `--verbose` adds commit and date.
 
+## Distribution
+
+- **get.rexov.as** serves `scripts/get.sh` (a Cloudflare redirect to the
+  raw file on `main`); the script resolves the latest release itself, so
+  it needs no per-release maintenance.
+- **Homebrew**: GoReleaser pushes the formula to `rexovas/homebrew-tap`
+  on every release. The `HOMEBREW_TAP_TOKEN` repo secret (a fine-grained
+  PAT with contents-write on the tap) must exist before the first
+  release.
+
 ## Notes
 
 - Staying within v1.x long-term is deliberate: Go modules require a

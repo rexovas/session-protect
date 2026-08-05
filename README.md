@@ -50,12 +50,25 @@ no telemetry, no accounts, no external services.
 
 ## Install
 
-Requires Go 1.24+ and git.
+```sh
+curl -fsSL https://get.rexov.as | sh
+```
+
+Installs the latest release (checksum-verified) to `~/.local/bin` as
+`session-protect` with an `sp` alias. Or use Homebrew:
+
+```sh
+brew install rexovas/tap/session-protect
+```
+
+Binaries for macOS, Linux, and Windows are on the
+[releases page](https://github.com/rexovas/session-protect/releases).
+From source (requires Go 1.24+):
 
 ```sh
 git clone https://github.com/rexovas/session-protect
 cd session-protect
-./scripts/install.sh        # installs to ~/.local/bin as session-protect + sp
+./scripts/install.sh
 ```
 
 Then wire up protection:
