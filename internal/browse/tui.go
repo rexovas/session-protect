@@ -654,20 +654,46 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.openAsk()
 	case "o":
 		session := m.selectedSession()
-		if session == nil || session.LiveStatus == "" || session.LivePID <= 0 {
+		if session == nil {
 			break
 		}
-		if err := focus.Session(session.LivePID); err != nil {
-			if errors.Is(err, focus.ErrNotAuthorized) {
-				focus.OpenAutomationSettings()
-				m.notice = "macOS blocked the jump — in the Settings pane just opened, " +
-					"enable your terminal under Automation, then press o again"
+		switch {
+		case session.LiveStatus != "" && session.LivePID > 0:
+			// Open somewhere: jump to its window.
+			if err := focus.Session(session.LivePID); err != nil {
 				m.noticeErr = true
+				if errors.Is(err, focus.ErrNotAuthorized) {
+					focus.OpenAutomationSettings()
+					m.notice = "macOS blocked the jump — in the Settings pane just opened, " +
+						"enable your terminal under Automation, then press o again"
+				} else {
+					m.notice = "jump failed: " + err.Error()
+				}
 			} else {
-				m.notice, m.noticeErr = "jump failed: "+err.Error(), true
+				m.notice = "brought the session's window to the front"
 			}
-		} else {
-			m.notice = "brought the session's window to the front"
+		case session.State == "LOST":
+			m.notice, m.noticeErr = "lost sessions have no transcript to resume", true
+		case session.SourcePath == "":
+			m.notice, m.noticeErr = "backup-only session — restore it first (r), then resume", true
+		default:
+			// Closed: resume it in a fresh window of the same terminal.
+			project := session.ProjectPath
+			if project == "" {
+				project = m.root
+			}
+			if err := focus.SpawnInNewWindow(resumeCommand(*session, project)); err != nil {
+				m.noticeErr = true
+				if errors.Is(err, focus.ErrNotAuthorized) {
+					focus.OpenAutomationSettings()
+					m.notice = "macOS blocked the spawn — enable your terminal under " +
+						"Automation in the Settings pane just opened, then press o again"
+				} else {
+					m.notice = "resume failed: " + err.Error()
+				}
+			} else {
+				m.notice = "resuming " + session.ID[:8] + "… in a new " + session.Target + " window"
+			}
 		}
 	case "t":
 		if m.showSessions || m.showAll || m.showHits {
@@ -1058,6 +1084,16 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 	}
 }
 
+// resumeCommand is the shell line a spawned window runs to pick the
+// session back up in its project directory.
+func resumeCommand(session Session, project string) string {
+	agent := "claude --resume " + session.ID
+	if session.Target == "codex" {
+		agent = "codex resume " + session.ID
+	}
+	return "cd " + focus.ShellQuote(project) + " && " + agent
+}
+
 // openDetail loads the inspector for the selected session.
 func (m *model) openDetail() {
 	session := m.selectedSession()
@@ -1402,7 +1438,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
-	key("o", "jump to an ▶ open session — raises its terminal window")
+	key("o", "open: jump to an ▶ open session, or resume a closed one in a new window")
 	key("r", "restore a ✝ recover session, with confirmation")
 	key("t", "transplant: move/copy a session or project to another dir")
 	key("x", "show or hide ✕ lost sessions")

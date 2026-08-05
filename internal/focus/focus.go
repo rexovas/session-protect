@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -156,6 +157,62 @@ func runScript(script string) error {
 		_ = cmd.Process.Kill()
 		return fmt.Errorf("timed out talking to the terminal")
 	}
+}
+
+// SpawnInNewWindow opens a new window in the terminal app hosting this
+// process and runs command there. iTerm2 when that is the host, else
+// Terminal.app — always present on macOS, so sp inside any other
+// terminal still gets a working spawn.
+func SpawnInNewWindow(command string) error {
+	if runtime.GOOS != "darwin" {
+		return fmt.Errorf("resume-in-new-window is macOS-only for now")
+	}
+	if hostIsITerm() {
+		return runScript(iterm2SpawnScript(command))
+	}
+	return runScript(terminalSpawnScript(command))
+}
+
+// hostIsITerm reports whether this process runs inside iTerm2.
+func hostIsITerm() bool {
+	if strings.Contains(os.Getenv("TERM_PROGRAM"), "iTerm") {
+		return true
+	}
+	app := guiAncestor(os.Getpid())
+	if app <= 0 {
+		return false
+	}
+	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(app)).Output()
+	return err == nil && strings.Contains(string(out), "iTerm")
+}
+
+func iterm2SpawnScript(command string) string {
+	return `tell application "iTerm2"
+	set w to (create window with default profile)
+	tell current session of w
+		write text "` + appleScriptQuote(command) + `"
+	end tell
+	activate
+end tell`
+}
+
+func terminalSpawnScript(command string) string {
+	return `tell application "Terminal"
+	do script "` + appleScriptQuote(command) + `"
+	activate
+end tell`
+}
+
+// appleScriptQuote escapes a string for embedding in an AppleScript
+// double-quoted literal.
+func appleScriptQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
+// ShellQuote single-quotes a value for the shell.
+func ShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // OpenAutomationSettings opens the Privacy & Security → Automation pane,
