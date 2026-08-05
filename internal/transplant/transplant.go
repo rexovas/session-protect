@@ -145,15 +145,11 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 	live := guard.Live(guard.RegistryDir())
 	liveCodexIDs, liveCodexCwds := guard.LiveCodex()
 	codexOpen := func(id string) bool {
-		if liveCodexIDs[id] {
+		if _, open := liveCodexIDs[id]; open {
 			return true
 		}
-		for _, cwd := range liveCodexCwds {
-			if cwd == plan.SourcePath {
-				return true
-			}
-		}
-		return false
+		_, open := liveCodexCwds[plan.SourcePath]
+		return open
 	}
 
 	srcDir := filepath.Join(root, plan.SourceSlug)

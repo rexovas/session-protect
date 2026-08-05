@@ -16,6 +16,7 @@ import (
 	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/focus"
 	"github.com/rexovas/session-protect/internal/transplant"
 	"github.com/rexovas/session-protect/internal/version"
 )
@@ -650,6 +651,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "ctrl+g":
 		return m.openAsk()
+	case "o":
+		session := m.selectedSession()
+		if session == nil || session.LiveStatus == "" || session.LivePID <= 0 {
+			break
+		}
+		if err := focus.Session(session.LivePID); err != nil {
+			m.notice, m.noticeErr = "jump failed: "+err.Error(), true
+		} else {
+			m.notice = "brought the session's window to the front"
+		}
 	case "t":
 		if m.showSessions || m.showAll || m.showHits {
 			session := m.selectedSession()
@@ -1383,6 +1394,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
+	key("o", "jump to an ▶ open session — raises its terminal window")
 	key("r", "restore a ✝ recover session, with confirmation")
 	key("t", "transplant: move/copy a session or project to another dir")
 	key("x", "show or hide ✕ lost sessions")

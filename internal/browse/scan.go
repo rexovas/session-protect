@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ type Session struct {
 	Title          string    // first prompt of the session, from agent history
 	CustomName     string    // user-assigned name, from custom-title events
 	LiveStatus     string    // non-empty when open in a running agent process
+	LivePID        int       // process holding the session open, for jumping to it
 	ProjectPath    string    // set on aggregated (AllUnder) sessions for display
 	Prompts        int       // for LOST sessions: prompt count from history
 	LastModel      string    // most recent model seen in the transcript
@@ -117,9 +119,9 @@ func Scan(cfg config.Config) []*Project {
 	open := guard.Live(guard.RegistryDir())
 	codexIDs, codexCwds := guard.LiveCodex()
 	if codexIDs == nil {
-		codexIDs = map[string]bool{}
+		codexIDs = map[string]string{}
 	}
-	for _, cwd := range codexCwds {
+	for cwd, pid := range codexCwds {
 		project := byPath[cwd]
 		if project == nil {
 			continue
@@ -131,7 +133,7 @@ func Scan(cfg config.Config) []*Project {
 			}
 		}
 		if bestID != "" {
-			codexIDs[bestID] = true
+			codexIDs[bestID] = pid
 		}
 	}
 	restoredAt := map[string]time.Time{}
@@ -147,9 +149,11 @@ func Scan(cfg config.Config) []*Project {
 			session.Title = titles[session.ID]
 			if info, ok := open[session.ID]; ok {
 				session.LiveStatus = info.Status
+				session.LivePID = info.PID
 				project.Open++
-			} else if codexIDs[session.ID] {
+			} else if pid, ok := codexIDs[session.ID]; ok {
 				session.LiveStatus = "open"
+				session.LivePID, _ = strconv.Atoi(pid)
 				project.Open++
 			}
 			// An open session with fresh writes is expected to run ahead

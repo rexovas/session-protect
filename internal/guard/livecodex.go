@@ -15,9 +15,10 @@ import (
 
 var uuidPattern = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 
-// liveCodex returns session ids known to be open and the working
-// directories of codex processes whose session id is not in their args.
-func LiveCodex() (ids map[string]bool, cwds []string) {
+// LiveCodex returns open session ids (with the owning pid) and the
+// working directories (also with pid) of codex processes whose session id
+// is not in their args.
+func LiveCodex() (ids map[string]string, cwds map[string]string) {
 	if runtime.GOOS == "windows" {
 		return nil, nil
 	}
@@ -26,18 +27,19 @@ func LiveCodex() (ids map[string]bool, cwds []string) {
 		return nil, nil
 	}
 	ids, pids := parseCodexProcs(string(out))
+	cwds = map[string]string{}
 	for _, pid := range pids {
 		if cwd := processCwd(pid); cwd != "" {
-			cwds = append(cwds, cwd)
+			cwds[cwd] = pid
 		}
 	}
 	return ids, cwds
 }
 
-// parseCodexProcs scans a ps listing for codex processes: ids for those
-// with a uuid in their args, pids for those without.
-func parseCodexProcs(psOutput string) (ids map[string]bool, pids []string) {
-	ids = map[string]bool{}
+// parseCodexProcs scans a ps listing for codex processes: id→pid for
+// those with a uuid in their args, bare pids for those without.
+func parseCodexProcs(psOutput string) (ids map[string]string, pids []string) {
+	ids = map[string]string{}
 	for _, line := range strings.Split(psOutput, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
@@ -48,7 +50,7 @@ func parseCodexProcs(psOutput string) (ids map[string]bool, pids []string) {
 			continue
 		}
 		if id := uuidPattern.FindString(strings.Join(fields[2:], " ")); id != "" {
-			ids[id] = true
+			ids[id] = fields[0]
 		} else {
 			pids = append(pids, fields[0])
 		}
