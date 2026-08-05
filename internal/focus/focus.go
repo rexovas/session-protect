@@ -23,9 +23,36 @@ import (
 // toggle in Privacy & Security → Automation.
 var ErrNotAuthorized = errors.New("macOS automation permission denied")
 
+// osName is injectable so platform gating is testable everywhere.
+var osName = runtime.GOOS
+
+// execCommand is the single subprocess seam: everything this package asks
+// of the system goes through it, and tests replace it with an in-process
+// mock. The default runs the real binary with a timeout.
+var execCommand = defaultExec
+
+func defaultExec(timeout time.Duration, name string, args ...string) (stdout string, stderr string, err error) {
+	cmd := exec.Command(name, args...)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Start(); err != nil {
+		return "", "", err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return outBuf.String(), errBuf.String(), err
+	case <-time.After(timeout):
+		_ = cmd.Process.Kill()
+		return outBuf.String(), errBuf.String(), fmt.Errorf("%s timed out", name)
+	}
+}
+
 // Session raises the window of the terminal hosting pid.
 func Session(pid int) error {
-	if runtime.GOOS != "darwin" {
+	if osName != "darwin" {
 		return fmt.Errorf("jump-to-session is macOS-only for now")
 	}
 	if tty := ttyOf(pid); tty != "" {
@@ -53,11 +80,11 @@ func Session(pid int) error {
 
 // ttyOf returns the controlling terminal device, e.g. /dev/ttys032.
 func ttyOf(pid int) string {
-	out, err := exec.Command("ps", "-o", "tty=", "-p", strconv.Itoa(pid)).Output()
+	out, _, err := execCommand(3*time.Second, "ps", "-o", "tty=", "-p", strconv.Itoa(pid))
 	if err != nil {
 		return ""
 	}
-	tty := strings.TrimSpace(string(out))
+	tty := strings.TrimSpace(out)
 	if tty == "" || tty == "??" || tty == "?" {
 		return ""
 	}
@@ -68,11 +95,11 @@ func ttyOf(pid int) string {
 // which is the GUI application on macOS.
 func guiAncestor(pid int) int {
 	for range [12]int{} {
-		out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+		out, _, err := execCommand(3*time.Second, "ps", "-o", "ppid=", "-p", strconv.Itoa(pid))
 		if err != nil {
 			return 0
 		}
-		parent, err := strconv.Atoi(strings.TrimSpace(string(out)))
+		parent, err := strconv.Atoi(strings.TrimSpace(out))
 		if err != nil || parent <= 0 {
 			return 0
 		}
@@ -130,33 +157,20 @@ end tell`
 }
 
 func runScript(script string) error {
-	cmd := exec.Command("osascript", "-e", script)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return err
+	// Long timeout: the first run can sit behind the macOS Automation
+	// permission dialog.
+	_, stderr, err := execCommand(15*time.Second, "osascript", "-e", script)
+	if err == nil {
+		return nil
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		if err == nil {
-			return nil
-		}
-		detail := strings.TrimSpace(stderr.String())
-		if strings.Contains(detail, "-1743") || strings.Contains(detail, "Not authorized") {
-			return ErrNotAuthorized
-		}
-		if detail != "" {
-			return fmt.Errorf("%s", detail)
-		}
-		return err
-	case <-time.After(15 * time.Second):
-		// Long timeout: the first run can sit behind the macOS
-		// Automation permission dialog.
-		_ = cmd.Process.Kill()
-		return fmt.Errorf("timed out talking to the terminal")
+	detail := strings.TrimSpace(stderr)
+	if strings.Contains(detail, "-1743") || strings.Contains(detail, "Not authorized") {
+		return ErrNotAuthorized
 	}
+	if detail != "" {
+		return fmt.Errorf("%s", detail)
+	}
+	return err
 }
 
 // SpawnInNewWindow opens a new window in the terminal app hosting this
@@ -164,7 +178,7 @@ func runScript(script string) error {
 // Terminal.app — always present on macOS, so sp inside any other
 // terminal still gets a working spawn.
 func SpawnInNewWindow(command string) error {
-	if runtime.GOOS != "darwin" {
+	if osName != "darwin" {
 		return fmt.Errorf("resume-in-new-window is macOS-only for now")
 	}
 	if hostIsITerm() {
@@ -182,8 +196,8 @@ func hostIsITerm() bool {
 	if app <= 0 {
 		return false
 	}
-	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(app)).Output()
-	return err == nil && strings.Contains(string(out), "iTerm")
+	out, _, err := execCommand(3*time.Second, "ps", "-o", "comm=", "-p", strconv.Itoa(app))
+	return err == nil && strings.Contains(out, "iTerm")
 }
 
 func iterm2SpawnScript(command string) string {
@@ -218,6 +232,6 @@ func ShellQuote(s string) string {
 // OpenAutomationSettings opens the Privacy & Security → Automation pane,
 // where a cached denial can be flipped.
 func OpenAutomationSettings() {
-	_ = exec.Command("open",
-		"x-apple.systempreferences:com.apple.preference.security?Privacy_Automation").Start()
+	_, _, _ = execCommand(3*time.Second, "open",
+		"x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
 }
