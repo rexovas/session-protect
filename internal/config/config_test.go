@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -100,5 +101,34 @@ func TestRepoFor(t *testing.T) {
 	repo, prefix = cfg.RepoFor("claude")
 	if repo != filepath.Join("/data", "claude") || prefix != "" {
 		t.Fatalf("per-target: repo=%q prefix=%q", repo, prefix)
+	}
+}
+
+func TestValidationErrors(t *testing.T) {
+	cases := map[string]string{
+		"topology = \"weird\"\n":           "topology",
+		"[encryption]\nmode = \"rot13\"\n": "encryption.mode",
+		"[schedule]\ntime = \"25:99\"\n":   "schedule.time",
+		"[assist]\nbackend = \"skynet\"\n": "assist.backend",
+	}
+	for content, wantErr := range cases {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("SESSION_PROTECT_CONFIG", path)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Errorf("config %q: err = %v, want mention of %s", content, err, wantErr)
+		}
+	}
+}
+
+func TestExpandHome(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if got := expandHome("~/x"); got != filepath.Join(home, "x") {
+		t.Fatalf("expandHome = %s", got)
+	}
+	if got := expandHome("/abs/path"); got != "/abs/path" {
+		t.Fatal("absolute paths must pass through")
 	}
 }

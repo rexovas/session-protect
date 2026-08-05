@@ -315,3 +315,58 @@ func TestCodexCopyMintsSibling(t *testing.T) {
 		t.Fatal("copy not rewritten to new id/target")
 	}
 }
+
+func TestMemoryReplaceAndSkip(t *testing.T) {
+	for _, mode := range []string{"replace", "skip"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg, home, source, target := setup(t)
+			targetMemory := filepath.Join(home, ".claude", "projects", claudeSlug(target), "memory")
+			if err := os.MkdirAll(targetMemory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(targetMemory, "MEMORY.md"), []byte("target memory\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			opts := Options{Project: source, To: target, Memory: mode}
+			plan, err := Build(cfg, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.MemoryAction != mode {
+				t.Fatalf("memory action = %s", plan.MemoryAction)
+			}
+			if err := Apply(cfg, plan, opts); err != nil {
+				t.Fatal(err)
+			}
+
+			data, err := os.ReadFile(filepath.Join(targetMemory, "MEMORY.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "skip":
+				if string(data) != "target memory\n" {
+					t.Fatal("skip must leave target memory untouched")
+				}
+			case "replace":
+				if string(data) != "old-app memory\n" {
+					t.Fatal("replace must install the incoming memory")
+				}
+				// The displaced memory must survive as a safety copy.
+				found := false
+				_ = filepath.WalkDir(filepath.Join(cfg.BackupRoot, "transplant-safety"), func(path string, entry os.DirEntry, err error) error {
+					if err == nil && !entry.IsDir() && filepath.Base(path) == "MEMORY.md" {
+						if content, readErr := os.ReadFile(path); readErr == nil && string(content) == "target memory\n" {
+							found = true
+						}
+					}
+					return nil
+				})
+				if !found {
+					t.Fatal("replaced memory has no safety copy")
+				}
+			}
+		})
+	}
+}

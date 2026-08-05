@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -69,5 +70,43 @@ func TestOllamaBackendRank(t *testing.T) {
 func TestDetectNone(t *testing.T) {
 	if Detect(config.Assist{Backend: "none"}) != nil {
 		t.Fatal("backend none must disable the feature")
+	}
+}
+
+func TestClaudeBackendViaStub(t *testing.T) {
+	dir := t.TempDir()
+	stub := dir + "/claude"
+	script := "#!/bin/sh\necho 'Sure!'\necho '{\"matches\":[{\"id\":\"bbb\",\"reason\":\"stubbed\"}]}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	backend := Detect(config.Assist{Backend: "claude"})
+	if backend == nil || backend.Name() != "claude" {
+		t.Fatal("claude backend not detected from PATH")
+	}
+	matches, err := backend.Rank("find it", testCandidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].ID != "bbb" || matches[0].Reason != "stubbed" {
+		t.Fatalf("matches = %+v", matches)
+	}
+
+	// auto with no ollama reachable falls through to the CLI.
+	auto := Detect(config.Assist{Backend: "auto", URL: "http://127.0.0.1:1"})
+	if auto == nil || auto.Name() != "claude" {
+		t.Fatal("auto did not fall back to claude")
+	}
+}
+
+func TestDetectAbsentEverything(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if Detect(config.Assist{Backend: "claude"}) != nil {
+		t.Fatal("claude backend without a binary must be nil")
+	}
+	if Detect(config.Assist{Backend: "auto", URL: "http://127.0.0.1:1"}) != nil {
+		t.Fatal("auto with nothing available must be nil")
 	}
 }
