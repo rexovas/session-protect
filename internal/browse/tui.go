@@ -115,9 +115,12 @@ type model struct {
 	actOffset int
 
 	// confirmRestore holds the recoverable session awaiting a y/enter before
-	// its backup copy is written back into the live tree; notice is the
-	// one-line outcome shown until the next keypress.
+	// its backup copy is written back into the live tree; confirmResume
+	// holds a closed session awaiting confirmation before a new terminal
+	// window spawns to resume it; notice is the one-line outcome shown
+	// until the next keypress.
 	confirmRestore *Session
+	confirmResume  *Session
 	notice         string
 	noticeErr      bool
 	fCursor        int
@@ -452,6 +455,32 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.confirmResume != nil {
+		session := *m.confirmResume
+		m.confirmResume = nil
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "y", "enter", "o":
+			project := session.ProjectPath
+			if project == "" {
+				project = m.root
+			}
+			if err := focus.SpawnInNewWindow(resumeCommand(session, project)); err != nil {
+				m.noticeErr = true
+				if errors.Is(err, focus.ErrNotAuthorized) {
+					focus.OpenAutomationSettings()
+					m.notice = "macOS blocked the spawn — enable your terminal under " +
+						"Automation in the Settings pane just opened, then press o again"
+				} else {
+					m.notice = "resume failed: " + err.Error()
+				}
+			} else {
+				m.notice = "resuming " + session.ID[:8] + "… in a new " + session.Target + " window"
+			}
+		}
+		return m, nil
+	}
 	if m.confirmRestore != nil {
 		session := *m.confirmRestore
 		m.confirmRestore = nil
@@ -677,23 +706,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case session.SourcePath == "":
 			m.notice, m.noticeErr = "backup-only session — restore it first (r), then resume", true
 		default:
-			// Closed: resume it in a fresh window of the same terminal.
-			project := session.ProjectPath
-			if project == "" {
-				project = m.root
-			}
-			if err := focus.SpawnInNewWindow(resumeCommand(*session, project)); err != nil {
-				m.noticeErr = true
-				if errors.Is(err, focus.ErrNotAuthorized) {
-					focus.OpenAutomationSettings()
-					m.notice = "macOS blocked the spawn — enable your terminal under " +
-						"Automation in the Settings pane just opened, then press o again"
-				} else {
-					m.notice = "resume failed: " + err.Error()
-				}
-			} else {
-				m.notice = "resuming " + session.ID[:8] + "… in a new " + session.Target + " window"
-			}
+			// Closed: confirm before spawning a window to resume it.
+			copied := *session
+			m.confirmResume = &copied
 		}
 	case "t":
 		if m.showSessions || m.showAll || m.showHits {
@@ -966,7 +981,9 @@ func (m model) View() string {
 		}
 		b.WriteString(styleDim.Render(empty) + "\n")
 	}
-	if m.confirmRestore != nil {
+	if m.confirmResume != nil {
+		b.WriteString("\n" + m.confirmResumeBox(*m.confirmResume) + "\n")
+	} else if m.confirmRestore != nil {
 		b.WriteString("\n" + m.confirmRestoreBox(*m.confirmRestore) + "\n")
 	} else if m.notice != "" {
 		noticeStyle := styleOK
@@ -990,6 +1007,9 @@ func (m model) View() string {
 	}
 	if m.confirmRestore != nil {
 		help = "y/enter restore · esc cancel"
+	}
+	if m.confirmResume != nil {
+		help = "y/enter open · esc cancel"
 	}
 	return m.pinBottom(b.String(), help)
 }
@@ -1732,6 +1752,28 @@ func (m model) confirmRestoreBox(session Session) string {
 	body := styleRecover.Render("✝ ") + styleBold.Render("restore ") + truncate(title, inner) + "\n" +
 		styleDim.Render("from  ") + truncate(session.BackupPath, inner) + "\n" +
 		styleDim.Render("to    ") + truncate(dest, inner)
+	return detailBox(width).Render(body)
+}
+
+// confirmResumeBox previews the resume a y/enter will launch.
+func (m model) confirmResumeBox(session Session) string {
+	title := session.CustomName
+	if title == "" {
+		title = session.Title
+	}
+	if title == "" {
+		title = session.ID
+	}
+	project := session.ProjectPath
+	if project == "" {
+		project = m.root
+	}
+	width := min(m.width, 100)
+	inner := width - 12
+	body := styleOK.Render("▶ ") + styleBold.Render("open session ") + truncate(title, inner) + "\n" +
+		styleDim.Render("in    ") + truncate(tildePath(project), inner) + "\n" +
+		styleDim.Render("runs  ") + truncate(resumeCommand(session, project), inner) + "\n" +
+		styleDim.Render("      in a new terminal window")
 	return detailBox(width).Render(body)
 }
 
