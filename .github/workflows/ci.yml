@@ -26,20 +26,18 @@ jobs:
       - name: tests (race)
         run: go test -race ./...
 
-  # Static analysis disabled while iterating quickly; re-enable before
-  # widening the contributor base or going public.
-  # analyze:
-  #   name: Static Analysis
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-go@v5
-  #       with:
-  #         go-version-file: go.mod
-  #     - name: staticcheck
-  #       run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
-  #     - name: govulncheck
-  #       run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+  analyze:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   security:
     name: Security

@@ -11,9 +11,10 @@ func TestUnlockedOnPlainDir(t *testing.T) {
 }
 
 func TestInstalledProbe(t *testing.T) {
-	// Answer depends on the machine; the probe itself must not panic and
-	// must be consistent across calls.
-	if Installed() != Installed() {
+	// Answer depends on the machine; the probe must be stable per PATH.
+	first := Installed()
+	second := Installed()
+	if first != second {
 		t.Fatal("Installed is not stable")
 	}
 	t.Setenv("PATH", t.TempDir())
