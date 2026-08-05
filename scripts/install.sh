@@ -61,7 +61,10 @@ mkdir -p "$GOCACHE" "$GOMODCACHE"
 
 commit="$(git -C "$source_dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-version="${SESSION_PROTECT_VERSION:-0.1.0}"
+# Version comes from the nearest release tag; builds past a tag or with
+# local edits carry a -N-g<sha>/-dirty suffix distinguishing them from
+# the released version.
+version="${SESSION_PROTECT_VERSION:-$(git -C "$source_dir" describe --tags --dirty 2>/dev/null || echo dev)}"
 
 ldflags=(
   "-X github.com/rexovas/session-protect/internal/version.Version=$version"
@@ -90,6 +93,7 @@ fi
   echo "install_prefix=$prefix"
   echo "installed_at=$date"
   echo "commit=$commit"
+  echo "version=$version"
 } > "$share_dir/install.env"
 
 echo "Installed $binary"

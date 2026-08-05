@@ -893,9 +893,12 @@ func (m *model) setCursor(position int) {
 
 func (m model) pageSize() int { return max(4, m.height-6) }
 
-// shortCommit is the installed build's revision, shown faintly for
-// dogfooding traceability.
-func shortCommit() string {
+// buildVersion is the installed build's identity, shown faintly in the
+// footer: the release version when stamped, else the commit.
+func buildVersion() string {
+	if v := version.Version; v != "" && v != "dev" {
+		return v
+	}
 	commit := version.Commit
 	if len(commit) > 7 {
 		commit = commit[:7]
@@ -1572,8 +1575,8 @@ func (m model) pinBottom(content string, help string) string {
 		pathLine += strings.Repeat(" ", pad)
 	}
 	helpLine := styleFooter.Render(" " + help)
-	if commit := shortCommit(); commit != "" {
-		revision := styleDim.Render("version: " + commit + " ")
+	if build := buildVersion(); build != "" {
+		revision := styleDim.Render("version: " + build + " ")
 		if pad := m.width - lipgloss.Width(helpLine) - lipgloss.Width(revision); pad > 0 {
 			helpLine += strings.Repeat(" ", pad)
 		}

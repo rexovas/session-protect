@@ -1,0 +1,40 @@
+version: 2
+
+project_name: session-protect
+
+builds:
+  - main: ./cmd/session-protect
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/rexovas/session-protect/internal/version.Version={{ .Version }}
+      - -X github.com/rexovas/session-protect/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/rexovas/session-protect/internal/version.Date={{ .Date }}
+      - -X github.com/rexovas/session-protect/internal/version.Channel=release
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE*
+      - README*
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+release:
+  draft: false
+  prerelease: auto

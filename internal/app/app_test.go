@@ -1,6 +1,8 @@
 package app
 
 import (
+	"github.com/rexovas/session-protect/internal/version"
+
 	"bytes"
 	"strings"
 	"testing"
@@ -14,7 +16,7 @@ func TestVersionCommand(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d; stderr=%s", code, stderr.String())
 	}
-	if got, want := stdout.String(), "session-protect version 0.1.0\n"; got != want {
+	if got, want := stdout.String(), "session-protect version "+version.Version+"\n"; got != want {
 		t.Fatalf("unexpected version output: got %q want %q", got, want)
 	}
 }
