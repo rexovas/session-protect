@@ -51,7 +51,7 @@ no telemetry, no accounts, no external services.
 ## Install
 
 ```sh
-curl -fsSL https://get.rexov.as | sh
+curl -fsSL https://get.rexov.as/session-protect | sh
 ```
 
 Installs the latest release (checksum-verified) to `~/.local/bin` as

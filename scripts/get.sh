@@ -1,7 +1,7 @@
 #!/bin/sh
-# SessionProtect installer — https://get.rexov.as
+# SessionProtect installer — served at https://get.rexov.as/session-protect
 #
-#   curl -fsSL https://get.rexov.as | sh
+#   curl -fsSL https://get.rexov.as/session-protect | sh
 #
 # Downloads the latest release for this platform, verifies it against the
 # release checksums, and installs to ~/.local/bin (override with

@@ -32,9 +32,11 @@ single source of truth — no version constants to edit.
 
 ## Distribution
 
-- **get.rexov.as** serves `scripts/get.sh` (a Cloudflare redirect to the
-  raw file on `main`); the script resolves the latest release itself, so
-  it needs no per-release maintenance.
+- **get.rexov.as/session-protect** serves `scripts/get.sh` from the
+  Rexovas artifact CDN. The script resolves the latest release itself,
+  so it only needs re-uploading when the script changes (maintainers:
+  `aws s3 cp scripts/get.sh s3://rexovas-artifacts-public/session-protect
+  --content-type text/x-shellscript`).
 - **Homebrew**: GoReleaser pushes the formula to `rexovas/homebrew-tap`
   on every release. The `HOMEBREW_TAP_TOKEN` repo secret (a fine-grained
   PAT with contents-write on the tap) must exist before the first
