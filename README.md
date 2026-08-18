@@ -12,6 +12,8 @@ you back inside any session in one keystroke.
 Supports **Claude Code** and **OpenAI Codex** side by side. Local-only:
 no telemetry, no accounts, no external services.
 
+<img src="assets/demo.gif" alt="The SessionProtect session explorer: live sessions, health states, inspector, search, and restore" width="900">
+
 ## Highlights
 
 **Protect**
