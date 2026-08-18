@@ -25,6 +25,16 @@ jobs:
           go test ./... >/dev/null
           echo "releasing ${GITHUB_REF_NAME}"
 
+      # Short-lived token from the org's app — no long-lived PAT. The app
+      # needs contents:write and an installation covering homebrew-tap.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: tap-token
+        with:
+          client-id: ${{ secrets.OSS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.OSS_APP_PRIVATE_KEY }}
+          owner: rexovas
+          repositories: homebrew-tap
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
@@ -32,4 +42,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ steps.tap-token.outputs.token }}

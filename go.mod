@@ -2,7 +2,7 @@ module github.com/rexovas/session-protect
 
 go 1.26.4
 
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10

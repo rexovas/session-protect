@@ -38,9 +38,10 @@ single source of truth — no version constants to edit.
   `aws s3 cp scripts/get.sh s3://rexovas-artifacts-public/session-protect
   --content-type text/x-shellscript`).
 - **Homebrew**: GoReleaser pushes the formula to `rexovas/homebrew-tap`
-  on every release. The `HOMEBREW_TAP_TOKEN` repo secret (a fine-grained
-  PAT with contents-write on the tap) must exist before the first
-  release.
+  on every release, authenticating with a short-lived token minted from
+  the org's GitHub App (contents-write, installed on the tap). The
+  `OSS_APP_CLIENT_ID` and `OSS_APP_PRIVATE_KEY` repo secrets must exist
+  before the first release.
 
 ## Notes
 
