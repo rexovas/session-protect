@@ -44,10 +44,30 @@ Sleep 2000ms
 Escape
 Sleep 600ms
 
+# Content search: transcript hits ranked by count
+Type "/"
+Sleep 300ms
+Type "websocket"
+Sleep 1000ms
+Ctrl+S
+Sleep 3200ms
+Escape
+Sleep 500ms
+Escape
+Sleep 500ms
+
+# AI find: describe the session you half-remember
+Ctrl+G
+Sleep 800ms
+Type "the one where we fixed socket reconnects"
+Sleep 2200ms
+Escape
+Sleep 600ms
+
 # Back up; all sessions; reveal the lost one
 Escape
 Sleep 800ms
-Ctrl+a
+Ctrl+A
 Sleep 2000ms
 Type "x"
 Sleep 2200ms

@@ -14,6 +14,8 @@ no telemetry, no accounts, no external services.
 
 <img src="assets/demo.gif" alt="The SessionProtect session explorer: live sessions, health states, inspector, search, and restore" width="900">
 
+*More: [feature walkthroughs](docs/DEMOS.md) — search tiers, rescue, transplant.*
+
 ## Highlights
 
 **Protect**

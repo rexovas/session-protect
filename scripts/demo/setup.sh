@@ -22,14 +22,14 @@ EOF
 
 slug() { echo "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
 
-session() { # project-path uuid title turns
-  local project="$1" id="$2" title="$3" turns="$4"
+session() { # project-path uuid title turns topic
+  local project="$1" id="$2" title="$3" turns="$4" topic="$5"
   local dir="$HOME/.claude/projects/$(slug "$project")"
   mkdir -p "$dir" "$project"
   {
     printf '{"type":"user","timestamp":"2026-08-14T10:00:00Z","cwd":"%s","sessionId":"%s","message":{"role":"user","content":"%s"}}\n' "$project" "$id" "$title"
     for i in $(seq 1 "$turns"); do
-      printf '{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"Working on it — step %s. I updated the handler and the tests pass."}],"usage":{"input_tokens":%s,"output_tokens":%s,"cache_read_input_tokens":%s}}}\n' "$i" $((900*i)) $((220*i)) $((15000*i))
+      printf '{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"Step %s: reworked the %s path — the %s tests pass and the edge cases around %s are covered."}],"usage":{"input_tokens":%s,"output_tokens":%s,"cache_read_input_tokens":%s}}}\n' "$i" "$topic" "$topic" "$topic" $((900*i)) $((220*i)) $((15000*i))
       printf '{"type":"user","cwd":"%s","sessionId":"%s","message":{"role":"user","content":"looks good, continue with part %s"}}\n' "$project" "$id" "$i"
     done
     printf '{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"Done. All %s parts are merged and green."}],"usage":{"input_tokens":500,"output_tokens":90}}}\n' "$turns"
@@ -41,12 +41,12 @@ P1="$HOME/projects/orbit-api"
 P2="$HOME/projects/atlas-web"
 P3="$HOME/projects/tooling"
 
-session "$P1" "0a1b2c3d-1111-4a4a-8a8a-000000000001" "add jwt refresh flow to the auth service" 6
-session "$P1" "0a1b2c3d-1111-4a4a-8a8a-000000000002" "debug the flaky websocket reconnect" 4
-session "$P1" "0a1b2c3d-1111-4a4a-8a8a-000000000003" "rate limiting for the public endpoints" 3
-session "$P2" "0a1b2c3d-2222-4a4a-8a8a-000000000004" "dark mode for the settings pages" 5
-session "$P2" "0a1b2c3d-2222-4a4a-8a8a-000000000005" "migrate the build to vite" 3
-session "$P3" "0a1b2c3d-3333-4a4a-8a8a-000000000006" "release script for the cli" 2
+session "$P1" "0a1b2c3d-1111-4a4a-8a8a-000000000001" "add jwt refresh flow to the auth service" 6 "auth token"
+session "$P1" "0a1b2c3d-1111-4a4a-8a8a-000000000002" "debug the flaky websocket reconnect" 4 "websocket reconnect"
+session "$P1" "0a1b2c3d-1111-4a4a-8a8a-000000000003" "rate limiting for the public endpoints" 3 "rate limiter"
+session "$P2" "0a1b2c3d-2222-4a4a-8a8a-000000000004" "dark mode for the settings pages" 5 "theme toggle"
+session "$P2" "0a1b2c3d-2222-4a4a-8a8a-000000000005" "migrate the build to vite" 3 "vite build"
+session "$P3" "0a1b2c3d-3333-4a4a-8a8a-000000000006" "release script for the cli" 2 "release script"
 
 # A lost session: history only, no transcript anywhere.
 printf '{"display":"prototype the billing webhooks","sessionId":"0a1b2c3d-9999-4a4a-8a8a-000000000009","project":"%s","timestamp":%s}\n' "$P2" "$(date -v-6d +%s)000" >> "$HOME/.claude/history.jsonl"
