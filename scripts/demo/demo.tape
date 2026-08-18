@@ -54,15 +54,35 @@ Sleep 2200ms
 Type "x"
 Sleep 500ms
 
-# Restore dialog on the recoverable session
+# Restore the recoverable session — for real
 Escape
 Sleep 600ms
-Down
+Type "G"
 Sleep 600ms
 Enter
 Sleep 1200ms
 Type "r"
+Sleep 2000ms
+Left
+Sleep 800ms
+Enter
 Sleep 2500ms
+
+# Resume it in a new window (dialog, then decline)
+Type "o"
+Sleep 2500ms
+Escape
+Sleep 600ms
+
+# Transplant: move the session elsewhere (plan preview, then decline)
+Type "t"
+Sleep 1200ms
+Type "archived-tooling"
+Sleep 800ms
+Enter
+Sleep 2800ms
+Escape
+Sleep 400ms
 Escape
 Sleep 600ms
 

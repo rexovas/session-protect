@@ -29,10 +29,10 @@ session() { # project-path uuid title turns
   {
     printf '{"type":"user","timestamp":"2026-08-14T10:00:00Z","cwd":"%s","sessionId":"%s","message":{"role":"user","content":"%s"}}\n' "$project" "$id" "$title"
     for i in $(seq 1 "$turns"); do
-      printf '{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"Working on it — step %s. I updated the handler and the tests pass."}],"usage":{"input_tokens":%s,"output_tokens":%s,"cache_read_input_tokens":%s}}\n' "$i" $((900*i)) $((220*i)) $((15000*i))
+      printf '{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"Working on it — step %s. I updated the handler and the tests pass."}],"usage":{"input_tokens":%s,"output_tokens":%s,"cache_read_input_tokens":%s}}}\n' "$i" $((900*i)) $((220*i)) $((15000*i))
       printf '{"type":"user","cwd":"%s","sessionId":"%s","message":{"role":"user","content":"looks good, continue with part %s"}}\n' "$project" "$id" "$i"
     done
-    printf '{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"Done. All %s parts are merged and green."}],"usage":{"input_tokens":500,"output_tokens":90}}\n' "$turns"
+    printf '{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"Done. All %s parts are merged and green."}],"usage":{"input_tokens":500,"output_tokens":90}}}\n' "$turns"
   } > "$dir/$id.jsonl"
   printf '{"display":"%s","sessionId":"%s","project":"%s","timestamp":%s}\n' "$title" "$id" "$project" "$(date +%s)000" >> "$HOME/.claude/history.jsonl"
 }
@@ -49,7 +49,14 @@ session "$P2" "0a1b2c3d-2222-4a4a-8a8a-000000000005" "migrate the build to vite"
 session "$P3" "0a1b2c3d-3333-4a4a-8a8a-000000000006" "release script for the cli" 2
 
 # A lost session: history only, no transcript anywhere.
-printf '{"display":"prototype the billing webhooks","sessionId":"0a1b2c3d-9999-4a4a-8a8a-000000000009","project":"%s","timestamp":%s}\n' "$P2" "$(date +%s)000" >> "$HOME/.claude/history.jsonl"
+printf '{"display":"prototype the billing webhooks","sessionId":"0a1b2c3d-9999-4a4a-8a8a-000000000009","project":"%s","timestamp":%s}\n' "$P2" "$(date -v-6d +%s)000" >> "$HOME/.claude/history.jsonl"
+
+# Ages: the open session stays fresh; everything else spreads out.
+touch -t "$(date -v-3H +%Y%m%d%H%M)" "$HOME/.claude/projects/$(slug "$P1")/0a1b2c3d-1111-4a4a-8a8a-000000000002.jsonl"
+touch -t "$(date -v-3H +%Y%m%d%H%M)" "$HOME/.claude/projects/$(slug "$P1")/0a1b2c3d-1111-4a4a-8a8a-000000000003.jsonl"
+touch -t "$(date -v-1d +%Y%m%d%H%M)" "$HOME/.claude/projects/$(slug "$P2")/0a1b2c3d-2222-4a4a-8a8a-000000000004.jsonl"
+touch -t "$(date -v-3d +%Y%m%d%H%M)" "$HOME/.claude/projects/$(slug "$P2")/0a1b2c3d-2222-4a4a-8a8a-000000000005.jsonl"
+touch -t "$(date -v-5d +%Y%m%d%H%M)" "$HOME/.claude/projects/$(slug "$P3")/0a1b2c3d-3333-4a4a-8a8a-000000000006.jsonl"
 
 # Build the demo binary and take the first backup.
 ( cd "$SP_SRC" && go build -ldflags "-X github.com/rexovas/session-protect/internal/version.Version=v1.0.0 -X github.com/rexovas/session-protect/internal/version.Channel=release" -o "$DEMO/bin/session-protect" ./cmd/session-protect )
@@ -59,6 +66,7 @@ ln -sf "$DEMO/bin/session-protect" "$DEMO/bin/sp"
 # One deleted-but-recoverable session, one stale (post-backup writes).
 rm "$HOME/.claude/projects/$(slug "$P3")/0a1b2c3d-3333-4a4a-8a8a-000000000006.jsonl"
 printf '{"type":"user","cwd":"%s","sessionId":"0a1b2c3d-1111-4a4a-8a8a-000000000003","message":{"role":"user","content":"one more tweak please"}}\n' "$P1" >> "$HOME/.claude/projects/$(slug "$P1")/0a1b2c3d-1111-4a4a-8a8a-000000000003.jsonl"
+touch -t "$(date -v-40M +%Y%m%d%H%M)" "$HOME/.claude/projects/$(slug "$P1")/0a1b2c3d-1111-4a4a-8a8a-000000000003.jsonl"
 
 # An open session: a live pid in the registry makes the row gold.
 sleep 600 &
