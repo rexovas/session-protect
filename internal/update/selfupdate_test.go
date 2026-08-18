@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -145,5 +146,32 @@ func TestThrottledCheckCaches(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("throttle failed: %d API calls", calls)
+	}
+}
+
+func TestBrewManagedRouting(t *testing.T) {
+	if !brewManaged("/opt/homebrew/Cellar/session-protect/1.0.0/bin/session-protect") {
+		t.Fatal("Cellar path must be brew-managed")
+	}
+	if brewManaged("/Users/x/.local/bin/session-protect") {
+		t.Fatal("local bin must not be brew-managed")
+	}
+
+	target := filepath.Join(t.TempDir(), "Cellar", "session-protect", "1.0.0", "bin")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(target, "session-protect")
+	if err := os.WriteFile(bin, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executablePath = func() (string, error) { return bin, nil }
+	t.Cleanup(func() { executablePath = os.Executable })
+
+	if _, err := Apply("v1.1.0"); !errors.Is(err, ErrBrewManaged) {
+		t.Fatalf("Apply in Cellar must refuse with ErrBrewManaged, got %v", err)
+	}
+	if data, _ := os.ReadFile(bin); string(data) != "OLD" {
+		t.Fatal("brew-managed binary was touched")
 	}
 }

@@ -78,6 +78,14 @@ func selfUpdate(stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Already up to date (%s).\n", current)
 		return 0
 	}
+	if exe, exeErr := executablePath(); exeErr == nil {
+		if resolved, rErr := filepath.EvalSymlinks(exe); rErr == nil && brewManaged(resolved) {
+			fmt.Fprintf(stdout, "%s is available (current %s).\n", latest, current)
+			fmt.Fprintln(stdout, "This install is managed by Homebrew — update with:")
+			fmt.Fprintln(stdout, "  brew upgrade session-protect")
+			return 0
+		}
+	}
 	fmt.Fprintf(stdout, "Updating %s → %s …\n", current, latest)
 	path, err := Apply(latest)
 	if err != nil {

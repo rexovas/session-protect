@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -128,6 +129,15 @@ func assetName(tag string) string {
 // test binary itself.
 var executablePath = os.Executable
 
+// ErrBrewManaged means the binary lives in Homebrew's Cellar; swapping it
+// underneath brew desyncs its bookkeeping, so updates route to brew.
+var ErrBrewManaged = errors.New("installed via Homebrew — update with: brew upgrade session-protect")
+
+// brewManaged reports whether path is inside a Homebrew Cellar.
+func brewManaged(path string) bool {
+	return strings.Contains(path, string(os.PathSeparator)+"Cellar"+string(os.PathSeparator))
+}
+
 func Apply(tag string) (string, error) {
 	exe, err := executablePath()
 	if err != nil {
@@ -135,6 +145,9 @@ func Apply(tag string) (string, error) {
 	}
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
+	}
+	if brewManaged(exe) {
+		return "", ErrBrewManaged
 	}
 
 	base := downloadBase + "/" + repoSlug + "/releases/download/" + tag + "/"

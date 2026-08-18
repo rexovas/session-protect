@@ -373,6 +373,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateBusy = false
 		m.updateOffer = ""
 		if msg.err != nil {
+			if errors.Is(msg.err, update.ErrBrewManaged) {
+				m.notice = msg.err.Error()
+				m.noticeErr = false
+				return m, nil
+			}
 			m.notice, m.noticeErr = "update failed: "+msg.err.Error(), true
 			return m, nil
 		}
