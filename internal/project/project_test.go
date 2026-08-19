@@ -8,6 +8,7 @@ import (
 
 	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 func TestClaudeProjectSlug(t *testing.T) {
@@ -18,8 +19,8 @@ func TestClaudeProjectSlug(t *testing.T) {
 		"/a/b c/d":                       "-a-b-c-d",
 	}
 	for path, want := range cases {
-		if got := claudeProjectSlug(path); got != want {
-			t.Errorf("claudeProjectSlug(%q) = %q, want %q", path, got, want)
+		if got := targets.ClaudeSlug(path); got != want {
+			t.Errorf("targets.ClaudeSlug(%q) = %q, want %q", path, got, want)
 		}
 	}
 }
@@ -52,7 +53,7 @@ func setup(t *testing.T) (home string, projectPath string) {
 	if err := os.MkdirAll(projectPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	slug := claudeProjectSlug(projectPath)
+	slug := targets.ClaudeSlug(projectPath)
 	write(t, filepath.Join(home, ".claude", "projects", slug, "sess-1.jsonl"), `{"claude":1}`)
 	write(t, filepath.Join(home, ".codex", "sessions", "2026", "sess-2.jsonl"),
 		`{"type":"session_meta","payload":{"id":"sess-2","cwd":"`+projectPath+`"}}`)
@@ -100,7 +101,7 @@ func TestBuildStates(t *testing.T) {
 
 	// Deleting the live claude session flips it to missing-source
 	// (recoverable), never touching the backup copy.
-	slug := claudeProjectSlug(projectPath)
+	slug := targets.ClaudeSlug(projectPath)
 	if err := os.Remove(filepath.Join(home, ".claude", "projects", slug, "sess-1.jsonl")); err != nil {
 		t.Fatal(err)
 	}

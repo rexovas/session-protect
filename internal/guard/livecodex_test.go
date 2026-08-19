@@ -16,3 +16,12 @@ func TestParseCodexProcs(t *testing.T) {
 		t.Fatalf("pids = %v", pids)
 	}
 }
+
+func TestProcessCwdCaches(t *testing.T) {
+	cwdCacheMu.Lock()
+	cwdCache["424242"] = "/cached/path"
+	cwdCacheMu.Unlock()
+	if got := processCwd("424242"); got != "/cached/path" {
+		t.Fatalf("cache miss: %q", got)
+	}
+}

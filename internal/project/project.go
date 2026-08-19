@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/human"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 type Status struct {
@@ -158,7 +160,7 @@ func usage(out io.Writer) {
 }
 
 func claudeStatus(cfg config.Config, home string, projectPath string) TargetStatus {
-	slug := claudeProjectSlug(projectPath)
+	slug := targets.ClaudeSlug(projectPath)
 	source := filepath.Join(home, ".claude", "projects", slug)
 	backup := backupDir(cfg, "claude", filepath.Join("projects", slug))
 	return compareTarget("claude", source, backup, listJSONL(source), listJSONL(backup))
@@ -214,14 +216,14 @@ func compareTarget(name string, sourcePath string, backupPath string, sourceFile
 		session := SessionStatus{ID: id}
 		if hasSource {
 			session.SourcePath = source.Path
-			session.SourceModified = formatTime(source.ModTime)
+			session.SourceModified = human.Time(source.ModTime)
 			if source.ModTime.After(parseDisplayTime(status.LatestSource)) {
 				status.LatestSource = session.SourceModified
 			}
 		}
 		if hasBackup {
 			session.BackupPath = backup.Path
-			session.BackupModified = formatTime(backup.ModTime)
+			session.BackupModified = human.Time(backup.ModTime)
 			if backup.ModTime.After(parseDisplayTime(status.LatestBackup)) {
 				status.LatestBackup = session.BackupModified
 			}
@@ -257,20 +259,6 @@ func normalizeProjectPath(path string) (string, error) {
 		path = filepath.Join(wd, path)
 	}
 	return filepath.Clean(path), nil
-}
-
-// claudeProjectSlug mirrors Claude Code's project directory encoding: every
-// character outside [A-Za-z0-9] becomes "-", so "/a/b.c_d" -> "-a-b-c-d".
-func claudeProjectSlug(path string) string {
-	slug := []byte(filepath.Clean(path))
-	for i, c := range slug {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		default:
-			slug[i] = '-'
-		}
-	}
-	return string(slug)
 }
 
 func listJSONL(root string) []sessionFile {
@@ -347,13 +335,6 @@ func newest(a sessionFile, b sessionFile) time.Time {
 		return a.ModTime
 	}
 	return b.ModTime
-}
-
-func formatTime(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.Local().Format("2006-01-02 15:04:05")
 }
 
 func parseDisplayTime(value string) time.Time {

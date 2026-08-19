@@ -9,6 +9,7 @@ import (
 
 	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 const sessionID = "11111111-2222-3333-4444-555555555555"
@@ -20,7 +21,7 @@ func setup(t *testing.T) (cfg config.Config, home string, source string, target 
 	source = filepath.Join(home, "work", "old-app")
 	target = filepath.Join(home, "work", "new-app")
 
-	slug := claudeSlug(source)
+	slug := targets.ClaudeSlug(source)
 	dir := filepath.Join(home, ".claude", "projects", slug)
 	lines := []string{
 		`{"type":"mode","sessionId":"` + sessionID + `","mode":"default"}`,
@@ -52,7 +53,7 @@ func setup(t *testing.T) (cfg config.Config, home string, source string, target 
 }
 
 func TestClaudeSlug(t *testing.T) {
-	if got := claudeSlug("/Users/x/projects/re.xo_vas"); got != "-Users-x-projects-re-xo-vas" {
+	if got := targets.ClaudeSlug("/Users/x/projects/re.xo_vas"); got != "-Users-x-projects-re-xo-vas" {
 		t.Fatalf("slug = %s", got)
 	}
 }
@@ -70,7 +71,7 @@ func TestMoveRewritesAndRemoves(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dstFile := filepath.Join(home, ".claude", "projects", claudeSlug(target), sessionID+".jsonl")
+	dstFile := filepath.Join(home, ".claude", "projects", targets.ClaudeSlug(target), sessionID+".jsonl")
 	data, err := os.ReadFile(dstFile)
 	if err != nil {
 		t.Fatalf("moved session missing: %v", err)
@@ -89,17 +90,17 @@ func TestMoveRewritesAndRemoves(t *testing.T) {
 		t.Fatal("non-JSON line did not pass through")
 	}
 	for _, gone := range []string{
-		filepath.Join(home, ".claude", "projects", claudeSlug(source), sessionID+".jsonl"),
-		filepath.Join(home, ".claude", "projects", claudeSlug(source), "memory"),
+		filepath.Join(home, ".claude", "projects", targets.ClaudeSlug(source), sessionID+".jsonl"),
+		filepath.Join(home, ".claude", "projects", targets.ClaudeSlug(source), "memory"),
 	} {
 		if _, err := os.Stat(gone); !os.IsNotExist(err) {
 			t.Fatalf("source not removed after move: %s", gone)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(home, ".claude", "projects", claudeSlug(target), "memory", "MEMORY.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(home, ".claude", "projects", targets.ClaudeSlug(target), "memory", "MEMORY.md")); err != nil {
 		t.Fatalf("memory did not move: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".claude", "projects", claudeSlug(target), sessionID, "subagents", "agent-1.jsonl")); err != nil {
+	if _, err := os.Stat(filepath.Join(home, ".claude", "projects", targets.ClaudeSlug(target), sessionID, "subagents", "agent-1.jsonl")); err != nil {
 		t.Fatalf("sidecar did not move: %v", err)
 	}
 
@@ -135,11 +136,11 @@ func TestCopyMintsNewIdentityAndKeepsSource(t *testing.T) {
 	}
 
 	// Source untouched.
-	if _, err := os.Stat(filepath.Join(home, ".claude", "projects", claudeSlug(source), sessionID+".jsonl")); err != nil {
+	if _, err := os.Stat(filepath.Join(home, ".claude", "projects", targets.ClaudeSlug(source), sessionID+".jsonl")); err != nil {
 		t.Fatalf("copy removed the source: %v", err)
 	}
 	newID := plan.Sessions[0].NewID
-	data, err := os.ReadFile(filepath.Join(home, ".claude", "projects", claudeSlug(target), newID+".jsonl"))
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "projects", targets.ClaudeSlug(target), newID+".jsonl"))
 	if err != nil {
 		t.Fatalf("copied session missing: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestCopyMintsNewIdentityAndKeepsSource(t *testing.T) {
 
 func TestMemoryKeepBothNeverOverwrites(t *testing.T) {
 	cfg, home, source, target := setup(t)
-	targetMemory := filepath.Join(home, ".claude", "projects", claudeSlug(target), "memory")
+	targetMemory := filepath.Join(home, ".claude", "projects", targets.ClaudeSlug(target), "memory")
 	if err := os.MkdirAll(targetMemory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +321,7 @@ func TestMemoryReplaceAndSkip(t *testing.T) {
 	for _, mode := range []string{"replace", "skip"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg, home, source, target := setup(t)
-			targetMemory := filepath.Join(home, ".claude", "projects", claudeSlug(target), "memory")
+			targetMemory := filepath.Join(home, ".claude", "projects", targets.ClaudeSlug(target), "memory")
 			if err := os.MkdirAll(targetMemory, 0o700); err != nil {
 				t.Fatal(err)
 			}

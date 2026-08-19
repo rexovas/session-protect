@@ -20,6 +20,7 @@ import (
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/guard"
 	"github.com/rexovas/session-protect/internal/lock"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 type Options struct {
@@ -60,20 +61,6 @@ type Plan struct {
 	CreatesDir   bool   // the target directory does not exist yet (mkdir -p)
 }
 
-// claudeSlug replicates the agent's project-path encoding: every character
-// outside [a-zA-Z0-9] becomes a dash.
-func claudeSlug(path string) string {
-	var b strings.Builder
-	for _, c := range path {
-		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
-			b.WriteRune(c)
-		} else {
-			b.WriteByte('-')
-		}
-	}
-	return b.String()
-}
-
 func codexSessionsRoot(cfg config.Config) string {
 	for _, target := range cfg.ResolveTargets() {
 		if target.Name == "codex" {
@@ -108,7 +95,7 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 	}
 	root := projectsRoot(cfg)
 
-	plan := &Plan{TargetPath: target, TargetSlug: claudeSlug(target)}
+	plan := &Plan{TargetPath: target, TargetSlug: targets.ClaudeSlug(target)}
 	if info, err := os.Stat(target); err == nil {
 		if !info.IsDir() {
 			return nil, fmt.Errorf("target %s exists and is not a directory", target)
@@ -126,10 +113,10 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 			return nil, err
 		}
 		plan.SourcePath = source
-		plan.SourceSlug = claudeSlug(source)
+		plan.SourceSlug = targets.ClaudeSlug(source)
 	} else if path, err := findCodexSession(codexRoot, opts.SessionID); err == nil {
-		plan.SourcePath = codexCwd(path)
-		plan.SourceSlug = claudeSlug(plan.SourcePath)
+		plan.SourcePath = codexCwdOf(path)
+		plan.SourceSlug = targets.ClaudeSlug(plan.SourcePath)
 	} else {
 		slug, err := findSessionSlug(root, opts.SessionID)
 		if err != nil {
@@ -577,6 +564,11 @@ func copyTree(src string, dst string) error {
 	})
 }
 
+func codexCwdOf(path string) string {
+	_, cwd := targets.CodexSessionMeta(path)
+	return cwd
+}
+
 // findCodexSession walks the date-keyed codex sessions tree for the file
 // carrying a session id.
 func findCodexSession(root string, id string) (string, error) {
@@ -610,7 +602,7 @@ func codexSessionsFor(root string, projectPath string, sessionID string) []strin
 		if sessionID != "" && !strings.HasSuffix(entry.Name(), sessionID+".jsonl") {
 			return nil
 		}
-		if codexCwd(path) == projectPath {
+		if codexCwdOf(path) == projectPath {
 			out = append(out, path)
 		}
 		return nil
@@ -625,29 +617,6 @@ func codexIDFromName(name string) string {
 		return name[len(name)-36:]
 	}
 	return name
-}
-
-// codexCwd reads the session's working directory from its meta line.
-func codexCwd(path string) string {
-	file, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		var line struct {
-			Type    string `json:"type"`
-			Payload struct {
-				Cwd string `json:"cwd"`
-			} `json:"payload"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &line) == nil && line.Type == "session_meta" {
-			return line.Payload.Cwd
-		}
-	}
-	return ""
 }
 
 // findSessionSlug locates which project dir holds a session id.

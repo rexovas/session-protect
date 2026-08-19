@@ -398,7 +398,7 @@ func listCodex(root string) []fileInfo {
 		if infoErr != nil {
 			return nil
 		}
-		id, cwd := codexMeta(path)
+		id, cwd := targets.CodexSessionMeta(path)
 		if id == "" {
 			id = strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		}
@@ -1301,33 +1301,6 @@ func scanFileMeta(path string) (name string, model string) {
 		}
 	}
 	return name, model
-}
-
-// codexMeta pulls the session id and working directory from the first lines
-// of a codex session file.
-func codexMeta(path string) (id string, cwd string) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", ""
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for i := 0; i < 50 && scanner.Scan(); i++ {
-		var event struct {
-			Payload struct {
-				ID  string `json:"id"`
-				Cwd string `json:"cwd"`
-			} `json:"payload"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &event) != nil {
-			continue
-		}
-		if event.Payload.Cwd != "" {
-			return event.Payload.ID, event.Payload.Cwd
-		}
-	}
-	return "", ""
 }
 
 // claudeProjectPath recovers the real project path by reading the cwd field

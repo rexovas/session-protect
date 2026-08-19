@@ -11,6 +11,7 @@ import (
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/encryption"
 	"github.com/rexovas/session-protect/internal/fsplan"
+	"github.com/rexovas/session-protect/internal/human"
 	"github.com/rexovas/session-protect/internal/lock"
 	"github.com/rexovas/session-protect/internal/targets"
 	"github.com/rexovas/session-protect/internal/version"
@@ -259,7 +260,7 @@ func printResults(out io.Writer, results []Result, opts Options) {
 			fmt.Fprintf(out, "    skipped   %s\n", r.Skipped)
 			continue
 		}
-		fmt.Fprintf(out, "    files     %d (%s)\n", r.Files, formatBytes(r.Bytes))
+		fmt.Fprintf(out, "    files     %d (%s)\n", r.Files, human.Bytes(r.Bytes))
 		fmt.Fprintf(out, "    repo      %s\n", r.Repo)
 		if !opts.DryRun {
 			fmt.Fprintf(out, "    changes   +%d ~%d -%d\n", r.Added, r.Updated, r.Removed)
@@ -292,19 +293,4 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  session-protect backup [claude|codex] [--dry-run] [--allow-unencrypted] [--json]")
 	fmt.Fprintln(out, "  session-protect sync [claude|codex] [--allow-unencrypted] [--json]")
-}
-
-func formatBytes(size int64) string {
-	const unit = 1024
-	if size < unit {
-		return fmt.Sprintf("%d B", size)
-	}
-	value := float64(size)
-	for _, suffix := range []string{"KB", "MB", "GB", "TB"} {
-		value /= unit
-		if value < unit {
-			return fmt.Sprintf("%.1f %s", value, suffix)
-		}
-	}
-	return fmt.Sprintf("%.1f PB", value/unit)
 }

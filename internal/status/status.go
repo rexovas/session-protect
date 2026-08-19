@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/human"
 	"github.com/rexovas/session-protect/internal/plan"
 	"github.com/rexovas/session-protect/internal/targets"
 )
@@ -102,10 +103,10 @@ func Print(out io.Writer, asJSON bool) int {
 		}
 		if target.Detected {
 			fmt.Fprintf(out, "    sessions         %d\n", target.SessionCount)
-			fmt.Fprintf(out, "    source size      %s\n", formatBytes(target.SizeBytes))
+			fmt.Fprintf(out, "    source size      %s\n", human.Bytes(target.SizeBytes))
 		}
 		if repo != nil && repo.Detected {
-			fmt.Fprintf(out, "    backup size      %s\n", formatBytes(repo.SizeBytes))
+			fmt.Fprintf(out, "    backup size      %s\n", human.Bytes(repo.SizeBytes))
 			fmt.Fprintf(out, "    backup path      %s\n", repo.Path)
 		} else if target.BackupRepo != "" {
 			fmt.Fprintf(out, "    backup path      %s\n", target.BackupRepo)
@@ -166,7 +167,7 @@ func buildTargets(detected []targets.Target, repos []RepoStatus) []TargetStatus 
 		if target.Detected {
 			status.SizeBytes = dirSize(target.Source)
 			status.SessionCount = sessionCount(target)
-			status.LastModified = formatTime(latestModTime(target.Source))
+			status.LastModified = human.Time(latestModTime(target.Source))
 		}
 		statuses = append(statuses, status)
 	}
@@ -263,32 +264,10 @@ func dirSize(root string) int64 {
 	return total
 }
 
-func formatBytes(size int64) string {
-	const unit = 1024
-	if size < unit {
-		return fmt.Sprintf("%d B", size)
-	}
-	value := float64(size)
-	for _, suffix := range []string{"KB", "MB", "GB", "TB"} {
-		value /= unit
-		if value < unit {
-			return fmt.Sprintf("%.1f %s", value, suffix)
-		}
-	}
-	return fmt.Sprintf("%.1f PB", value/unit)
-}
-
-func formatTime(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.Local().Format("2006-01-02 15:04:05")
-}
-
 func formatRFC3339(value string) string {
 	t, err := time.Parse(time.RFC3339, value)
 	if err != nil {
 		return value
 	}
-	return formatTime(t)
+	return human.Time(t)
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/focus"
+	"github.com/rexovas/session-protect/internal/human"
 	"github.com/rexovas/session-protect/internal/transplant"
 	"github.com/rexovas/session-protect/internal/update"
 	"github.com/rexovas/session-protect/internal/version"
@@ -1712,7 +1713,7 @@ func (m model) allSessionRow(session Session, active bool) string {
 	}
 	row := fmt.Sprintf("%s%s  %s %-7s %-12s %8s  %-8s %s",
 		live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
-		truncate(displayModel(session.LastModel), 12), formatBytes(session.Size), ago(session.Modified),
+		truncate(displayModel(session.LastModel), 12), human.Bytes(session.Size), ago(session.Modified),
 		styleUnless(plain, styleDim, truncate(m.relOfRoot(session), 30)))
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
@@ -1784,7 +1785,7 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 		project = m.root
 	}
 	kv("project", tildePath(project))
-	stamp := formatBytes(session.Size)
+	stamp := human.Bytes(session.Size)
 	if !data.Created.IsZero() {
 		stamp += styleDim.Render("  ·  started ") + ago(data.Created)
 	}
@@ -2157,7 +2158,7 @@ func (m model) folderRow(folder Folder, active bool) string {
 	}
 
 	row := fmt.Sprintf(" %s %-*s  %8d  %8s  %-9s%s",
-		styleUnless(plain, glyphStyle, glyph), m.nameWidth(), name, folder.Sessions, formatBytes(folder.SizeBytes), ago(folder.Latest), health)
+		styleUnless(plain, glyphStyle, glyph), m.nameWidth(), name, folder.Sessions, human.Bytes(folder.SizeBytes), ago(folder.Latest), health)
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}
@@ -2177,7 +2178,7 @@ func (m model) sessionRow(session Session, active bool) string {
 	if session.LiveStatus != "" {
 		live = styleUnless(plain, styleActive, "▶")
 	}
-	size := formatBytes(session.Size)
+	size := human.Bytes(session.Size)
 	if session.State == "LOST" {
 		size = fmt.Sprintf("%dp", session.Prompts)
 	}
@@ -2269,19 +2270,4 @@ func ago(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dy", int(since.Hours()/24/365))
 	}
-}
-
-func formatBytes(size int64) string {
-	const unit = 1024
-	if size < unit {
-		return fmt.Sprintf("%d B", size)
-	}
-	value := float64(size)
-	for _, suffix := range []string{"KB", "MB", "GB", "TB"} {
-		value /= unit
-		if value < unit {
-			return fmt.Sprintf("%.1f %s", value, suffix)
-		}
-	}
-	return fmt.Sprintf("%.1f PB", value/unit)
 }

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // Codex has no live-session registry like claude's. Two process signals
@@ -58,8 +59,32 @@ func parseCodexProcs(psOutput string) (ids map[string]string, pids []string) {
 	return ids, pids
 }
 
-// processCwd resolves a process's working directory via lsof.
+// cwdCache avoids re-running lsof for a pid every scan tick — a
+// process's working directory is fixed for its lifetime.
+var (
+	cwdCacheMu sync.Mutex
+	cwdCache   = map[string]string{}
+)
+
+// processCwd resolves a process's working directory via lsof, cached
+// per pid.
 func processCwd(pid string) string {
+	cwdCacheMu.Lock()
+	if cwd, ok := cwdCache[pid]; ok {
+		cwdCacheMu.Unlock()
+		return cwd
+	}
+	cwdCacheMu.Unlock()
+	cwd := lookupCwd(pid)
+	if cwd != "" {
+		cwdCacheMu.Lock()
+		cwdCache[pid] = cwd
+		cwdCacheMu.Unlock()
+	}
+	return cwd
+}
+
+func lookupCwd(pid string) string {
 	out, err := exec.Command("lsof", "-a", "-p", pid, "-d", "cwd", "-Fn").Output()
 	if err != nil {
 		return ""

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rexovas/session-protect/internal/version"
 )
 
 func TestSemverLess(t *testing.T) {
@@ -173,5 +175,30 @@ func TestBrewManagedRouting(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(bin); string(data) != "OLD" {
 		t.Fatal("brew-managed binary was touched")
+	}
+}
+
+func TestSelfUpdateCLIPaths(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"tag_name":"v0.0.1"}`)
+	}))
+	defer server.Close()
+	apiBase = server.URL
+	t.Cleanup(func() { apiBase = "https://api.github.com" })
+
+	// Up to date: current far ahead of the fake latest.
+	old := version.Version
+	version.Version = "v99.0.0"
+	version.Channel = "release"
+	t.Cleanup(func() { version.Version = old; version.Channel = "source" })
+
+	var out, errOut strings.Builder
+	if code := Run(nil, &out, &errOut); code != 0 || !strings.Contains(out.String(), "Already up to date") {
+		t.Fatalf("up-to-date path: %d %q", code, out.String())
+	}
+
+	out.Reset()
+	if code := Run([]string{"--check"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "up to date") {
+		t.Fatalf("check path: %d %q", code, out.String())
 	}
 }
