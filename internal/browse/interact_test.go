@@ -351,11 +351,11 @@ func TestResumeDialogFlow(t *testing.T) {
 
 	// o on a closed session arms the dialog, Cancel pre-selected.
 	m = press(t, m, "o")
-	if m.confirmResume == nil || m.confirmYes {
-		t.Fatalf("dialog state: %v yes=%v", m.confirmResume != nil, m.confirmYes)
+	if m.confirmResume == nil || m.confirmSel != 2 {
+		t.Fatalf("dialog state: %v sel=%d", m.confirmResume != nil, m.confirmSel)
 	}
 	view := m.View()
-	for _, want := range []string{"Open session?", "Open", "Cancel", "runs", "terminal window"} {
+	for _, want := range []string{"Open session?", "New window", "This terminal", "Cancel", "runs"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("dialog missing %q", want)
 		}
@@ -367,8 +367,8 @@ func TestResumeDialogFlow(t *testing.T) {
 		t.Fatalf("enter on Cancel spawned: %v", spawned)
 	}
 
-	// Arrow to Open, enter spawns with the right command.
-	m = press(t, m, "o", tea.KeyLeft, tea.KeyEnter)
+	// Arrow back to New window (2→0 with two lefts), enter spawns.
+	m = press(t, m, "o", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
 	if len(spawned) != 1 || !strings.Contains(spawned[0], "claude --resume aaaa1111") ||
 		!strings.Contains(spawned[0], "cd '") {
 		t.Fatalf("spawned = %v", spawned)
@@ -388,6 +388,23 @@ func TestResumeDialogFlow(t *testing.T) {
 	}
 }
 
+func TestResumeInThisTerminal(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab)
+	m = press(t, m, "o", tea.KeyLeft) // Cancel(2) → This terminal(1)
+	if m.confirmSel != 1 {
+		t.Fatalf("sel = %d", m.confirmSel)
+	}
+	m = press(t, m, tea.KeyEnter)
+	if len(m.execOnExit) != 3 || m.execOnExit[0] != "/bin/sh" ||
+		!strings.Contains(m.execOnExit[2], "claude --resume") {
+		t.Fatalf("execOnExit = %v", m.execOnExit)
+	}
+	if m.confirmResume != nil {
+		t.Fatal("dialog should be closed")
+	}
+}
+
 func TestRestoreDialogFlow(t *testing.T) {
 	m := buildEnv(t)
 	m = press(t, m, tea.KeyEnter, tea.KeyTab)
@@ -397,8 +414,8 @@ func TestRestoreDialogFlow(t *testing.T) {
 	m.visible[0].BackupPath = "/tmp/backup/fake.jsonl"
 
 	m = press(t, m, "r")
-	if m.confirmRestore == nil || m.confirmYes {
-		t.Fatalf("restore dialog state: %v yes=%v", m.confirmRestore != nil, m.confirmYes)
+	if m.confirmRestore == nil || m.confirmSel != 1 {
+		t.Fatalf("restore dialog state: %v sel=%d", m.confirmRestore != nil, m.confirmSel)
 	}
 	view := m.View()
 	for _, want := range []string{"Restore session?", "Restore", "Cancel", "fake.jsonl"} {
@@ -408,7 +425,7 @@ func TestRestoreDialogFlow(t *testing.T) {
 	}
 	// tab toggles the selection; enter on Cancel closes without restoring.
 	m = press(t, m, tea.KeyTab)
-	if !m.confirmYes {
+	if m.confirmSel != 0 {
 		t.Fatal("tab did not select Restore")
 	}
 	m = press(t, m, tea.KeyTab, tea.KeyEnter)
@@ -461,8 +478,8 @@ func TestUpdateOfferFlow(t *testing.T) {
 
 	next, _ := m.Update(updateAvailableMsg("v1.2.3"))
 	m = next.(model)
-	if m.updateOffer != "v1.2.3" || m.confirmYes {
-		t.Fatalf("offer state: %q yes=%v", m.updateOffer, m.confirmYes)
+	if m.updateOffer != "v1.2.3" || m.confirmSel != 1 {
+		t.Fatalf("offer state: %q sel=%d", m.updateOffer, m.confirmSel)
 	}
 	view := m.View()
 	for _, want := range []string{"Update to v1.2.3?", "latest", "v1.2.3", "Update", "Later"} {
@@ -491,7 +508,7 @@ func TestUpdateOfferFlow(t *testing.T) {
 	if len(applied) != 1 || applied[0] != "v1.2.3" {
 		t.Fatalf("applied = %v", applied)
 	}
-	if m.restartPath != "/fake/bin/session-protect" {
-		t.Fatalf("restartPath = %q", m.restartPath)
+	if len(m.execOnExit) == 0 || m.execOnExit[0] != "/fake/bin/session-protect" {
+		t.Fatalf("execOnExit = %v", m.execOnExit)
 	}
 }

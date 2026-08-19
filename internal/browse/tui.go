@@ -123,21 +123,24 @@ type model struct {
 	// until the next keypress.
 	confirmRestore *Session
 	confirmResume  *Session
-	confirmYes     bool // dialog button selection; always starts on No
+	confirmSel     int // dialog button index; always starts on Cancel
 
 	// A newer release triggers a launch-time offer; accepting swaps the
 	// binary and relaunches into it.
 	updateOffer string // version tag, "" when none
 	updateBusy  bool
-	restartPath string // set after a successful update: exec this on exit
-	notice      string
-	noticeErr   bool
-	fCursor     int
-	fOffset     int
-	sCursor     int
-	sOffset     int
-	aCursor     int
-	aOffset     int
+	// execOnExit replaces this process after the TUI closes: the updated
+	// binary after a self-update, or the agent itself when resuming a
+	// session in the current terminal.
+	execOnExit []string
+	notice     string
+	noticeErr  bool
+	fCursor    int
+	fOffset    int
+	sCursor    int
+	sOffset    int
+	aCursor    int
+	aOffset    int
 
 	scanning bool // a background rescan is in flight
 
@@ -368,7 +371,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case updateAvailableMsg:
 		m.updateOffer = string(msg)
-		m.confirmYes = false
+		m.confirmSel = 1
 		return m, nil
 	case updateDoneMsg:
 		m.updateBusy = false
@@ -383,7 +386,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Relaunch into the new binary the moment the TUI exits.
-		m.restartPath = msg.path
+		m.execOnExit = append([]string{msg.path}, os.Args[1:]...)
 		return m, tea.Quit
 	case hitsMsg:
 		m.hitsBusy = false
@@ -519,20 +522,20 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
 			if !m.updateBusy {
-				m.confirmYes = !m.confirmYes
+				m.confirmSel = (m.confirmSel + 1) % 2
 			}
 		case "esc", "n":
 			if !m.updateBusy {
 				m.updateOffer = ""
 			}
 		case "y":
-			m.confirmYes = true
+			m.confirmSel = 0
 			fallthrough
 		case "enter":
 			if m.updateBusy {
 				break
 			}
-			if !m.confirmYes {
+			if m.confirmSel != 0 {
 				m.updateOffer = ""
 				break
 			}
@@ -549,35 +552,39 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
-			m.confirmYes = !m.confirmYes
+		case "right", "tab", "l", "down", "j":
+			m.confirmSel = (m.confirmSel + 1) % 3
+		case "left", "h", "up", "k":
+			m.confirmSel = (m.confirmSel + 2) % 3
 		case "esc", "n":
 			m.confirmResume = nil
 		case "y":
-			m.confirmYes = true
+			m.confirmSel = 0
 			fallthrough
 		case "enter":
-			if !m.confirmYes {
-				m.confirmResume = nil
-				break
-			}
 			session := *m.confirmResume
 			m.confirmResume = nil
 			project := session.ProjectPath
 			if project == "" {
 				project = m.root
 			}
-			if err := spawnWindow(resumeCommand(session, project)); err != nil {
-				m.noticeErr = true
-				if errors.Is(err, focus.ErrNotAuthorized) {
-					focus.OpenAutomationSettings()
-					m.notice = "macOS blocked the spawn — enable your terminal under " +
-						"Automation in the Settings pane just opened, then press o again"
+			switch m.confirmSel {
+			case 0: // new terminal window
+				if err := spawnWindow(resumeCommand(session, project)); err != nil {
+					m.noticeErr = true
+					if errors.Is(err, focus.ErrNotAuthorized) {
+						focus.OpenAutomationSettings()
+						m.notice = "macOS blocked the spawn — enable your terminal under " +
+							"Automation in the Settings pane just opened, then press o again"
+					} else {
+						m.notice = "resume failed: " + err.Error()
+					}
 				} else {
-					m.notice = "resume failed: " + err.Error()
+					m.notice = "resuming " + session.ID[:8] + "… in a new " + session.Target + " window"
 				}
-			} else {
-				m.notice = "resuming " + session.ID[:8] + "… in a new " + session.Target + " window"
+			case 1: // this terminal: leave sp and become the agent
+				m.execOnExit = []string{"/bin/sh", "-c", resumeCommand(session, project)}
+				return m, tea.Quit
 			}
 		}
 		return m, nil
@@ -587,14 +594,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
-			m.confirmYes = !m.confirmYes
+			m.confirmSel = (m.confirmSel + 1) % 2
 		case "esc", "n":
 			m.confirmRestore = nil
 		case "y":
-			m.confirmYes = true
+			m.confirmSel = 0
 			fallthrough
 		case "enter":
-			if !m.confirmYes {
+			if m.confirmSel != 0 {
 				m.confirmRestore = nil
 				break
 			}
@@ -748,7 +755,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session := m.selectedSession(); session != nil && session.State == "MISSING_SOURCE" {
 			copied := *session
 			m.confirmRestore = &copied
-			m.confirmYes = false
+			m.confirmSel = 1
 		}
 	case "ctrl+r":
 		m.scanning = true
@@ -822,7 +829,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Closed: confirm before spawning a window to resume it.
 			copied := *session
 			m.confirmResume = &copied
-			m.confirmYes = false
+			m.confirmSel = 2
 		}
 	case "t":
 		if m.showSessions || m.showAll || m.showHits {
@@ -1061,8 +1068,7 @@ func (m model) View() string {
 				truncate(title, 70),
 				styleDim.Render("in    ") + truncate(tildePath(project), 64),
 				styleDim.Render("runs  ") + truncate(resumeCommand(session, project), 64),
-				styleDim.Render("      in a new " + session.Target + " terminal window"),
-			}, "Open", "Cancel")
+			}, "New window", "This terminal", "Cancel")
 	}
 	if m.confirmRestore != nil {
 		session := *m.confirmRestore
@@ -1619,7 +1625,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
-	key("o", "open: jump to an ▶ open session, or resume a closed one in a new window")
+	key("o", "open: jump to an ▶ open session; resume a closed one here or in a new window")
 	key("r", "restore a ✝ recover session, with confirmation")
 	key("t", "transplant: move/copy a session or project to another dir")
 	key("x", "show or hide ✕ lost sessions")
@@ -1894,16 +1900,20 @@ func (m model) usageTab(b *strings.Builder) {
 	}
 }
 
-// dialog renders a centered modal: title, body, and a Yes/No button row
-// driven by arrow keys, defaulting to No.
-func (m model) dialog(title string, body []string, yesLabel string, noLabel string) string {
+// dialog renders a centered modal: title, body, and a button row driven
+// by arrow keys, defaulting to the last (safe) button.
+func (m model) dialog(title string, body []string, labels ...string) string {
 	button := func(label string, active bool) string {
 		if active {
 			return styleCursor.Render("  " + label + "  ")
 		}
 		return styleDim.Render("  " + label + "  ")
 	}
-	buttons := button(yesLabel, m.confirmYes) + "   " + button(noLabel, !m.confirmYes)
+	parts := make([]string, 0, len(labels))
+	for i, label := range labels {
+		parts = append(parts, button(label, m.confirmSel == i))
+	}
+	buttons := strings.Join(parts, "   ")
 
 	inner := 76
 	var lines []string

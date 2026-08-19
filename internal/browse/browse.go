@@ -45,11 +45,12 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "browse failed: %v\n", err)
 		return 1
 	}
-	// A completed self-update relaunches straight into the new binary so
-	// the user never sees a stale explorer.
-	if done, ok := final.(model); ok && done.restartPath != "" {
-		if err := relaunch(done.restartPath); err != nil {
-			fmt.Fprintf(stderr, "updated, but relaunch failed: %v — run sp again\n", err)
+	// The model can ask to be replaced on exit: the updated binary after
+	// a self-update, or the agent itself when resuming in this terminal.
+	if done, ok := final.(model); ok && len(done.execOnExit) > 0 {
+		if err := relaunch(done.execOnExit); err != nil {
+			fmt.Fprintf(stderr, "exec failed: %v\n", err)
+			return 1
 		}
 	}
 	return 0

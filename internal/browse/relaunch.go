@@ -7,9 +7,7 @@ import (
 	"syscall"
 )
 
-// relaunch replaces this process with the updated binary, preserving
-// arguments and environment.
-func relaunch(path string) error {
-	argv := append([]string{path}, os.Args[1:]...)
-	return syscall.Exec(path, argv, os.Environ())
+// relaunch replaces this process with argv, preserving the environment.
+func relaunch(argv []string) error {
+	return syscall.Exec(argv[0], argv, os.Environ())
 }
