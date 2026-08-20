@@ -31,6 +31,7 @@ type Session struct {
 	LastModel      string    // most recent model seen in the transcript
 	State          string    // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE | LOST (+ synthesized ACTIVE | OPEN | RESTORED)
 	RestoredAt     time.Time // last restore recorded in the audit log, badge or not
+	RebuiltFrom    string    // lost session this one was reconstructed from
 	Modified       time.Time
 	BackupModified time.Time
 	Size           int64
@@ -137,9 +138,13 @@ func Scan(cfg config.Config) []*Project {
 		}
 	}
 	restoredAt := map[string]time.Time{}
+	rebuiltFrom := map[string]string{}
 	for _, entry := range audit.Read(cfg.BackupRoot) {
 		if entry.Action == "restore" && entry.SessionID != "" && entry.Time.After(restoredAt[entry.SessionID]) {
 			restoredAt[entry.SessionID] = entry.Time
+		}
+		if entry.Action == "reconstruct" && entry.SessionID != "" {
+			rebuiltFrom[entry.SessionID] = entry.From
 		}
 	}
 	projects := make([]*Project, 0, len(byPath))
@@ -182,6 +187,14 @@ func Scan(cfg config.Config) []*Project {
 					session.State = "RESTORED"
 				}
 			}
+			// Reconstructed sessions carry their identity permanently:
+			// the badge shows whenever the session is otherwise quiet.
+			if from, ok := rebuiltFrom[session.ID]; ok {
+				session.RebuiltFrom = from
+				if session.State == "OK" || session.State == "MISSING_BACKUP" {
+					session.State = "REBUILT"
+				}
+			}
 		}
 		sort.Slice(project.Sessions, func(i, j int) bool {
 			return newest(project.Sessions[i]).After(newest(project.Sessions[j]))
@@ -192,7 +205,7 @@ func Scan(cfg config.Config) []*Project {
 			}
 			project.SizeBytes += session.Size
 			switch session.State {
-			case "OK", "ACTIVE", "OPEN", "RESTORED": // all protected states
+			case "OK", "ACTIVE", "OPEN", "RESTORED", "REBUILT": // protected states
 				project.OK++
 				if session.State == "ACTIVE" {
 					project.Active++
@@ -1104,6 +1117,7 @@ type Folder struct {
 	Name        string
 	Path        string
 	Pseudo      bool // unresolved project key, not a real filesystem path
+	HomeGone    bool // the directory itself no longer exists on disk
 	Depth       int  // indent level when shown expanded under a parent
 	Sessions    int
 	SizeBytes   int64
@@ -1150,6 +1164,13 @@ func ChildrenOf(projects []*Project, root string, start string) []Folder {
 	folders := make([]Folder, 0, len(byPath))
 	for _, folder := range byPath {
 		folders = append(folders, *folder)
+	}
+	for i := range folders {
+		if !folders[i].Pseudo {
+			if _, err := os.Stat(folders[i].Path); err != nil {
+				folders[i].HomeGone = true
+			}
+		}
 	}
 	sort.Slice(folders, func(i, j int) bool { return folders[i].Latest.After(folders[j].Latest) })
 	return folders

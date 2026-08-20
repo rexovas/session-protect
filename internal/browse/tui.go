@@ -19,6 +19,7 @@ import (
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/focus"
 	"github.com/rexovas/session-protect/internal/human"
+	"github.com/rexovas/session-protect/internal/rescue"
 	"github.com/rexovas/session-protect/internal/transplant"
 	"github.com/rexovas/session-protect/internal/update"
 	"github.com/rexovas/session-protect/internal/version"
@@ -123,7 +124,8 @@ type model struct {
 	// until the next keypress.
 	confirmRestore *Session
 	confirmResume  *Session
-	confirmSel     int // dialog button index; always starts on Cancel
+	confirmRescue  *Session // a ✕ lost session offered export/rebuild
+	confirmSel     int      // dialog button index; always starts on Cancel
 
 	// A newer release triggers a launch-time offer; accepting swaps the
 	// binary and relaunches into it.
@@ -160,6 +162,12 @@ var (
 var (
 	updateCheck = update.ThrottledCheck
 	updateApply = update.Apply
+)
+
+// Rescue actions, seam-injected for tests.
+var (
+	rescueExport      = rescue.Export
+	rescueReconstruct = rescue.Reconstruct
 )
 
 type rescanMsg []*Project
@@ -589,6 +597,46 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.confirmRescue != nil {
+		buttons := len(m.rescueButtons(*m.confirmRescue))
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "right", "tab", "l", "down", "j":
+			m.confirmSel = (m.confirmSel + 1) % buttons
+		case "left", "h", "up", "k":
+			m.confirmSel = (m.confirmSel + buttons - 1) % buttons
+		case "esc", "n":
+			m.confirmRescue = nil
+		case "enter":
+			session := *m.confirmRescue
+			m.confirmRescue = nil
+			labels := m.rescueButtons(session)
+			switch labels[m.confirmSel] {
+			case "Rebuild":
+				newID, _, err := rescueReconstruct(m.cfg, session.ID, session.Title)
+				if err != nil {
+					m.notice, m.noticeErr = "rebuild failed: "+err.Error(), true
+					break
+				}
+				m.notice = "rebuilt as " + newID[:8] + "… — resumable now; the original stays marked lost"
+				m.scanning = true
+				cfg := m.cfg
+				return m, func() tea.Msg {
+					_, _ = backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true})
+					return rescanMsg(ScanNamed(cfg))
+				}
+			case "Export prompts":
+				path, err := rescueExport(m.cfg, session.Target, session.ID, session.Title)
+				if err != nil {
+					m.notice, m.noticeErr = "export failed: "+err.Error(), true
+					break
+				}
+				m.notice = "prompt history exported → " + tildePath(path)
+			}
+		}
+		return m, nil
+	}
 	if m.confirmRestore != nil {
 		switch msg.String() {
 		case "ctrl+c":
@@ -752,10 +800,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		(&m).openDetail()
 	case "r":
-		if session := m.selectedSession(); session != nil && session.State == "MISSING_SOURCE" {
+		if session := m.selectedSession(); session != nil {
 			copied := *session
-			m.confirmRestore = &copied
-			m.confirmSel = 1
+			switch session.State {
+			case "MISSING_SOURCE":
+				m.confirmRestore = &copied
+				m.confirmSel = 1
+			case "LOST":
+				m.confirmRescue = &copied
+				m.confirmSel = len(m.rescueButtons(copied)) - 1
+			}
 		}
 	case "ctrl+r":
 		m.scanning = true
@@ -1069,6 +1123,24 @@ func (m model) View() string {
 				styleDim.Render("in    ") + truncate(tildePath(project), 64),
 				styleDim.Render("runs  ") + truncate(resumeCommand(session, project), 64),
 			}, "New window", "This terminal", "Cancel")
+	}
+	if m.confirmRescue != nil {
+		session := *m.confirmRescue
+		title := session.Title
+		if title == "" {
+			title = session.ID
+		}
+		body := []string{
+			styleDim.Render("✕ ") + truncate(title, 68),
+			styleDim.Render(fmt.Sprintf("%d prompt(s) survive in the agent's history; the transcript is gone", session.Prompts)),
+			"",
+			styleDim.Render("Rebuild creates a NEW resumable session from your prompts —"),
+			styleDim.Render("the original stays marked lost. Export writes them as markdown."),
+		}
+		if session.Target != "claude" {
+			body = body[:2]
+		}
+		return m.dialog("Rescue lost session?", body, m.rescueButtons(session)...)
 	}
 	if m.confirmRestore != nil {
 		session := *m.confirmRestore
@@ -1626,7 +1698,7 @@ func (m model) keysBody(b *strings.Builder) {
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
 	key("o", "open: jump to an ▶ open session; resume a closed one here or in a new window")
-	key("r", "restore a ✝ recover session, with confirmation")
+	key("r", "restore a ✝ recover session · rescue a ✕ lost one (rebuild/export)")
 	key("t", "transplant: move/copy a session or project to another dir")
 	key("x", "show or hide ✕ lost sessions")
 	section("GLOBAL")
@@ -1790,7 +1862,11 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	if project == "" {
 		project = m.root
 	}
-	kv("project", tildePath(project))
+	projectNote := ""
+	if _, statErr := os.Stat(project); statErr != nil && filepath.IsAbs(project) {
+		projectNote = styleStale.Render("  ⌂! directory missing — t transplants it elsewhere")
+	}
+	kv("project", tildePath(project)+projectNote)
 	stamp := human.Bytes(session.Size)
 	if !data.Created.IsZero() {
 		stamp += styleDim.Render("  ·  started ") + ago(data.Created)
@@ -1823,6 +1899,9 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	if !session.RestoredAt.IsZero() {
 		kv("restored", styleRecover.Render("✚ ")+session.RestoredAt.Format("2006-01-02 15:04")+
 			styleDim.Render("  ·  from backup ("+ago(session.RestoredAt)+")"))
+	}
+	if session.RebuiltFrom != "" {
+		kv("rebuilt", styleRecover.Render("⟳ ")+styleDim.Render("reconstructed from lost session ")+session.RebuiltFrom)
 	}
 	kvPath := func(key string, path string) {
 		if path == "" {
@@ -1898,6 +1977,16 @@ func (m model) usageTab(b *strings.Builder) {
 	if data.Messages > 0 {
 		b.WriteString(styleDim.Render(fmt.Sprintf("  %d messages in transcript", data.Messages)) + "\n")
 	}
+}
+
+// rescueButtons lists the actions available for a lost session: claude
+// sessions can be rebuilt into a resumable transcript; codex history can
+// currently only be exported.
+func (m model) rescueButtons(session Session) []string {
+	if session.Target == "claude" {
+		return []string{"Rebuild", "Export prompts", "Cancel"}
+	}
+	return []string{"Export prompts", "Cancel"}
 }
 
 // dialog renders a centered modal: title, body, and a button row driven
@@ -2166,6 +2255,9 @@ func (m model) folderRow(folder Folder, active bool) string {
 	if health == "" {
 		health = styleUnless(active, styleOK, " ok")
 	}
+	if folder.HomeGone {
+		health += styleUnless(active, styleStale, " ⌂!")
+	}
 
 	row := fmt.Sprintf(" %s %-*s  %8d  %8s  %-9s%s",
 		styleUnless(plain, glyphStyle, glyph), m.nameWidth(), name, folder.Sessions, human.Bytes(folder.SizeBytes), ago(folder.Latest), health)
@@ -2231,6 +2323,8 @@ func sessionState(state string) (string, lipgloss.Style) {
 		return "! unbacked ", styleUnbacked
 	case "RESTORED":
 		return "✚ restored ", styleRecover
+	case "REBUILT":
+		return "⟳ rebuilt  ", styleRecover
 	case "LOST":
 		return "✕ lost     ", styleDim
 	default:

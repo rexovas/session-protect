@@ -512,3 +512,75 @@ func TestUpdateOfferFlow(t *testing.T) {
 		t.Fatalf("execOnExit = %v", m.execOnExit)
 	}
 }
+
+func TestRescueDialogFlow(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab, "x") // reveal lost
+	// cursor onto the lost session
+	for i, s := range m.visible {
+		if s.State == "LOST" {
+			m.sCursor = i
+		}
+	}
+
+	var rebuilt, exported []string
+	rescueReconstruct = func(_ config.Config, id string, _ string) (string, string, error) {
+		rebuilt = append(rebuilt, id)
+		return "9e9e9e9e-0000-4000-8000-000000000000", "/fake/new.jsonl", nil
+	}
+	rescueExport = func(_ config.Config, _ string, id string, _ string) (string, error) {
+		exported = append(exported, id)
+		return "/fake/exports/x.md", nil
+	}
+	defer func() { rescueReconstruct = nil; rescueExport = nil }()
+
+	m = press(t, m, "r")
+	if m.confirmRescue == nil || m.confirmSel != 2 {
+		t.Fatalf("rescue dialog state: %v sel=%d", m.confirmRescue != nil, m.confirmSel)
+	}
+	view := m.View()
+	for _, want := range []string{"Rescue lost session?", "Rebuild", "Export prompts", "Cancel", "the lost one"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("rescue dialog missing %q", want)
+		}
+	}
+
+	// Reflexive enter = Cancel.
+	m = press(t, m, tea.KeyEnter)
+	if m.confirmRescue != nil || len(rebuilt)+len(exported) != 0 {
+		t.Fatal("enter on Cancel acted")
+	}
+
+	// Export path.
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyEnter)
+	if len(exported) != 1 || exported[0] != "cccc3333-0000-0000-0000-000000000003" {
+		t.Fatalf("exported = %v", exported)
+	}
+	if !strings.Contains(m.notice, "exported") {
+		t.Fatalf("notice = %q", m.notice)
+	}
+
+	// Rebuild path.
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
+	if len(rebuilt) != 1 || rebuilt[0] != "cccc3333-0000-0000-0000-000000000003" {
+		t.Fatalf("rebuilt = %v", rebuilt)
+	}
+	if !strings.Contains(m.notice, "rebuilt as 9e9e9e9e") {
+		t.Fatalf("notice = %q", m.notice)
+	}
+}
+
+func TestOrphanedFolderMarker(t *testing.T) {
+	m := buildEnv(t)
+	// Delete the physical project dir out from under its sessions.
+	if err := os.RemoveAll(m.folders[0].Path); err != nil {
+		t.Fatal(err)
+	}
+	m.rebuild()
+	if !m.folders[0].HomeGone {
+		t.Fatal("HomeGone not detected")
+	}
+	if view := m.View(); !strings.Contains(view, "⌂!") {
+		t.Fatal("orphan marker missing from folder row")
+	}
+}
