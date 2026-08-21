@@ -87,10 +87,13 @@ type model struct {
 	// AI find (ctrl+g) is its own page: a free-text prompt that queries
 	// on enter; ←/→ pick the answering model. askInput persists so a
 	// follow-up refines the last ask.
-	showAsk   bool
-	askInput  string
-	askModels []assist.ModelOption
-	askModel  int
+	showAsk    bool
+	askInput   string
+	askModels  []assist.ModelOption
+	askHistory []string // prior queries, most recent first
+	askHistSel int      // -1 = composing; otherwise index into askHistory
+	askDraft   string   // in-progress text stashed while browsing history
+	askModel   int
 
 	// Content search (ctrl+s on a query) counts transcript hits per
 	// session under the current root and shows them as their own pane.
@@ -968,9 +971,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rescueDest = nil
 			m.confirmRescue = &session
 			m.confirmSel = len(m.rescueButtons(session)) - 1
-		case "up", "k":
+		case "up":
 			m.rescueCursor = (m.rescueCursor + rows - 1) % rows
-		case "down", "j":
+		case "down":
 			m.rescueCursor = (m.rescueCursor + 1) % rows
 		case "backspace":
 			if m.rescueFilter != "" {
@@ -998,7 +1001,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case m.rescueCursor > 1: // descend
 				m.rescueInput = tildePath(filepath.Join(expandTilde(m.rescueInput), subdirs[m.rescueCursor-2]))
 				m.rescueCursor, m.rescueFilter = 0, ""
-			default: // ✓ use this directory
+			default: // ✓ use this directory — enter only; → must never run an action
+				if msg.String() == "right" {
+					break
+				}
 				dir := expandTilde(strings.TrimSpace(m.rescueInput))
 				if dir == "" {
 					break
@@ -1138,6 +1144,23 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if n := len(m.askModels); n > 0 {
 				m.askModel = (m.askModel + 1) % n
 			}
+		case "up":
+			if m.askHistSel+1 < len(m.askHistory) {
+				if m.askHistSel == -1 {
+					m.askDraft = m.askInput
+				}
+				m.askHistSel++
+				m.askInput = m.askHistory[m.askHistSel]
+			}
+		case "down":
+			if m.askHistSel > -1 {
+				m.askHistSel--
+				if m.askHistSel == -1 {
+					m.askInput = m.askDraft
+				} else {
+					m.askInput = m.askHistory[m.askHistSel]
+				}
+			}
 		case "esc", "ctrl+g":
 			m.showAsk = false
 		case "enter":
@@ -1146,11 +1169,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.fireAsk()
 			}
 		case "backspace":
+			m.askHistSel = -1
 			if runes := []rune(m.askInput); len(runes) > 0 {
 				m.askInput = string(runes[:len(runes)-1])
 			}
 		default:
 			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+				m.askHistSel = -1
 				m.askInput += msg.String()
 			}
 		}
@@ -1637,6 +1662,13 @@ func (m model) View() string {
 			styleActive.Render(truncate(m.rescueInput, 72)) + "  " + note,
 			"",
 		}
+		if m.rescueFilter != "" {
+			typed := "  filter: " + m.rescueFilter + "▌"
+			if m.rescueJumping() {
+				typed = "  go to: " + m.rescueFilter + "▌" + styleDim.Render("  (enter jumps there)")
+			}
+			body = append(body, typed, "")
+		}
 		if m.rescueNaming {
 			body = append(body,
 				"  new folder: "+m.rescueName+"▌",
@@ -1673,7 +1705,7 @@ func (m model) View() string {
 		rows = append(rows, row(len(subdirs)+2, "+ new folder…", styleDim))
 		body = append(body, rows...)
 		body = append(body, "", styleDim.Render(truncate(detail, 74)))
-		return m.inputDialog(heading, body, "↑/↓ choose · enter/→ open or confirm · ←/backspace up · esc back")
+		return m.inputDialog(heading, body, "↑/↓ choose · enter confirm · → open · ← up · type to filter, ~/ to jump")
 	}
 	if m.confirmRescue != nil {
 		session := *m.confirmRescue
@@ -1884,6 +1916,8 @@ func (m model) openAsk() (tea.Model, tea.Cmd) {
 	if m.askInput == "" {
 		m.askInput = m.query
 	}
+	m.askHistory = loadAskHistory(m.cfg)
+	m.askHistSel = -1
 	m.showAsk = true
 	return m, nil
 }
@@ -1891,6 +1925,11 @@ func (m model) openAsk() (tea.Model, tea.Cmd) {
 // fireAsk asks the chosen local model which sessions match the
 // description, grounded on keyword-scored candidates with excerpts.
 func (m model) fireAsk() (tea.Model, tea.Cmd) {
+	if query := strings.TrimSpace(m.askInput); query != "" {
+		appendAskHistory(m.cfg, query, m.askModels[m.askModel].Label())
+		m.askHistory = pushHistory(m.askHistory, query)
+		m.askHistSel = -1
+	}
 	if len(m.askModels) == 0 {
 		return m, nil
 	}
@@ -2158,7 +2197,22 @@ func (m model) askView() string {
 	}
 	b.WriteString(styleDim.Render(" matches are grounded in your transcripts and ranked with a short"+
 		" reason each") + "\n")
-	return m.pinBottomBare(b.String(), "enter ask · ←/→ model · esc close")
+	if len(m.askHistory) > 0 {
+		b.WriteString("\n" + styleDim.Render(" recent searches") + "\n")
+		shown := min(len(m.askHistory), 6)
+		for i := 0; i < shown; i++ {
+			line := truncate(m.askHistory[i], inner-4)
+			if i == m.askHistSel {
+				b.WriteString(styleCursor.Render(" ❯ "+line) + "\n")
+			} else {
+				b.WriteString(styleDim.Render("   "+line) + "\n")
+			}
+		}
+		if len(m.askHistory) > shown {
+			b.WriteString(styleDim.Render(fmt.Sprintf("   … %d more (↑ to reach)", len(m.askHistory)-shown)) + "\n")
+		}
+	}
+	return m.pinBottomBare(b.String(), "enter ask · ↑/↓ history · ←/→ model · esc close")
 }
 
 // filterView is the f facet page: grouped checkboxes over what exists

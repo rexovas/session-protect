@@ -683,15 +683,27 @@ func TestRescuePickerFilterAndJump(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var dirs []string
+	rescueExport = func(_ config.Config, _ string, _ string, _ string, dir string) (string, error) {
+		dirs = append(dirs, dir)
+		return "/fake/x.md", nil
+	}
+	defer func() { rescueExport = nil }()
 	m = press(t, m, "r", tea.KeyLeft, tea.KeyEnter) // export picker
 
-	// Typing filters the rows and highlights the first match.
+	// Right-arrow on "use this directory" must be inert — never confirm.
+	m = press(t, m, tea.KeyRight, tea.KeyRight, tea.KeyRight)
+	if m.rescueDest == nil || len(dirs) != 0 {
+		t.Fatalf("right arrow acted: dest=%v dirs=%v", m.rescueDest != nil, dirs)
+	}
+
+	// Typing filters the rows, highlights the first match, and is visible.
 	m = press(t, m, "inn")
 	if got := m.rescueSubdirs(); len(got) != 1 || got[0] != "inner" || m.rescueCursor != 2 {
 		t.Fatalf("filter: %v cursor=%d", got, m.rescueCursor)
 	}
-	if view := m.View(); !strings.Contains(view, "inn") {
-		t.Fatal("filter text not shown")
+	if view := m.View(); !strings.Contains(view, "filter: inn") {
+		t.Fatal("filter text not rendered")
 	}
 	m = press(t, m, tea.KeyEnter) // descend into the match
 	if want := tildePath(filepath.Join(project, "inner")); m.rescueInput != want || m.rescueFilter != "" {
@@ -708,8 +720,12 @@ func TestRescuePickerFilterAndJump(t *testing.T) {
 		t.Fatal("esc should only clear the filter")
 	}
 
-	// A leading ~ or / turns the text into a path jump.
-	m = press(t, m, "~/somewhere/else", tea.KeyEnter)
+	// A leading ~ or / turns the text into a path jump, rendered as such.
+	m = press(t, m, "~/somewhere/else")
+	if view := m.View(); !strings.Contains(view, "go to: ~/somewhere/else") {
+		t.Fatal("jump text not rendered")
+	}
+	m = press(t, m, tea.KeyEnter)
 	if m.rescueInput != "~/somewhere/else" || m.rescueFilter != "" {
 		t.Fatalf("jump: input=%q filter=%q", m.rescueInput, m.rescueFilter)
 	}
@@ -1003,5 +1019,82 @@ func TestInspectorActsOnSession(t *testing.T) {
 	}
 	if m.confirmRescue == nil || m.confirmRescue.ID != lostID {
 		t.Fatalf("rescue dialog session = %v, want %s", m.confirmRescue, lostID)
+	}
+}
+
+func TestAskHistoryReplay(t *testing.T) {
+	m := buildEnv(t)
+	assistModels = func(config.Assist) []assist.ModelOption {
+		return []assist.ModelOption{{Backend: "claude", Model: "sonnet"}}
+	}
+	var asked []string
+	assistRank = func(_ config.Assist, _ assist.ModelOption, query string, _ []assist.Candidate) ([]assist.Match, error) {
+		asked = append(asked, query)
+		return nil, nil
+	}
+	defer func() { assistModels = assist.AvailableModels; assistRank = nil }()
+
+	// Two searches land in history, newest first, persisted to disk.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = next.(model)
+	m.askInput = ""
+	m = press(t, m, "first query")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if cmd != nil {
+		next, _ = m.Update(cmd()) // run the rank call, deliver its result
+		m = next.(model)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = next.(model)
+	m.askInput = ""
+	m = press(t, m, "second query")
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if cmd != nil {
+		next, _ = m.Update(cmd())
+		m = next.(model)
+	}
+	if len(m.askHistory) != 2 || m.askHistory[0] != "second query" || m.askHistory[1] != "first query" {
+		t.Fatalf("history = %v", m.askHistory)
+	}
+	if got := loadAskHistory(m.cfg); len(got) != 2 || got[0] != "second query" {
+		t.Fatalf("persisted = %v", got)
+	}
+
+	// Reopen: the list renders; ↑ recalls entries, ↓ returns to the draft.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = next.(model)
+	m.askInput = ""
+	if view := m.View(); !strings.Contains(view, "recent searches") || !strings.Contains(view, "first query") {
+		t.Fatal("history list not rendered")
+	}
+	m = press(t, m, "dra")
+	m = press(t, m, tea.KeyUp)
+	if m.askInput != "second query" || m.askHistSel != 0 {
+		t.Fatalf("recall: %q sel=%d", m.askInput, m.askHistSel)
+	}
+	m = press(t, m, tea.KeyUp)
+	if m.askInput != "first query" {
+		t.Fatalf("recall 2: %q", m.askInput)
+	}
+	m = press(t, m, tea.KeyDown, tea.KeyDown)
+	if m.askInput != "dra" || m.askHistSel != -1 {
+		t.Fatalf("draft restore: %q sel=%d", m.askInput, m.askHistSel)
+	}
+
+	// Replaying a recalled query re-fires it and moves it to the front.
+	m = press(t, m, tea.KeyUp, tea.KeyUp) // first query
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if cmd != nil {
+		next, _ = m.Update(cmd())
+		m = next.(model)
+	}
+	if len(asked) != 3 || asked[2] != "first query" {
+		t.Fatalf("asked = %v", asked)
+	}
+	if m.askHistory[0] != "first query" || len(m.askHistory) != 2 {
+		t.Fatalf("reorder: %v", m.askHistory)
 	}
 }
