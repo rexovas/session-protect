@@ -70,7 +70,7 @@ func TestLostPrompts(t *testing.T) {
 
 func TestExportArtifact(t *testing.T) {
 	cfg, project := setup(t)
-	path, err := Export(cfg, "claude", lostID, "billing webhooks work")
+	path, err := Export(cfg, "claude", lostID, "billing webhooks work", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestExportArtifact(t *testing.T) {
 
 func TestReconstructBuildsResumableSession(t *testing.T) {
 	cfg, project := setup(t)
-	newID, path, err := Reconstruct(cfg, lostID, "billing webhooks work")
+	newID, path, err := Reconstruct(cfg, lostID, "billing webhooks work", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestReconstructBuildsResumableSession(t *testing.T) {
 	}
 
 	// A second reconstruction must mint a different identity, never clash.
-	secondID, _, err := Reconstruct(cfg, lostID, "")
+	secondID, _, err := Reconstruct(cfg, lostID, "", "")
 	if err != nil || secondID == newID {
 		t.Fatalf("second reconstruct: %q %v", secondID, err)
 	}
@@ -183,7 +183,7 @@ func TestReconstructAI(t *testing.T) {
 	t.Cleanup(func() { complete = assist.Complete })
 
 	option := assist.ModelOption{Backend: "claude", Model: "opus"}
-	newID, path, err := ReconstructAI(cfg, option, lostID, "billing webhooks work")
+	newID, path, err := ReconstructAI(cfg, option, lostID, "billing webhooks work", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,11 +223,64 @@ func TestReconstructAI(t *testing.T) {
 		return "", fmt.Errorf("model unavailable")
 	}
 	before, _ := os.ReadDir(filepath.Dir(path))
-	if _, _, err := ReconstructAI(cfg, option, lostID, ""); err == nil {
+	if _, _, err := ReconstructAI(cfg, option, lostID, "", ""); err == nil {
 		t.Fatal("model failure must propagate")
 	}
 	after, _ := os.ReadDir(filepath.Dir(path))
 	if len(after) != len(before) {
 		t.Fatal("failed AI rebuild left a file behind")
+	}
+}
+
+func TestExportToCustomDir(t *testing.T) {
+	cfg, _ := setup(t)
+	home, _ := os.UserHomeDir()
+	dest := filepath.Join(home, "notes", "rescued")
+	path, err := Export(cfg, "claude", lostID, "", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(path) != dest {
+		t.Fatalf("path = %s, want under %s", path, dest)
+	}
+	if _, err := os.ReadFile(path); err != nil {
+		t.Fatal("artifact unreadable:", err)
+	}
+}
+
+func TestReconstructRecreatesAndOverridesProjectDir(t *testing.T) {
+	cfg, project := setup(t)
+
+	// The recorded project dir does not exist on disk; a default rebuild
+	// must recreate it so the resume has somewhere to land.
+	if _, path, err := Reconstruct(cfg, lostID, "", ""); err != nil {
+		t.Fatal(err)
+	} else if data, _ := os.ReadFile(path); !strings.Contains(string(data), fmt.Sprintf("%q", project)) {
+		t.Fatal("default rebuild lost the recorded cwd")
+	}
+	if info, err := os.Stat(project); err != nil || !info.IsDir() {
+		t.Fatal("recorded project dir not recreated")
+	}
+
+	// An explicit override redirects cwd and slug, creating the dir.
+	home, _ := os.UserHomeDir()
+	override := filepath.Join(home, "moved", "app")
+	_, path, err := Reconstruct(cfg, lostID, "", override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(override); err != nil || !info.IsDir() {
+		t.Fatal("override dir not created")
+	}
+	wantDir := filepath.Join(targets.DetectClaude().Source, "projects", targets.ClaudeSlug(override))
+	if filepath.Dir(path) != wantDir {
+		t.Fatalf("path = %s, want under %s", path, wantDir)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), fmt.Sprintf("%q", override)) {
+		t.Fatal("override cwd missing from transcript")
 	}
 }

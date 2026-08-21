@@ -86,12 +86,13 @@ func Scan(cfg config.Config) []*Project {
 			byPath[ghost.Project] = project
 		}
 		project.Sessions = append(project.Sessions, Session{
-			Target:   "claude",
-			ID:       id,
-			Title:    ghost.Title,
-			State:    "LOST",
-			Modified: ghost.Last,
-			Prompts:  ghost.Count,
+			Target:      "claude",
+			ID:          id,
+			Title:       ghost.Title,
+			State:       "LOST",
+			Modified:    ghost.Last,
+			Prompts:     ghost.Count,
+			ProjectPath: ghost.Project,
 		})
 	}
 	// Codex history records no project path, so its lost sessions

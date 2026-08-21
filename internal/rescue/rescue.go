@@ -80,8 +80,9 @@ func LostPrompts(target string, sessionID string) (prompts []Prompt, project str
 }
 
 // Export writes the lost session's prompt history as a markdown artifact
-// under the backup root and records it in the audit log.
-func Export(cfg config.Config, target string, sessionID string, title string) (string, error) {
+// into destDir (default: exports/ under the backup root) and records it
+// in the audit log. The directory is created if needed.
+func Export(cfg config.Config, target string, sessionID string, title string, destDir string) (string, error) {
 	prompts, project, err := LostPrompts(target, sessionID)
 	if err != nil {
 		return "", err
@@ -103,7 +104,10 @@ func Export(cfg config.Config, target string, sessionID string, title string) (s
 		fmt.Fprintf(&b, "\n---\n\n`%s`\n\n%s\n", prompt.At.Format("2006-01-02 15:04"), prompt.Text)
 	}
 
-	dir := filepath.Join(cfg.BackupRoot, "exports")
+	dir := destDir
+	if dir == "" {
+		dir = filepath.Join(cfg.BackupRoot, "exports")
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -121,20 +125,21 @@ func Export(cfg config.Config, target string, sessionID string, title string) (s
 // prompt history: user prompts interleaved with placeholder responses,
 // written under the project's slug with a fresh identity. The original
 // stays lost; the audit log links the two. The line format was validated
-// against a live resume before this shipped.
-func Reconstruct(cfg config.Config, sessionID string, title string) (newID string, path string, err error) {
+// against a live resume before this shipped. projectDir overrides the
+// recorded project path (both are recreated on disk if gone, so the
+// resume has a working directory to land in).
+func Reconstruct(cfg config.Config, sessionID string, title string, projectDir string) (newID string, path string, err error) {
 	prompts, project, err := LostPrompts("claude", sessionID)
 	if err != nil {
 		return "", "", err
+	}
+	if projectDir != "" {
+		project = projectDir
 	}
 	if project == "" {
 		return "", "", fmt.Errorf("session %s has no recorded project path", sessionID)
 	}
 
-	dir := filepath.Join(targets.DetectClaude().Source, "projects", targets.ClaudeSlug(project))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", "", err
-	}
 	note := "[reconstructed by session-protect — the original transcript was lost; " +
 		"only the prompt history survived. The conversation continues from here.]"
 	newID, path, err = writeReconstruction(project, prompts, note)
@@ -157,10 +162,14 @@ var complete = assist.Complete
 // arc of the work, decisions the prompts imply, open threads — which
 // becomes the final message of a new resumable session. The brief is
 // explicitly marked AI-inferred; per-turn responses are never invented.
-func ReconstructAI(cfg config.Config, option assist.ModelOption, sessionID string, title string) (newID string, path string, err error) {
+// projectDir overrides the recorded project path, as in Reconstruct.
+func ReconstructAI(cfg config.Config, option assist.ModelOption, sessionID string, title string, projectDir string) (newID string, path string, err error) {
 	prompts, project, err := LostPrompts("claude", sessionID)
 	if err != nil {
 		return "", "", err
+	}
+	if projectDir != "" {
+		project = projectDir
 	}
 	if project == "" {
 		return "", "", fmt.Errorf("session %s has no recorded project path", sessionID)
@@ -206,6 +215,11 @@ Prompts:
 // with loss placeholders, the given text as the final assistant message,
 // under a fresh identity that can never overwrite anything.
 func writeReconstruction(project string, prompts []Prompt, finalText string) (newID string, path string, err error) {
+	// Recreate the working directory too: the resume cd's into it, and a
+	// rebuild is pointless if that lands nowhere.
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		return "", "", fmt.Errorf("recreate project dir: %w", err)
+	}
 	dir := filepath.Join(targets.DetectClaude().Source, "projects", targets.ClaudeSlug(project))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", "", err

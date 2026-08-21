@@ -560,12 +560,15 @@ func TestRescueDialogFlow(t *testing.T) {
 	}
 
 	var rebuilt, exported []string
-	rescueReconstruct = func(_ config.Config, id string, _ string) (string, string, error) {
+	var dirs []string
+	rescueReconstruct = func(_ config.Config, id string, _ string, dir string) (string, string, error) {
 		rebuilt = append(rebuilt, id)
+		dirs = append(dirs, dir)
 		return "9e9e9e9e-0000-4000-8000-000000000000", "/fake/new.jsonl", nil
 	}
-	rescueExport = func(_ config.Config, _ string, id string, _ string) (string, error) {
+	rescueExport = func(_ config.Config, _ string, id string, _ string, dir string) (string, error) {
 		exported = append(exported, id)
+		dirs = append(dirs, dir)
 		return "/fake/exports/x.md", nil
 	}
 	defer func() { rescueReconstruct = nil; rescueExport = nil }()
@@ -587,23 +590,64 @@ func TestRescueDialogFlow(t *testing.T) {
 		t.Fatal("enter on Cancel acted")
 	}
 
-	// Export path.
+	// Export path: choosing it opens the destination stage, prefilled with
+	// the session's project directory once that physically exists.
+	if err := os.MkdirAll(expandTilde(m2ProjectDir(t, m)), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	m = press(t, m, "r", tea.KeyLeft, tea.KeyEnter)
+	if m.rescueDest == nil || m.rescueAction != "export" {
+		t.Fatalf("destination stage: dest=%v action=%q", m.rescueDest != nil, m.rescueAction)
+	}
+	if view := m.View(); !strings.Contains(view, "Export prompts — where?") {
+		t.Fatal("destination stage view missing")
+	}
+	if m.rescueInput == "" {
+		t.Fatal("destination not prefilled")
+	}
+	m = press(t, m, tea.KeyEnter)
 	if len(exported) != 1 || exported[0] != "cccc3333-0000-0000-0000-000000000003" {
 		t.Fatalf("exported = %v", exported)
+	}
+	if len(dirs) != 1 || dirs[0] != expandTilde(m2ProjectDir(t, m)) {
+		t.Fatalf("export dir = %v, want project dir", dirs)
 	}
 	if !strings.Contains(m.notice, "exported") {
 		t.Fatalf("notice = %q", m.notice)
 	}
 
-	// Rebuild path (mechanical): three lefts from Cancel.
+	// Esc from the destination stage returns to the rescue dialog.
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyEnter, tea.KeyEsc)
+	if m.rescueDest != nil || m.confirmRescue == nil {
+		t.Fatal("esc did not return to the rescue dialog")
+	}
+	m = press(t, m, tea.KeyEsc)
+
+	// Rebuild path (mechanical): three lefts from Cancel, then confirm the
+	// prefilled project directory.
 	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
+	if m.rescueDest == nil || m.rescueAction != "rebuild" {
+		t.Fatal("rebuild destination stage missing")
+	}
+	m = press(t, m, tea.KeyEnter)
 	if len(rebuilt) != 1 || rebuilt[0] != "cccc3333-0000-0000-0000-000000000003" {
 		t.Fatalf("rebuilt = %v", rebuilt)
 	}
 	if !strings.Contains(m.notice, "rebuilt as 9e9e9e9e") {
 		t.Fatalf("notice = %q", m.notice)
 	}
+}
+
+// m2ProjectDir returns the lost fixture session's project path.
+func m2ProjectDir(t *testing.T, m model) string {
+	t.Helper()
+	for _, s := range m.visible {
+		if s.State == "LOST" {
+			return tildePath(s.ProjectPath)
+		}
+	}
+	t.Fatal("no lost session in fixture")
+	return ""
 }
 
 func TestOrphanedFolderMarker(t *testing.T) {
@@ -636,14 +680,19 @@ func TestRescueAIFlow(t *testing.T) {
 		}
 	}
 	var used []string
-	rescueReconstructAI = func(_ config.Config, opt assist.ModelOption, id string, _ string) (string, string, error) {
-		used = append(used, opt.Label()+" for "+id)
+	rescueReconstructAI = func(_ config.Config, opt assist.ModelOption, id string, _ string, dir string) (string, string, error) {
+		used = append(used, opt.Label()+" for "+id+" in "+dir)
 		return "abcd1234-0000-4000-8000-000000000000", "/fake.jsonl", nil
 	}
 	defer func() { assistModels = assist.AvailableModels; rescueReconstructAI = nil }()
 
-	// r → arrow to "Rebuild with AI" (index 1 of 4; Cancel=3 default).
+	// r → arrow to "Rebuild with AI" (index 1 of 4; Cancel=3 default),
+	// then confirm the prefilled destination.
 	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
+	if m.rescueDest == nil || m.rescueAction != "rebuild-ai" {
+		t.Fatal("destination stage did not open")
+	}
+	m = press(t, m, tea.KeyEnter)
 	if m.rescueAI == nil {
 		t.Fatal("AI stage did not open")
 	}
@@ -666,7 +715,7 @@ func TestRescueAIFlow(t *testing.T) {
 		t.Fatal("enter on Cancel acted")
 	}
 	// Full accept.
-	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter, tea.KeyLeft)
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter, tea.KeyEnter, tea.KeyLeft)
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(model)
 	if !m.rescueBusy || cmd == nil {
@@ -676,6 +725,9 @@ func TestRescueAIFlow(t *testing.T) {
 	m = next.(model)
 	if len(used) != 1 || !strings.Contains(used[0], "opus · claude for cccc3333") {
 		t.Fatalf("used = %v", used)
+	}
+	if !strings.Contains(used[0], " in /") {
+		t.Fatalf("destination not passed through: %v", used)
 	}
 	if !strings.Contains(m.notice, "rebuilt with AI as abcd1234") {
 		t.Fatalf("notice = %q", m.notice)
@@ -771,5 +823,35 @@ func TestInspectorActsOnSession(t *testing.T) {
 	}
 	if m.confirmRescue == nil || m.confirmRescue.ID != lostID {
 		t.Fatalf("rescue dialog session = %v, want %s", m.confirmRescue, lostID)
+	}
+}
+
+func TestCompleteDir(t *testing.T) {
+	base := t.TempDir()
+	for _, dir := range []string{"projects", "proto", "pictures"} {
+		if err := os.Mkdir(filepath.Join(base, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(base, "profile.txt"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ambiguous: extends to the longest common prefix, no trailing slash.
+	got := completeDir(filepath.Join(base, "pr"))
+	if got != filepath.Join(base, "pro") {
+		t.Fatalf("ambiguous completion = %q", got)
+	}
+	// Unique: completes fully and appends the separator. Files never match.
+	got = completeDir(filepath.Join(base, "proj"))
+	if got != filepath.Join(base, "projects")+string(os.PathSeparator) {
+		t.Fatalf("unique completion = %q", got)
+	}
+	// No match / nothing to add: input unchanged.
+	if got := completeDir(filepath.Join(base, "zz")); got != filepath.Join(base, "zz") {
+		t.Fatalf("no-match completion = %q", got)
+	}
+	if got := completeDir(""); got != "" {
+		t.Fatalf("empty completion = %q", got)
 	}
 }

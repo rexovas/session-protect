@@ -143,7 +143,11 @@ type model struct {
 	rescueModels []assist.ModelOption
 	rescueModel  int
 	rescueBusy   bool
-	confirmSel   int // dialog button index; always starts on Cancel
+	rescueDest   *Session // destination stage between choosing a rescue action and running it
+	rescueAction string   // export | rebuild | rebuild-ai
+	rescueInput  string   // editable destination directory (~ allowed, tab completes)
+	rescueDir    string   // resolved destination carried into the AI model stage
+	confirmSel   int      // dialog button index; always starts on Cancel
 
 	// A newer release triggers a launch-time offer; accepting swaps the
 	// binary and relaunches into it.
@@ -890,10 +894,66 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.rescueBusy = true
 			session := *m.rescueAI
-			cfg, option := m.cfg, m.rescueModels[m.rescueModel]
+			cfg, option, dir := m.cfg, m.rescueModels[m.rescueModel], m.rescueDir
 			return m, func() tea.Msg {
-				newID, _, err := rescueReconstructAI(cfg, option, session.ID, session.Title)
+				newID, _, err := rescueReconstructAI(cfg, option, session.ID, session.Title, dir)
 				return rescueAIMsg{newID: newID, err: err}
+			}
+		}
+		return m, nil
+	}
+	if m.rescueDest != nil {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			session := *m.rescueDest
+			m.rescueDest = nil
+			m.confirmRescue = &session
+			m.confirmSel = len(m.rescueButtons(session)) - 1
+		case "tab":
+			m.rescueInput = completeDir(m.rescueInput)
+		case "backspace":
+			if runes := []rune(m.rescueInput); len(runes) > 0 {
+				m.rescueInput = string(runes[:len(runes)-1])
+			}
+		case "enter":
+			dir := expandTilde(strings.TrimSpace(m.rescueInput))
+			if dir == "" {
+				break
+			}
+			session := *m.rescueDest
+			m.rescueDest = nil
+			switch m.rescueAction {
+			case "export":
+				path, err := rescueExport(m.cfg, session.Target, session.ID, session.Title, dir)
+				if err != nil {
+					m.notice, m.noticeErr = "export failed: "+err.Error(), true
+					break
+				}
+				m.notice = "prompt history exported → " + tildePath(path)
+			case "rebuild":
+				newID, _, err := rescueReconstruct(m.cfg, session.ID, session.Title, dir)
+				if err != nil {
+					m.notice, m.noticeErr = "rebuild failed: "+err.Error(), true
+					break
+				}
+				m.notice = "rebuilt as " + newID[:8] + "… — resumable now; the original stays marked lost"
+				m.scanning = true
+				cfg := m.cfg
+				return m, func() tea.Msg {
+					_, _ = backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true})
+					return rescanMsg(ScanNamed(cfg))
+				}
+			case "rebuild-ai":
+				m.rescueAI = &session
+				m.rescueDir = dir
+				m.rescueModel = 0
+				m.confirmSel = 1 // Cancel default in the AI stage too
+			}
+		default:
+			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+				m.rescueInput += msg.String()
 			}
 		}
 		return m, nil
@@ -920,29 +980,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.notice, m.noticeErr = "ai rebuild needs ollama running or the claude CLI on PATH", true
 					break
 				}
-				m.rescueAI = &session
-				m.rescueModel = 0
-				m.confirmSel = 1 // Cancel default in the AI stage too
+				m.rescueDest, m.rescueAction = &session, "rebuild-ai"
+				m.rescueInput = rescueDefaultDir(m.cfg, session, m.rescueAction)
 			case "Rebuild":
-				newID, _, err := rescueReconstruct(m.cfg, session.ID, session.Title)
-				if err != nil {
-					m.notice, m.noticeErr = "rebuild failed: "+err.Error(), true
-					break
-				}
-				m.notice = "rebuilt as " + newID[:8] + "… — resumable now; the original stays marked lost"
-				m.scanning = true
-				cfg := m.cfg
-				return m, func() tea.Msg {
-					_, _ = backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true})
-					return rescanMsg(ScanNamed(cfg))
-				}
+				m.rescueDest, m.rescueAction = &session, "rebuild"
+				m.rescueInput = rescueDefaultDir(m.cfg, session, m.rescueAction)
 			case "Export prompts":
-				path, err := rescueExport(m.cfg, session.Target, session.ID, session.Title)
-				if err != nil {
-					m.notice, m.noticeErr = "export failed: "+err.Error(), true
-					break
-				}
-				m.notice = "prompt history exported → " + tildePath(path)
+				m.rescueDest, m.rescueAction = &session, "export"
+				m.rescueInput = rescueDefaultDir(m.cfg, session, m.rescueAction)
 			}
 		}
 		return m, nil
@@ -1502,21 +1547,63 @@ func (m model) View() string {
 		}
 		return m.dialog("Rebuild with AI?", body, "Rebuild", "Cancel")
 	}
+	if m.rescueDest != nil {
+		session := *m.rescueDest
+		title := session.Title
+		if title == "" {
+			title = session.ID
+		}
+		heading := map[string]string{
+			"export":     "Export prompts — where?",
+			"rebuild":    "Rebuild — into which project directory?",
+			"rebuild-ai": "Rebuild with AI — into which project directory?",
+		}[m.rescueAction]
+		expanded := expandTilde(strings.TrimSpace(m.rescueInput))
+		note := styleDim.Render("directory exists")
+		switch {
+		case expanded == "":
+			note = styleStale.Render("enter a directory")
+		case !dirIsPresent(expanded):
+			note = styleStale.Render("will be created")
+		}
+		detail := "the rebuilt session resumes in this directory; default is the original project"
+		if m.rescueAction == "export" {
+			detail = "writes " + session.ID + ".md; default is the project dir (or the backup root)"
+		}
+		body := []string{
+			styleDim.Render("✕ ") + truncate(title, 68),
+			"",
+			styleActive.Render("❯ ") + truncate(m.rescueInput, 70) + "▌",
+			"  " + note,
+			"",
+			styleDim.Render(truncate(detail, 74)),
+		}
+		return m.inputDialog(heading, body, "type path · tab complete · enter confirm · esc back")
+	}
 	if m.confirmRescue != nil {
 		session := *m.confirmRescue
 		title := session.Title
 		if title == "" {
 			title = session.ID
 		}
+		explain := func(label string, text string) string {
+			return styleBold.Render(fmt.Sprintf("%-16s", label)) + styleDim.Render(text)
+		}
 		body := []string{
 			styleDim.Render("✕ ") + truncate(title, 68),
 			styleDim.Render(fmt.Sprintf("%d prompt(s) survive in the agent's history; the transcript is gone", session.Prompts)),
 			"",
-			styleDim.Render("Rebuild creates a NEW resumable session from your prompts —"),
-			styleDim.Render("the original stays marked lost. Export writes them as markdown."),
+			explain("Rebuild", "new resumable session; lost responses show [response lost]"),
+			explain("Rebuild with AI", "the same, plus a model-written brief of where the work stood"),
+			explain("Export prompts", "write the surviving prompts to a markdown file"),
+			"",
+			styleDim.Render("each asks where to write — the original always stays marked lost"),
 		}
 		if session.Target != "claude" {
-			body = body[:2]
+			body = append(body[:3],
+				explain("Export prompts", "write the surviving prompts to a markdown file"),
+				"",
+				styleDim.Render("codex sessions can't be rebuilt yet — the original stays marked lost"))
 		}
 		return m.dialog("Rescue lost session?", body, m.rescueButtons(session)...)
 	}
@@ -2465,6 +2552,93 @@ func (m model) dialog(title string, body []string, labels ...string) string {
 		Width(min(inner+4, m.width-2)).
 		Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(max(m.width, 20), max(m.height, 10), lipgloss.Center, lipgloss.Center, box)
+}
+
+// inputDialog is the dialog frame around a free-text stage: no buttons,
+// custom key help.
+func (m model) inputDialog(title string, body []string, help string) string {
+	inner := 76
+	var lines []string
+	lines = append(lines, lipgloss.PlaceHorizontal(inner, lipgloss.Center, styleBold.Render(title)), "")
+	lines = append(lines, body...)
+	lines = append(lines, "", lipgloss.PlaceHorizontal(inner, lipgloss.Center, styleDim.Render(help)))
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.AdaptiveColor{Light: "#5A56E0", Dark: "#7D79F6"}).
+		Padding(1, 2).
+		Width(min(inner+4, m.width-2)).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(max(m.width, 20), max(m.height, 10), lipgloss.Center, lipgloss.Center, box)
+}
+
+// rescueDefaultDir proposes where a rescue action writes: exports prefer
+// the session's project directory when it still exists (falling back to
+// exports/ under the backup root); rebuilds propose the original project
+// directory, existing or not — it is recreated on confirm.
+func rescueDefaultDir(cfg config.Config, session Session, action string) string {
+	if action == "export" {
+		if session.ProjectPath != "" && dirIsPresent(session.ProjectPath) {
+			return tildePath(session.ProjectPath)
+		}
+		return tildePath(filepath.Join(cfg.BackupRoot, "exports"))
+	}
+	return tildePath(session.ProjectPath)
+}
+
+// expandTilde resolves a leading ~ to the home directory.
+func expandTilde(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(path, "~"))
+		}
+	}
+	return path
+}
+
+// completeDir shell-style tab-completes the last path segment against
+// existing directories: extends to the longest common prefix, and adds a
+// trailing slash when the match is unique.
+func completeDir(input string) string {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return input
+	}
+	parent, prefix := filepath.Split(expandTilde(trimmed))
+	if parent == "" {
+		parent = "."
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return input
+	}
+	var matches []string
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
+			matches = append(matches, entry.Name())
+		}
+	}
+	if len(matches) == 0 {
+		return input
+	}
+	common := matches[0]
+	for _, name := range matches[1:] {
+		for !strings.HasPrefix(name, common) {
+			common = common[:len(common)-1]
+		}
+	}
+	if common == prefix {
+		return input
+	}
+	out := filepath.Join(parent, common)
+	if len(matches) == 1 {
+		out += string(os.PathSeparator)
+	}
+	return tildePath(out)
+}
+
+func dirIsPresent(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // detailBox is the rounded frame used by the inspector's sections.
