@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 // The text cache holds one plain-text extract per session under
@@ -39,14 +40,20 @@ type Hit struct {
 func ContentSearch(cfg config.Config, sessions []Session, query string) []Hit {
 	refreshTextCache(cfg, sessions)
 	dir := filepath.Join(cfg.BackupRoot, textCacheDir)
+	lost := lostTexts(sessions)
 	lowerQuery := strings.ToLower(query)
 	var hits []Hit
 	for _, session := range sessions {
-		data, err := os.ReadFile(filepath.Join(dir, session.ID+".txt"))
-		if err != nil || len(data) == 0 {
+		var text string
+		if session.State == "LOST" {
+			// Lost sessions search by their surviving prompts.
+			text = lost[session.ID]
+		} else if data, err := os.ReadFile(filepath.Join(dir, session.ID+".txt")); err == nil {
+			text = string(data)
+		}
+		if text == "" {
 			continue
 		}
-		text := string(data)
 		lower := strings.ToLower(text)
 		count := strings.Count(lower, lowerQuery)
 		if count == 0 {
@@ -184,6 +191,56 @@ func extractText(path string) string {
 		}
 	}
 	return b.String()
+}
+
+// lostTexts gathers the surviving prompt text of every LOST session in
+// one pass over the agents' history files (read-only, as always).
+func lostTexts(sessions []Session) map[string]string {
+	wanted := map[string]*strings.Builder{}
+	for _, session := range sessions {
+		if session.State == "LOST" {
+			wanted[session.ID] = &strings.Builder{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	for _, path := range []string{
+		filepath.Join(targets.DetectClaude().Source, "history.jsonl"),
+		filepath.Join(targets.DetectCodex().Source, "history.jsonl"),
+	} {
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+		for scanner.Scan() {
+			var entry struct {
+				Display    string `json:"display"`
+				SessionID  string `json:"sessionId"`
+				SessionID2 string `json:"session_id"`
+				Text       string `json:"text"`
+			}
+			if json.Unmarshal(scanner.Bytes(), &entry) != nil {
+				continue
+			}
+			id, text := entry.SessionID, entry.Display
+			if id == "" {
+				id, text = entry.SessionID2, entry.Text
+			}
+			if builder, ok := wanted[id]; ok && text != "" {
+				builder.WriteString(text)
+				builder.WriteByte('\n')
+			}
+		}
+		file.Close()
+	}
+	out := make(map[string]string, len(wanted))
+	for id, builder := range wanted {
+		out[id] = builder.String()
+	}
+	return out
 }
 
 // snippetAround returns the line containing the first match, center-trimmed

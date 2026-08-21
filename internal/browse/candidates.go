@@ -54,15 +54,17 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) []assi
 		text    string
 		lower   string
 	}
+	lost := lostTexts(sessions)
 	var all []counted
 	df := make([]int, len(words))
 	for _, session := range sessions {
-		if session.State == "LOST" {
-			continue
-		}
 		entry := counted{session: session, counts: make([]int, len(words))}
-		if data, err := os.ReadFile(filepath.Join(dir, session.ID+".txt")); err == nil && len(data) > 0 {
+		if session.State == "LOST" {
+			entry.text = lost[session.ID]
+		} else if data, err := os.ReadFile(filepath.Join(dir, session.ID+".txt")); err == nil {
 			entry.text = string(data)
+		}
+		if entry.text != "" {
 			entry.lower = strings.ToLower(entry.text)
 			for i, word := range words {
 				entry.counts[i] = strings.Count(entry.lower, word)
@@ -116,6 +118,9 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) []assi
 		title := entry.session.CustomName
 		if title == "" {
 			title = entry.session.Title
+		}
+		if entry.session.State == "LOST" {
+			title = "(LOST — transcript gone, prompts survive) " + title
 		}
 		out = append(out, assist.Candidate{
 			ID:       entry.session.ID,
