@@ -14,7 +14,7 @@ no telemetry, no accounts, no external services.
 
 <img src="assets/demo.gif" alt="The SessionProtect session explorer: live sessions, health states, inspector, search, and restore" width="900">
 
-*More: [feature walkthroughs](docs/DEMOS.md) — search tiers, rescue, transplant.*
+*More: [feature walkthroughs](docs/DEMOS.md) · [how recovery works](docs/RECOVERY.md).*
 
 ## Highlights
 
@@ -41,7 +41,9 @@ no telemetry, no accounts, no external services.
   half-remember and a local model identifies it (`ctrl+g`, via ollama or
   the claude CLI; optional, auto-detected)
 - Lost-session detection: sessions recorded in agent history but missing
-  from disk are surfaced permanently, so nothing disappears silently
+  from disk are surfaced permanently, so nothing disappears silently —
+  and can be rescued: export their surviving prompts, or rebuild them
+  into a new resumable session ([how recovery works](docs/RECOVERY.md))
 
 **Command**
 - One-key restore of deleted sessions from backup
