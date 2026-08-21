@@ -145,7 +145,10 @@ type model struct {
 	rescueBusy   bool
 	rescueDest   *Session // destination stage between choosing a rescue action and running it
 	rescueAction string   // export | rebuild | rebuild-ai
-	rescueInput  string   // editable destination directory (~ allowed, tab completes)
+	rescueInput  string   // current directory of the destination picker (~ form)
+	rescueCursor int      // highlighted row in the picker list
+	rescueNaming bool     // typing a new folder name
+	rescueName   string   // the name being typed
 	rescueDir    string   // resolved destination carried into the AI model stage
 	confirmSel   int      // dialog button index; always starts on Cancel
 
@@ -903,6 +906,31 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.rescueDest != nil {
+		if m.rescueNaming {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				m.rescueNaming, m.rescueName = false, ""
+			case "backspace":
+				if runes := []rune(m.rescueName); len(runes) > 0 {
+					m.rescueName = string(runes[:len(runes)-1])
+				}
+			case "enter":
+				if name := strings.TrimSpace(m.rescueName); name != "" {
+					m.rescueInput = tildePath(filepath.Join(expandTilde(m.rescueInput), name))
+					m.rescueCursor = 0
+				}
+				m.rescueNaming, m.rescueName = false, ""
+			default:
+				if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+					m.rescueName += msg.String()
+				}
+			}
+			return m, nil
+		}
+		subdirs := subdirsOf(expandTilde(m.rescueInput))
+		rows := len(subdirs) + 3 // use-this-dir, .., dirs…, new-folder
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -911,49 +939,31 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rescueDest = nil
 			m.confirmRescue = &session
 			m.confirmSel = len(m.rescueButtons(session)) - 1
-		case "tab":
-			m.rescueInput = completeDir(m.rescueInput)
-		case "backspace":
-			if runes := []rune(m.rescueInput); len(runes) > 0 {
-				m.rescueInput = string(runes[:len(runes)-1])
-			}
-		case "enter":
-			dir := expandTilde(strings.TrimSpace(m.rescueInput))
-			if dir == "" {
-				break
-			}
-			session := *m.rescueDest
-			m.rescueDest = nil
-			switch m.rescueAction {
-			case "export":
-				path, err := rescueExport(m.cfg, session.Target, session.ID, session.Title, dir)
-				if err != nil {
-					m.notice, m.noticeErr = "export failed: "+err.Error(), true
+		case "up", "k":
+			m.rescueCursor = (m.rescueCursor + rows - 1) % rows
+		case "down", "j":
+			m.rescueCursor = (m.rescueCursor + 1) % rows
+		case "left", "h", "backspace":
+			m.rescueInput = pickerUp(m.rescueInput)
+			m.rescueCursor = 0
+		case "right", "l", "enter":
+			switch {
+			case m.rescueCursor == 1: // ..
+				m.rescueInput = pickerUp(m.rescueInput)
+				m.rescueCursor = 0
+			case m.rescueCursor == rows-1: // + new folder…
+				m.rescueNaming, m.rescueName = true, ""
+			case m.rescueCursor > 1: // descend
+				m.rescueInput = tildePath(filepath.Join(expandTilde(m.rescueInput), subdirs[m.rescueCursor-2]))
+				m.rescueCursor = 0
+			default: // ✓ use this directory
+				dir := expandTilde(strings.TrimSpace(m.rescueInput))
+				if dir == "" {
 					break
 				}
-				m.notice = "prompt history exported → " + tildePath(path)
-			case "rebuild":
-				newID, _, err := rescueReconstruct(m.cfg, session.ID, session.Title, dir)
-				if err != nil {
-					m.notice, m.noticeErr = "rebuild failed: "+err.Error(), true
-					break
-				}
-				m.notice = "rebuilt as " + newID[:8] + "… — resumable now; the original stays marked lost"
-				m.scanning = true
-				cfg := m.cfg
-				return m, func() tea.Msg {
-					_, _ = backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true})
-					return rescanMsg(ScanNamed(cfg))
-				}
-			case "rebuild-ai":
-				m.rescueAI = &session
-				m.rescueDir = dir
-				m.rescueModel = 0
-				m.confirmSel = 1 // Cancel default in the AI stage too
-			}
-		default:
-			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
-				m.rescueInput += msg.String()
+				session := *m.rescueDest
+				m.rescueDest = nil
+				return m.runRescue(session, dir)
 			}
 		}
 		return m, nil
@@ -980,14 +990,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.notice, m.noticeErr = "ai rebuild needs ollama running or the claude CLI on PATH", true
 					break
 				}
-				m.rescueDest, m.rescueAction = &session, "rebuild-ai"
-				m.rescueInput = rescueDefaultDir(m.cfg, session, m.rescueAction)
+				m = m.openRescuePicker(session, "rebuild-ai")
 			case "Rebuild":
-				m.rescueDest, m.rescueAction = &session, "rebuild"
-				m.rescueInput = rescueDefaultDir(m.cfg, session, m.rescueAction)
+				m = m.openRescuePicker(session, "rebuild")
 			case "Export prompts":
-				m.rescueDest, m.rescueAction = &session, "export"
-				m.rescueInput = rescueDefaultDir(m.cfg, session, m.rescueAction)
+				m = m.openRescuePicker(session, "export")
 			}
 		}
 		return m, nil
@@ -1560,25 +1567,56 @@ func (m model) View() string {
 		}[m.rescueAction]
 		expanded := expandTilde(strings.TrimSpace(m.rescueInput))
 		note := styleDim.Render("directory exists")
-		switch {
-		case expanded == "":
-			note = styleStale.Render("enter a directory")
-		case !dirIsPresent(expanded):
-			note = styleStale.Render("will be created")
+		if !dirIsPresent(expanded) {
+			note = styleStale.Render("will be created on confirm")
 		}
-		detail := "the rebuilt session resumes in this directory; default is the original project"
+		detail := "the rebuilt session resumes here; default is the original project dir"
 		if m.rescueAction == "export" {
 			detail = "writes " + session.ID + ".md; default is the project dir (or the backup root)"
 		}
 		body := []string{
 			styleDim.Render("✕ ") + truncate(title, 68),
 			"",
-			styleActive.Render("❯ ") + truncate(m.rescueInput, 70) + "▌",
-			"  " + note,
+			styleActive.Render(truncate(m.rescueInput, 72)) + "  " + note,
 			"",
-			styleDim.Render(truncate(detail, 74)),
 		}
-		return m.inputDialog(heading, body, "type path · tab complete · enter confirm · esc back")
+		if m.rescueNaming {
+			body = append(body,
+				"  new folder: "+m.rescueName+"▌",
+				"",
+				styleDim.Render(truncate(detail, 74)))
+			return m.inputDialog(heading, body, "type name · enter add · esc cancel")
+		}
+		subdirs := subdirsOf(expanded)
+		row := func(index int, label string, style lipgloss.Style) string {
+			if index == m.rescueCursor {
+				return styleCursor.Render("❯ " + label)
+			}
+			return "  " + style.Render(label)
+		}
+		rows := []string{
+			row(0, "✓ use this directory", styleBold),
+			row(1, "..", styleDim),
+		}
+		const window = 8
+		first, last := 0, len(subdirs)
+		if len(subdirs) > window {
+			first = max(0, min(m.rescueCursor-2-window/2, len(subdirs)-window))
+			last = first + window
+		}
+		if first > 0 {
+			rows = append(rows, styleDim.Render(fmt.Sprintf("    … %d above", first)))
+		}
+		for i := first; i < last; i++ {
+			rows = append(rows, row(i+2, subdirs[i]+"/", lipgloss.NewStyle()))
+		}
+		if last < len(subdirs) {
+			rows = append(rows, styleDim.Render(fmt.Sprintf("    … %d more", len(subdirs)-last)))
+		}
+		rows = append(rows, row(len(subdirs)+2, "+ new folder…", styleDim))
+		body = append(body, rows...)
+		body = append(body, "", styleDim.Render(truncate(detail, 74)))
+		return m.inputDialog(heading, body, "↑/↓ choose · enter/→ open or confirm · ←/backspace up · esc back")
 	}
 	if m.confirmRescue != nil {
 		session := *m.confirmRescue
@@ -2582,6 +2620,73 @@ func (m model) inputDialog(title string, body []string, help string) string {
 	return lipgloss.Place(max(m.width, 20), max(m.height, 10), lipgloss.Center, lipgloss.Center, box)
 }
 
+// openRescuePicker enters the destination stage for a chosen rescue action.
+func (m model) openRescuePicker(session Session, action string) model {
+	m.rescueDest, m.rescueAction = &session, action
+	m.rescueInput = rescueDefaultDir(m.cfg, session, action)
+	m.rescueCursor = 0
+	m.rescueNaming, m.rescueName = false, ""
+	return m
+}
+
+// runRescue executes the chosen rescue action into dir (created if needed).
+func (m model) runRescue(session Session, dir string) (model, tea.Cmd) {
+	switch m.rescueAction {
+	case "export":
+		path, err := rescueExport(m.cfg, session.Target, session.ID, session.Title, dir)
+		if err != nil {
+			m.notice, m.noticeErr = "export failed: "+err.Error(), true
+			break
+		}
+		m.notice = "prompt history exported → " + tildePath(path)
+	case "rebuild":
+		newID, _, err := rescueReconstruct(m.cfg, session.ID, session.Title, dir)
+		if err != nil {
+			m.notice, m.noticeErr = "rebuild failed: "+err.Error(), true
+			break
+		}
+		m.notice = "rebuilt as " + newID[:8] + "… — resumable now; the original stays marked lost"
+		m.scanning = true
+		cfg := m.cfg
+		return m, func() tea.Msg {
+			_, _ = backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true})
+			return rescanMsg(ScanNamed(cfg))
+		}
+	case "rebuild-ai":
+		m.rescueAI = &session
+		m.rescueDir = dir
+		m.rescueModel = 0
+		m.confirmSel = 1 // Cancel default in the AI stage too
+	}
+	return m, nil
+}
+
+// subdirsOf lists the visible subdirectories of path, sorted; empty when
+// the path does not exist yet.
+func subdirsOf(path string) []string {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, entry := range entries {
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+			out = append(out, entry.Name())
+		}
+	}
+	return out
+}
+
+// pickerUp steps the picker up one level, stopping at the filesystem root.
+func pickerUp(display string) string {
+	expanded := expandTilde(strings.TrimSpace(display))
+	parent := filepath.Dir(expanded)
+	if parent == expanded || parent == "" {
+		return display
+	}
+	return tildePath(parent)
+}
+
 // rescueDefaultDir proposes where a rescue action writes: exports prefer
 // the session's project directory when it still exists (falling back to
 // exports/ under the backup root); rebuilds propose the original project
@@ -2604,47 +2709,6 @@ func expandTilde(path string) string {
 		}
 	}
 	return path
-}
-
-// completeDir shell-style tab-completes the last path segment against
-// existing directories: extends to the longest common prefix, and adds a
-// trailing slash when the match is unique.
-func completeDir(input string) string {
-	trimmed := strings.TrimSpace(input)
-	if trimmed == "" {
-		return input
-	}
-	parent, prefix := filepath.Split(expandTilde(trimmed))
-	if parent == "" {
-		parent = "."
-	}
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		return input
-	}
-	var matches []string
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
-			matches = append(matches, entry.Name())
-		}
-	}
-	if len(matches) == 0 {
-		return input
-	}
-	common := matches[0]
-	for _, name := range matches[1:] {
-		for !strings.HasPrefix(name, common) {
-			common = common[:len(common)-1]
-		}
-	}
-	if common == prefix {
-		return input
-	}
-	out := filepath.Join(parent, common)
-	if len(matches) == 1 {
-		out += string(os.PathSeparator)
-	}
-	return tildePath(out)
 }
 
 func dirIsPresent(path string) bool {

@@ -610,7 +610,10 @@ func TestRescueDialogFlow(t *testing.T) {
 	if m.rescueInput == "" {
 		t.Fatal("destination not prefilled")
 	}
-	m = press(t, m, tea.KeyEnter)
+	if view := m.View(); !strings.Contains(view, "use this directory") || !strings.Contains(view, "+ new folder") {
+		t.Fatal("picker rows missing")
+	}
+	m = press(t, m, tea.KeyEnter) // cursor starts on "use this directory"
 	if len(exported) != 1 || exported[0] != "cccc3333-0000-0000-0000-000000000003" {
 		t.Fatalf("exported = %v", exported)
 	}
@@ -640,6 +643,65 @@ func TestRescueDialogFlow(t *testing.T) {
 	}
 	if !strings.Contains(m.notice, "rebuilt as 9e9e9e9e") {
 		t.Fatalf("notice = %q", m.notice)
+	}
+}
+
+func TestRescuePickerNavigation(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab, "x")
+	for i, s := range m.visible {
+		if s.State == "LOST" {
+			m.sCursor = i
+		}
+	}
+	project := expandTilde(m2ProjectDir(t, m))
+	if err := os.MkdirAll(filepath.Join(project, "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var dirs []string
+	rescueExport = func(_ config.Config, _ string, _ string, _ string, dir string) (string, error) {
+		dirs = append(dirs, dir)
+		return "/fake/x.md", nil
+	}
+	defer func() { rescueExport = nil }()
+
+	// Open the export picker: rows are use / .. / inner/ / + new folder.
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyEnter)
+	if m.rescueDest == nil {
+		t.Fatal("picker did not open")
+	}
+
+	// Descend into inner, then confirm.
+	m = press(t, m, tea.KeyDown, tea.KeyDown, tea.KeyEnter)
+	if want := tildePath(filepath.Join(project, "inner")); m.rescueInput != want {
+		t.Fatalf("descend: input = %q, want %q", m.rescueInput, want)
+	}
+	// .. climbs back up.
+	m = press(t, m, tea.KeyDown, tea.KeyEnter)
+	if m.rescueInput != tildePath(project) {
+		t.Fatalf("up: input = %q", m.rescueInput)
+	}
+
+	// New folder: last row starts naming; the typed name joins the path
+	// without touching the disk until confirm.
+	m = press(t, m, tea.KeyUp, tea.KeyEnter) // wraps to "+ new folder…"
+	if !m.rescueNaming {
+		t.Fatal("naming stage did not start")
+	}
+	m = press(t, m, "fresh", tea.KeyEnter)
+	want := tildePath(filepath.Join(project, "fresh"))
+	if m.rescueNaming || m.rescueInput != want {
+		t.Fatalf("naming: input = %q, want %q", m.rescueInput, want)
+	}
+	if dirIsPresent(filepath.Join(project, "fresh")) {
+		t.Fatal("folder must not exist before confirm")
+	}
+	if view := m.View(); !strings.Contains(view, "will be created") {
+		t.Fatal("missing will-be-created note")
+	}
+	m = press(t, m, tea.KeyEnter) // cursor reset to "use this directory"
+	if len(dirs) != 1 || dirs[0] != filepath.Join(project, "fresh") {
+		t.Fatalf("export dir = %v", dirs)
 	}
 }
 
@@ -828,35 +890,5 @@ func TestInspectorActsOnSession(t *testing.T) {
 	}
 	if m.confirmRescue == nil || m.confirmRescue.ID != lostID {
 		t.Fatalf("rescue dialog session = %v, want %s", m.confirmRescue, lostID)
-	}
-}
-
-func TestCompleteDir(t *testing.T) {
-	base := t.TempDir()
-	for _, dir := range []string{"projects", "proto", "pictures"} {
-		if err := os.Mkdir(filepath.Join(base, dir), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(base, "profile.txt"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Ambiguous: extends to the longest common prefix, no trailing slash.
-	got := completeDir(filepath.Join(base, "pr"))
-	if got != filepath.Join(base, "pro") {
-		t.Fatalf("ambiguous completion = %q", got)
-	}
-	// Unique: completes fully and appends the separator. Files never match.
-	got = completeDir(filepath.Join(base, "proj"))
-	if got != filepath.Join(base, "projects")+string(os.PathSeparator) {
-		t.Fatalf("unique completion = %q", got)
-	}
-	// No match / nothing to add: input unchanged.
-	if got := completeDir(filepath.Join(base, "zz")); got != filepath.Join(base, "zz") {
-		t.Fatalf("no-match completion = %q", got)
-	}
-	if got := completeDir(""); got != "" {
-		t.Fatalf("empty completion = %q", got)
 	}
 }
