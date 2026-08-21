@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/rexovas/session-protect/internal/assist"
+	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
 )
 
@@ -643,6 +644,118 @@ func TestRescueDialogFlow(t *testing.T) {
 	}
 	if !strings.Contains(m.notice, "rebuilt as 9e9e9e9e") {
 		t.Fatalf("notice = %q", m.notice)
+	}
+
+	// Completion opens the resume dialog for the NEW session, o-style,
+	// with Later as the safe default.
+	if m.confirmResume == nil || m.confirmResume.ID != "9e9e9e9e-0000-4000-8000-000000000000" {
+		t.Fatalf("resume offer = %+v", m.confirmResume)
+	}
+	if view := m.View(); !strings.Contains(view, "Rebuilt as 9e9e9e9e") || !strings.Contains(view, "Later") {
+		t.Fatal("rebuild-complete dialog missing")
+	}
+	if m.confirmSel != 2 {
+		t.Fatal("Later must be the default")
+	}
+	// "This terminal" execs the resume on exit.
+	m = press(t, m, tea.KeyLeft)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if len(m.execOnExit) == 0 || !strings.Contains(strings.Join(m.execOnExit, " "), "claude --resume 9e9e9e9e") {
+		t.Fatalf("execOnExit = %v", m.execOnExit)
+	}
+	if m.resumeHeading != "" {
+		t.Fatal("heading not cleared")
+	}
+}
+
+func TestRescuePickerFilterAndJump(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab, "x")
+	for i, s := range m.visible {
+		if s.State == "LOST" {
+			m.sCursor = i
+		}
+	}
+	project := expandTilde(m2ProjectDir(t, m))
+	for _, dir := range []string{"inner", "other", "third"} {
+		if err := os.MkdirAll(filepath.Join(project, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyEnter) // export picker
+
+	// Typing filters the rows and highlights the first match.
+	m = press(t, m, "inn")
+	if got := m.rescueSubdirs(); len(got) != 1 || got[0] != "inner" || m.rescueCursor != 2 {
+		t.Fatalf("filter: %v cursor=%d", got, m.rescueCursor)
+	}
+	if view := m.View(); !strings.Contains(view, "inn") {
+		t.Fatal("filter text not shown")
+	}
+	m = press(t, m, tea.KeyEnter) // descend into the match
+	if want := tildePath(filepath.Join(project, "inner")); m.rescueInput != want || m.rescueFilter != "" {
+		t.Fatalf("descend: input=%q filter=%q", m.rescueInput, m.rescueFilter)
+	}
+
+	// Esc clears an active filter before it closes the picker.
+	m = press(t, m, "xyz")
+	if m.rescueFilter != "xyz" {
+		t.Fatalf("filter = %q", m.rescueFilter)
+	}
+	m = press(t, m, tea.KeyEsc)
+	if m.rescueFilter != "" || m.rescueDest == nil {
+		t.Fatal("esc should only clear the filter")
+	}
+
+	// A leading ~ or / turns the text into a path jump.
+	m = press(t, m, "~/somewhere/else", tea.KeyEnter)
+	if m.rescueInput != "~/somewhere/else" || m.rescueFilter != "" {
+		t.Fatalf("jump: input=%q filter=%q", m.rescueInput, m.rescueFilter)
+	}
+	if view := m.View(); !strings.Contains(view, "will be created") {
+		t.Fatal("jump target should show will-be-created")
+	}
+}
+
+func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
+	m := buildEnv(t)
+	const lost = "cccc3333-0000-0000-0000-000000000003"
+	const rebuilt = "9e9e9e9e-0000-4000-8000-000000000000"
+	if err := os.MkdirAll(m.cfg.BackupRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	audit.Append(m.cfg.BackupRoot, []audit.Entry{{
+		Time: time.Now(), Action: "reconstruct-ai", Target: "claude",
+		SessionID: rebuilt, From: lost,
+	}})
+	projects := Scan(m.cfg)
+	var found *Session
+	for _, project := range projects {
+		for i := range project.Sessions {
+			if project.Sessions[i].ID == lost {
+				found = &project.Sessions[i]
+			}
+		}
+	}
+	if found == nil || found.RebuiltAs != rebuilt {
+		t.Fatalf("lost session not linked: %+v", found)
+	}
+	label, _ := sessionStateFor(*found)
+	if !strings.Contains(label, "rescued") {
+		t.Fatalf("state label = %q", label)
+	}
+	// The facet key stays lost so the lost filter still matches.
+	if displayState(*found) != "lost" {
+		t.Fatalf("facet key = %q", displayState(*found))
+	}
+
+	// A stale hits row picks up the new state on rescan.
+	m.hits = []Hit{{Session: Session{ID: lost, State: "LOST"}}}
+	next, _ := m.Update(rescanMsg(projects))
+	m = next.(model)
+	if m.hits[0].Session.RebuiltAs != rebuilt {
+		t.Fatal("hits row not refreshed by rescan")
 	}
 }
 

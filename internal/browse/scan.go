@@ -32,6 +32,7 @@ type Session struct {
 	State          string    // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE | LOST (+ synthesized ACTIVE | OPEN | RESTORED)
 	RestoredAt     time.Time // last restore recorded in the audit log, badge or not
 	RebuiltFrom    string    // lost session this one was reconstructed from
+	RebuiltAs      string    // for LOST sessions: id of a reconstruction built from it
 	Modified       time.Time
 	BackupModified time.Time
 	Size           int64
@@ -140,12 +141,16 @@ func Scan(cfg config.Config) []*Project {
 	}
 	restoredAt := map[string]time.Time{}
 	rebuiltFrom := map[string]string{}
+	rebuiltInto := map[string]string{}
 	for _, entry := range audit.Read(cfg.BackupRoot) {
 		if entry.Action == "restore" && entry.SessionID != "" && entry.Time.After(restoredAt[entry.SessionID]) {
 			restoredAt[entry.SessionID] = entry.Time
 		}
-		if entry.Action == "reconstruct" && entry.SessionID != "" {
+		if (entry.Action == "reconstruct" || entry.Action == "reconstruct-ai") && entry.SessionID != "" {
 			rebuiltFrom[entry.SessionID] = entry.From
+			if entry.From != "" {
+				rebuiltInto[entry.From] = entry.SessionID
+			}
 		}
 	}
 	projects := make([]*Project, 0, len(byPath))
@@ -195,6 +200,11 @@ func Scan(cfg config.Config) []*Project {
 				if session.State == "OK" || session.State == "MISSING_BACKUP" {
 					session.State = "REBUILT"
 				}
+			}
+			// The original stays lost forever, but its row should say a
+			// reconstruction exists — rescued, not silently still-dead.
+			if into, ok := rebuiltInto[session.ID]; ok && session.State == "LOST" {
+				session.RebuiltAs = into
 			}
 		}
 		sort.Slice(project.Sessions, func(i, j int) bool {

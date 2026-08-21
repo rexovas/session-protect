@@ -138,6 +138,7 @@ type model struct {
 	confirmRestore *Session
 	confirmResume  *Session
 	confirmRescue  *Session // a ✕ lost session offered export/rebuild
+	resumeHeading  string   // overrides the resume dialog title (rebuild-complete flow)
 	// The AI-rebuild stage: model choice (opus-first) before synthesis.
 	rescueAI     *Session
 	rescueModels []assist.ModelOption
@@ -149,6 +150,7 @@ type model struct {
 	rescueCursor int      // highlighted row in the picker list
 	rescueNaming bool     // typing a new folder name
 	rescueName   string   // the name being typed
+	rescueFilter string   // type-to-filter text; a leading ~ or / makes it a path jump
 	rescueDir    string   // resolved destination carried into the AI model stage
 	confirmSel   int      // dialog button index; always starts on Cancel
 
@@ -221,6 +223,10 @@ type transplantMsg struct {
 }
 
 type rescueAIMsg struct {
+	original Session
+	path     string
+	dir      string
+
 	newID string
 	err   error
 }
@@ -616,6 +622,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case rescanMsg:
 		m.scanning = false
 		m.projects = msg
+		// The hits pane holds Session copies from before the rescan;
+		// refresh them so state changes (a rescue, a restore) show.
+		if len(m.hits) > 0 {
+			byID := map[string]Session{}
+			for _, project := range m.projects {
+				for _, session := range project.Sessions {
+					byID[session.ID] = session
+				}
+			}
+			for i := range m.hits {
+				if session, ok := byID[m.hits[i].Session.ID]; ok {
+					m.hits[i].Session = session
+				}
+			}
+		}
 		m.rebuild()
 		return m, nil
 	case updateAvailableMsg:
@@ -667,7 +688,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice, m.noticeErr = "ai rebuild failed: "+msg.err.Error(), true
 			return m, nil
 		}
-		m.notice = "rebuilt with AI as " + msg.newID[:8] + "… — resumable now; the original stays marked lost"
+		m = m.offerRebuiltResume(msg.original, msg.newID, msg.path, msg.dir)
+		m.notice = "rebuilt with AI as " + msg.newID[:8] + "… — the original stays marked lost"
 		m.scanning = true
 		cfg := m.cfg
 		return m, func() tea.Msg {
@@ -830,12 +852,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmSel = (m.confirmSel + 2) % 3
 		case "esc", "n":
 			m.confirmResume = nil
+			m.resumeHeading = ""
 		case "y":
 			m.confirmSel = 0
 			fallthrough
 		case "enter":
 			session := *m.confirmResume
 			m.confirmResume = nil
+			m.resumeHeading = ""
 			project := session.ProjectPath
 			if project == "" {
 				project = m.root
@@ -899,8 +923,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			session := *m.rescueAI
 			cfg, option, dir := m.cfg, m.rescueModels[m.rescueModel], m.rescueDir
 			return m, func() tea.Msg {
-				newID, _, err := rescueReconstructAI(cfg, option, session.ID, session.Title, dir)
-				return rescueAIMsg{newID: newID, err: err}
+				newID, path, err := rescueReconstructAI(cfg, option, session.ID, session.Title, dir)
+				return rescueAIMsg{original: session, path: path, dir: dir, newID: newID, err: err}
 			}
 		}
 		return m, nil
@@ -929,12 +953,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		subdirs := subdirsOf(expandTilde(m.rescueInput))
+		subdirs := m.rescueSubdirs()
 		rows := len(subdirs) + 3 // use-this-dir, .., dirs…, new-folder
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "esc":
+			if m.rescueFilter != "" {
+				m.rescueFilter = ""
+				m.rescueCursor = 0
+				break
+			}
 			session := *m.rescueDest
 			m.rescueDest = nil
 			m.confirmRescue = &session
@@ -943,19 +972,32 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rescueCursor = (m.rescueCursor + rows - 1) % rows
 		case "down", "j":
 			m.rescueCursor = (m.rescueCursor + 1) % rows
-		case "left", "h", "backspace":
+		case "backspace":
+			if m.rescueFilter != "" {
+				runes := []rune(m.rescueFilter)
+				m.rescueFilter = string(runes[:len(runes)-1])
+				break
+			}
 			m.rescueInput = pickerUp(m.rescueInput)
 			m.rescueCursor = 0
-		case "right", "l", "enter":
+		case "left":
+			m.rescueInput = pickerUp(m.rescueInput)
+			m.rescueCursor, m.rescueFilter = 0, ""
+		case "right", "enter":
+			if m.rescueJumping() {
+				m.rescueInput = tildePath(filepath.Clean(expandTilde(strings.TrimSpace(m.rescueFilter))))
+				m.rescueCursor, m.rescueFilter = 0, ""
+				break
+			}
 			switch {
 			case m.rescueCursor == 1: // ..
 				m.rescueInput = pickerUp(m.rescueInput)
-				m.rescueCursor = 0
+				m.rescueCursor, m.rescueFilter = 0, ""
 			case m.rescueCursor == rows-1: // + new folder…
 				m.rescueNaming, m.rescueName = true, ""
 			case m.rescueCursor > 1: // descend
 				m.rescueInput = tildePath(filepath.Join(expandTilde(m.rescueInput), subdirs[m.rescueCursor-2]))
-				m.rescueCursor = 0
+				m.rescueCursor, m.rescueFilter = 0, ""
 			default: // ✓ use this directory
 				dir := expandTilde(strings.TrimSpace(m.rescueInput))
 				if dir == "" {
@@ -964,6 +1006,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				session := *m.rescueDest
 				m.rescueDest = nil
 				return m.runRescue(session, dir)
+			}
+		default:
+			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+				m.rescueFilter += msg.String()
+				if !m.rescueJumping() {
+					if len(m.rescueSubdirs()) > 0 {
+						m.rescueCursor = 2 // first match
+					} else {
+						m.rescueCursor = 0
+					}
+				}
 			}
 		}
 		return m, nil
@@ -1522,12 +1575,16 @@ func (m model) View() string {
 		if project == "" {
 			project = m.root
 		}
-		return m.dialog("Open session?",
+		heading, last := "Open session?", "Cancel"
+		if m.resumeHeading != "" {
+			heading, last = m.resumeHeading, "Later"
+		}
+		return m.dialog(heading,
 			[]string{
 				truncate(title, 70),
 				styleDim.Render("in    ") + truncate(tildePath(project), 64),
 				styleDim.Render("runs  ") + truncate(resumeCommand(session, project), 64),
-			}, "New window", "This terminal", "Cancel")
+			}, "New window", "This terminal", last)
 	}
 	if m.rescueAI != nil {
 		session := *m.rescueAI
@@ -2191,7 +2248,7 @@ func (m model) hitRow(hit Hit, index int, active bool) string {
 		title = hit.Session.ID
 	}
 	in := tildePath(hit.Session.ProjectPath)
-	stateLabel, stateStyle := sessionState(hit.Session.State)
+	stateLabel, stateStyle := sessionStateFor(hit.Session)
 	lead := fmt.Sprintf("%6d", hit.Count)
 	if m.hitsMode == "ask" {
 		hitsCell := "-"
@@ -2351,7 +2408,7 @@ func (m model) tabBar() string {
 // allSessionRow is a session row whose trailing column shows where the
 // session lives relative to the current root.
 func (m model) allSessionRow(session Session, active bool) string {
-	state, style := sessionState(session.State)
+	state, style := sessionStateFor(session)
 	gold := session.LiveStatus != "" && !active
 	plain := active || gold
 	live := " "
@@ -2416,7 +2473,7 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	width := max(min(m.width-2, 110), 40)
 	inner := width - 4
 
-	state, style := sessionState(session.State)
+	state, style := sessionStateFor(session)
 	liveNote := ""
 	if session.LiveStatus != "" {
 		liveNote = styleActive.Render("  ▶ open now (" + session.LiveStatus + ")")
@@ -2626,7 +2683,31 @@ func (m model) openRescuePicker(session Session, action string) model {
 	m.rescueInput = rescueDefaultDir(m.cfg, session, action)
 	m.rescueCursor = 0
 	m.rescueNaming, m.rescueName = false, ""
+	m.rescueFilter = ""
 	return m
+}
+
+// rescueJumping reports whether the typed text is a path jump rather
+// than a filter.
+func (m model) rescueJumping() bool {
+	return strings.HasPrefix(m.rescueFilter, "/") || strings.HasPrefix(m.rescueFilter, "~")
+}
+
+// rescueSubdirs lists the picker's directory rows, narrowed by the
+// type-to-filter text.
+func (m model) rescueSubdirs() []string {
+	subdirs := subdirsOf(expandTilde(m.rescueInput))
+	if m.rescueFilter == "" || m.rescueJumping() {
+		return subdirs
+	}
+	needle := strings.ToLower(m.rescueFilter)
+	var out []string
+	for _, name := range subdirs {
+		if strings.Contains(strings.ToLower(name), needle) {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // runRescue executes the chosen rescue action into dir (created if needed).
@@ -2640,12 +2721,12 @@ func (m model) runRescue(session Session, dir string) (model, tea.Cmd) {
 		}
 		m.notice = "prompt history exported → " + tildePath(path)
 	case "rebuild":
-		newID, _, err := rescueReconstruct(m.cfg, session.ID, session.Title, dir)
+		newID, path, err := rescueReconstruct(m.cfg, session.ID, session.Title, dir)
 		if err != nil {
 			m.notice, m.noticeErr = "rebuild failed: "+err.Error(), true
 			break
 		}
-		m.notice = "rebuilt as " + newID[:8] + "… — resumable now; the original stays marked lost"
+		m = m.offerRebuiltResume(session, newID, path, dir)
 		m.scanning = true
 		cfg := m.cfg
 		return m, func() tea.Msg {
@@ -2659,6 +2740,26 @@ func (m model) runRescue(session Session, dir string) (model, tea.Cmd) {
 		m.confirmSel = 1 // Cancel default in the AI stage too
 	}
 	return m, nil
+}
+
+// offerRebuiltResume opens the resume dialog for a freshly rebuilt
+// session — same choices as the o key, with a rebuild-complete heading.
+func (m model) offerRebuiltResume(original Session, newID string, path string, dir string) model {
+	rebuilt := Session{
+		Target:      "claude",
+		ID:          newID,
+		Title:       original.Title,
+		State:       "REBUILT",
+		ProjectPath: dir,
+		SourcePath:  path,
+		RebuiltFrom: original.ID,
+	}
+	m.confirmResume = &rebuilt
+	m.resumeHeading = "Rebuilt as " + newID[:8] + "… — resume it?"
+	m.confirmSel = 2 // Later is the reflex-safe default
+	m.notice = "rebuilt as " + newID[:8] + "… — the original stays marked lost"
+	m.noticeErr = false
+	return m
 }
 
 // subdirsOf lists the visible subdirectories of path, sorted; empty when
@@ -2966,7 +3067,7 @@ func (m model) folderRow(folder Folder, active bool) string {
 }
 
 func (m model) sessionRow(session Session, active bool) string {
-	state, style := sessionState(session.State)
+	state, style := sessionStateFor(session)
 	// Open sessions render the entire row in gold so live work stands
 	// out; the cursor highlight still takes precedence when selected.
 	gold := session.LiveStatus != "" && !active
@@ -3002,6 +3103,15 @@ func sessionTitle(session Session, width int, active bool) string {
 	default:
 		return styleUnless(active, styleDim, fmt.Sprintf("%-*s", width, "(not set)"))
 	}
+}
+
+// sessionStateFor renders a session's state cell, marking lost sessions
+// that already have a reconstruction as rescued.
+func sessionStateFor(session Session) (string, lipgloss.Style) {
+	if session.State == "LOST" && session.RebuiltAs != "" {
+		return "✕ rescued  ", styleRecover
+	}
+	return sessionState(session.State)
 }
 
 func sessionState(state string) (string, lipgloss.Style) {
