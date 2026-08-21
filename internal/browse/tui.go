@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -54,6 +55,16 @@ type model struct {
 	// expandAll renders every folder's subtree indented in place; one
 	// toggle for the whole view rather than per-folder state.
 	expandAll bool
+
+	// The f facet filter: multi-select states/agents/models plus a
+	// modified-time window, applied to session panes alongside the query.
+	showFilter   bool
+	filterItems  []filterItem
+	filterCursor int
+	fStates      map[string]bool
+	fAgents      map[string]bool
+	fModels      map[string]bool
+	fWindow      time.Duration // 0 = any
 
 	// query filters the current pane: the folder tree prunes to matching
 	// branches (auto-expanded down to each match), session panes to
@@ -245,10 +256,10 @@ func (m *model) rebuild() {
 	m.visible = nil
 	if m.here != nil {
 		LoadCustomNames(m.here)
-		m.visible = m.filterQuery(m.filterLost(m.here.Sessions))
+		m.visible = m.filterFacets(m.filterQuery(m.filterLost(m.here.Sessions)))
 	}
 	if m.showAll {
-		m.allSessions = m.filterQuery(m.filterLost(AllUnder(m.projects, m.root)))
+		m.allSessions = m.filterFacets(m.filterQuery(m.filterLost(AllUnder(m.projects, m.root))))
 	}
 	// Show the pane that has content when the other is empty — but never
 	// while a query is active: a search with no matches yet must not yank
@@ -314,6 +325,210 @@ func (m model) filterQuery(sessions []Session) []Session {
 	return out
 }
 
+type filterItem struct {
+	kind  string // header | state | agent | model | window
+	key   string
+	label string
+}
+
+// filterActive reports whether any facet constrains the list.
+func (m model) filterActive() bool {
+	return len(m.fStates) > 0 || len(m.fAgents) > 0 || len(m.fModels) > 0 || m.fWindow > 0
+}
+
+// matchesFacets applies the f-filter to one session.
+func (m model) matchesFacets(session Session) bool {
+	if len(m.fStates) > 0 && !m.fStates[displayState(session)] {
+		return false
+	}
+	if len(m.fAgents) > 0 && !m.fAgents[session.Target] {
+		return false
+	}
+	if len(m.fModels) > 0 && !m.fModels[displayModel(session.LastModel)] {
+		return false
+	}
+	if m.fWindow > 0 && time.Since(newest(session)) > m.fWindow {
+		return false
+	}
+	return true
+}
+
+// displayState is the facet key for a session's state.
+func displayState(session Session) string {
+	label, _ := sessionState(session.State)
+	return strings.TrimSpace(strings.TrimLeft(label, "●○~!✝✕✚⟳▶ "))
+}
+
+func (m model) filterFacets(sessions []Session) []Session {
+	if !m.filterActive() {
+		return sessions
+	}
+	var out []Session
+	for _, session := range sessions {
+		if m.matchesFacets(session) {
+			out = append(out, session)
+		}
+	}
+	return out
+}
+
+// buildFilterItems lays out the filter page from what actually exists
+// under the current root.
+func (m *model) buildFilterItems() {
+	sessions := AllUnder(m.projects, m.root)
+	states := map[string]int{}
+	agents := map[string]int{}
+	models := map[string]int{}
+	for _, session := range sessions {
+		states[displayState(session)]++
+		agents[session.Target]++
+		if model := displayModel(session.LastModel); model != "" && model != "-" {
+			models[model]++
+		}
+	}
+	var items []filterItem
+	items = append(items, filterItem{kind: "header", label: "STATE"})
+	for _, state := range []string{"ok", "open", "active", "stale", "unbacked", "recover", "lost", "restored", "rebuilt"} {
+		if states[state] > 0 {
+			items = append(items, filterItem{kind: "state", key: state,
+				label: fmt.Sprintf("%-10s %d", state, states[state])})
+		}
+	}
+	items = append(items, filterItem{kind: "header", label: "AGENT"})
+	for _, agent := range []string{"claude", "codex"} {
+		if agents[agent] > 0 {
+			items = append(items, filterItem{kind: "agent", key: agent,
+				label: fmt.Sprintf("%-10s %d", agent, agents[agent])})
+		}
+	}
+	if len(models) > 0 {
+		items = append(items, filterItem{kind: "header", label: "MODEL"})
+		var names []string
+		for name := range models {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			items = append(items, filterItem{kind: "model", key: name,
+				label: fmt.Sprintf("%-16s %d", name, models[name])})
+		}
+	}
+	items = append(items, filterItem{kind: "header", label: "MODIFIED"})
+	for _, window := range []struct {
+		key   string
+		label string
+	}{{"any", "any time"}, {"24h", "last 24 hours"}, {"168h", "last 7 days"}, {"720h", "last 30 days"}} {
+		items = append(items, filterItem{kind: "window", key: window.key, label: window.label})
+	}
+	m.filterItems = items
+	if m.filterCursor >= len(items) {
+		m.filterCursor = 0
+	}
+	m.filterCursorSkip(1)
+}
+
+// filterCursorSkip moves off header rows in the given direction.
+func (m *model) filterCursorSkip(direction int) {
+	for m.filterCursor >= 0 && m.filterCursor < len(m.filterItems) &&
+		m.filterItems[m.filterCursor].kind == "header" {
+		m.filterCursor += direction
+	}
+	if m.filterCursor < 0 {
+		m.filterCursor = 0
+		m.filterCursorSkip(1)
+	}
+	if m.filterCursor >= len(m.filterItems) {
+		m.filterCursor = len(m.filterItems) - 1
+		m.filterCursorSkip(-1)
+	}
+}
+
+// toggleFilterItem flips the item under the cursor.
+func (m *model) toggleFilterItem() {
+	if m.filterCursor >= len(m.filterItems) {
+		return
+	}
+	item := m.filterItems[m.filterCursor]
+	ensure := func(set *map[string]bool) *map[string]bool {
+		if *set == nil {
+			*set = map[string]bool{}
+		}
+		return set
+	}
+	switch item.kind {
+	case "state":
+		set := *ensure(&m.fStates)
+		if set[item.key] {
+			delete(set, item.key)
+		} else {
+			set[item.key] = true
+		}
+	case "agent":
+		set := *ensure(&m.fAgents)
+		if set[item.key] {
+			delete(set, item.key)
+		} else {
+			set[item.key] = true
+		}
+	case "model":
+		set := *ensure(&m.fModels)
+		if set[item.key] {
+			delete(set, item.key)
+		} else {
+			set[item.key] = true
+		}
+	case "window":
+		if item.key == "any" {
+			m.fWindow = 0
+		} else if d, err := time.ParseDuration(item.key); err == nil {
+			if m.fWindow == d {
+				m.fWindow = 0
+			} else {
+				m.fWindow = d
+			}
+		}
+	}
+}
+
+// filterItemChecked reports the display state of an item.
+func (m model) filterItemChecked(item filterItem) bool {
+	switch item.kind {
+	case "state":
+		return m.fStates[item.key]
+	case "agent":
+		return m.fAgents[item.key]
+	case "model":
+		return m.fModels[item.key]
+	case "window":
+		if item.key == "any" {
+			return m.fWindow == 0
+		}
+		d, _ := time.ParseDuration(item.key)
+		return m.fWindow == d
+	}
+	return false
+}
+
+// filterSummary is the footer chip describing active facets.
+func (m model) filterSummary() string {
+	var parts []string
+	appendSet := func(set map[string]bool) {
+		var keys []string
+		for key := range set {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts = append(parts, keys...)
+	}
+	appendSet(m.fStates)
+	appendSet(m.fAgents)
+	appendSet(m.fModels)
+	if m.fWindow > 0 {
+		parts = append(parts, "<"+m.fWindow.String())
+	}
+	return strings.Join(parts, "·")
+}
+
 func (m model) sessionCount() int {
 	return len(m.visible)
 }
@@ -322,7 +537,7 @@ func (m model) sessionCount() int {
 // active search overrides the toggle: a lost session is the one you most
 // need to be able to find.
 func (m model) filterLost(sessions []Session) []Session {
-	if m.showLost || m.query != "" {
+	if m.showLost || m.query != "" || m.fStates["lost"] {
 		return sessions
 	}
 	var out []Session
@@ -827,6 +1042,26 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.showFilter {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc", "f", "enter", "q":
+			m.showFilter = false
+			m.rebuild()
+		case "up", "k":
+			m.filterCursor--
+			m.filterCursorSkip(-1)
+		case "down", "j":
+			m.filterCursor++
+			m.filterCursorSkip(1)
+		case " ", "x":
+			(&m).toggleFilterItem()
+		case "c":
+			m.fStates, m.fAgents, m.fModels, m.fWindow = nil, nil, nil, 0
+		}
+		return m, nil
+	}
 	if m.searching {
 		switch msg.String() {
 		case "ctrl+c":
@@ -936,6 +1171,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+e":
 		m.expandAll = !m.expandAll
 		m.rebuild()
+	case "f":
+		(&m).buildFilterItems()
+		m.showFilter = true
 	case "/":
 		if m.showHits {
 			m.showHits = false
@@ -1290,6 +1528,9 @@ func (m model) View() string {
 	if m.showAsk {
 		return m.askView()
 	}
+	if m.showFilter {
+		return m.filterView()
+	}
 	if m.showHits {
 		return m.hitsView()
 	}
@@ -1361,6 +1602,9 @@ func (m model) View() string {
 		help = "/" + m.query + "▌   enter keep · ctrl+s transcripts · ctrl+g ai find · esc cancel"
 	} else if m.query != "" {
 		help = "/" + m.query + "   enter open · ctrl+s transcripts · ctrl+g ai find · esc clear"
+	}
+	if summary := m.filterSummary(); summary != "" && !m.searching {
+		help = "f:" + summary + "   " + help
 	}
 	if m.hitsBusy {
 		help = "searching transcripts for /" + m.hitsQuery + " … (first run builds the text index)"
@@ -1703,6 +1947,39 @@ func (m model) askView() string {
 	return m.pinBottomBare(b.String(), "enter ask · ←/→ model · esc close")
 }
 
+// filterView is the f facet page: grouped checkboxes over what exists
+// under the current root.
+func (m model) filterView() string {
+	var b strings.Builder
+	summary := m.filterSummary()
+	if summary != "" {
+		summary = "  " + styleActive.Render(summary) + " "
+	}
+	b.WriteString(styleHeader.Render("Session Explorer ▸ filters") + styleDim.Render(summary) + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
+
+	for i, item := range m.filterItems {
+		if item.kind == "header" {
+			b.WriteString("\n" + styleDim.Render("  "+item.label) + "\n")
+			continue
+		}
+		mark := "[ ]"
+		if m.filterItemChecked(item) {
+			mark = "[x]"
+		}
+		line := fmt.Sprintf("  %s %s", mark, item.label)
+		if i == m.filterCursor {
+			b.WriteString(styleCursor.Render(fmt.Sprintf("%-*s", min(m.width, 60), line)) + "\n")
+		} else if m.filterItemChecked(item) {
+			b.WriteString(styleActive.Render(line) + "\n")
+		} else {
+			b.WriteString(line + "\n")
+		}
+	}
+	b.WriteString("\n" + styleDim.Render("  empty categories don't constrain; MODIFIED is single-choice") + "\n")
+	return m.pinBottomBare(b.String(), "↑/↓ move · space toggle · c clear · f/esc apply")
+}
+
 // hitsView lists content-search results ranked by hit count; the
 // selected row's best matching line shows above the footer.
 func (m model) hitsView() string {
@@ -1819,6 +2096,7 @@ func (m model) keysBody(b *strings.Builder) {
 	key("ctrl+a", "all sessions beneath this folder")
 	key("ctrl+e", "expand / collapse the whole folder tree in place")
 	key("/", "filter the current pane — folder tree or session list")
+	key("f", "facet filters: state · agent · model · modified window")
 	key("ctrl+s", "search transcripts for the query, ranked by hit count")
 	key("ctrl+g", "ai find page: describe a session, enter asks a local model")
 	key("g · G", "jump to top / bottom")

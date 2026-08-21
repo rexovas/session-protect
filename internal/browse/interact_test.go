@@ -681,3 +681,55 @@ func TestRescueAIFlow(t *testing.T) {
 		t.Fatalf("notice = %q", m.notice)
 	}
 }
+
+func TestFacetFilterFlow(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab) // app sessions pane
+	base := len(m.visible)
+
+	m = press(t, m, "f")
+	if !m.showFilter || len(m.filterItems) == 0 {
+		t.Fatal("filter page did not open")
+	}
+	view := m.View()
+	for _, want := range []string{"STATE", "AGENT", "MODIFIED", "lost", "claude"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("filter page missing %q", want)
+		}
+	}
+
+	// Toggle "lost" (find its row), apply.
+	for i, item := range m.filterItems {
+		if item.kind == "state" && item.key == "lost" {
+			m.filterCursor = i
+		}
+	}
+	m = press(t, m, tea.KeySpace, tea.KeyEsc)
+	if m.showFilter {
+		t.Fatal("esc did not close")
+	}
+	if len(m.visible) != 1 || m.visible[0].State != "LOST" {
+		t.Fatalf("lost-only filter wrong: %+v", m.visible)
+	}
+	if !strings.Contains(m.View(), "f:lost") {
+		t.Fatal("footer chip missing")
+	}
+
+	// Clear restores everything.
+	m = press(t, m, "f", "c", tea.KeyEsc)
+	if len(m.visible) != base {
+		t.Fatalf("clear did not restore: %d vs %d", len(m.visible), base)
+	}
+
+	// Agent facet: claude selects all here (fixture is claude-only).
+	m = press(t, m, "f")
+	for i, item := range m.filterItems {
+		if item.kind == "agent" && item.key == "claude" {
+			m.filterCursor = i
+		}
+	}
+	m = press(t, m, tea.KeySpace, tea.KeyEsc)
+	if len(m.visible) != base {
+		t.Fatalf("claude facet wrong: %d", len(m.visible))
+	}
+}
