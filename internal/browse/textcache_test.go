@@ -171,7 +171,10 @@ func TestContentSearchFindsLostSessions(t *testing.T) {
 	}
 
 	// And it reaches AI candidates, clearly marked.
-	candidates := BuildCandidates(cfg, sessions, "the zephyr billing one")
+	candidates, rawHits := BuildCandidates(cfg, sessions, "the zephyr billing one")
+	if rawHits["lost-1"] != 3 { // zephyr x2 + billing x1
+		t.Fatalf("rawHits = %v", rawHits)
+	}
 	found := false
 	for _, candidate := range candidates {
 		if candidate.ID == "lost-1" {

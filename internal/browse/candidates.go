@@ -29,8 +29,9 @@ const candidateLimit = 30
 // are counted against the text cache, and the best-scoring sessions go to
 // the model with metadata and a matching excerpt. With no word hits at all
 // the most recent sessions go instead, metadata only — the model then works
-// from titles and projects alone.
-func BuildCandidates(cfg config.Config, sessions []Session, query string) []assist.Candidate {
+// from titles and projects alone. The returned counts (raw keyword hits
+// per session) are display-only: they never reach the model.
+func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]assist.Candidate, map[string]int) {
 	refreshTextCache(cfg, sessions)
 	dir := filepath.Join(cfg.BackupRoot, textCacheDir)
 
@@ -113,6 +114,17 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) []assi
 		ranked = ranked[:candidateLimit]
 	}
 
+	rawHits := map[string]int{}
+	for _, entry := range all {
+		total := 0
+		for _, count := range entry.counts {
+			total += count
+		}
+		if total > 0 {
+			rawHits[entry.session.ID] = total
+		}
+	}
+
 	var out []assist.Candidate
 	for _, entry := range ranked {
 		title := entry.session.CustomName
@@ -130,5 +142,5 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) []assi
 			Excerpt:  truncate(entry.excerpt, 200),
 		})
 	}
-	return out
+	return out, rawHits
 }

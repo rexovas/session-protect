@@ -1687,7 +1687,7 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 	cfg, query := m.cfg, m.askInput
 	scope := AllUnder(m.projects, m.root)
 	return m, func() tea.Msg {
-		candidates := BuildCandidates(cfg, scope, query)
+		candidates, rawHits := BuildCandidates(cfg, scope, query)
 		matches, err := assistRank(cfg.Assist, option, query, candidates)
 		if err != nil {
 			return askMsg{backend: option.Label(), err: err}
@@ -1699,7 +1699,7 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 		var hits []Hit
 		for _, match := range matches {
 			if session, ok := byID[match.ID]; ok {
-				hits = append(hits, Hit{Session: session, Snippet: match.Reason})
+				hits = append(hits, Hit{Session: session, Snippet: match.Reason, Count: rawHits[match.ID]})
 			}
 		}
 		return askMsg{hits: hits, backend: option.Label()}
@@ -2002,12 +2002,13 @@ func (m model) hitsView() string {
 		return m.pinBottomBare(b.String(), "esc back · / new search · ctrl+c quit")
 	}
 
-	countHeader := "HITS"
 	if m.hitsMode == "ask" {
-		countHeader = "RANK"
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %4s %6s  %-11s %-*s %-7s %-9s %s",
+			"RANK", "HITS", "STATE", m.titleWidth(), "TITLE", "AGENT", "MODIFIED", "IN")) + "\n")
+	} else {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-11s %-*s %-7s %-9s %s",
+			"HITS", "STATE", m.titleWidth(), "TITLE", "AGENT", "MODIFIED", "IN")) + "\n")
 	}
-	b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-11s %-*s %-7s %-9s %s",
-		countHeader, "STATE", m.titleWidth(), "TITLE", "AGENT", "MODIFIED", "IN")) + "\n")
 	end := min(len(m.hits), m.hOffset+m.pageSize())
 	for i := m.hOffset; i < end; i++ {
 		b.WriteString(m.hitRow(m.hits[i], i, i == m.hCursor) + "\n")
@@ -2032,14 +2033,18 @@ func (m model) hitRow(hit Hit, index int, active bool) string {
 	if title == "" {
 		title = hit.Session.ID
 	}
-	count := hit.Count
-	if m.hitsMode == "ask" {
-		count = index + 1
-	}
 	in := tildePath(hit.Session.ProjectPath)
 	stateLabel, stateStyle := sessionState(hit.Session.State)
-	row := fmt.Sprintf("  %6d  %s %-*s %-7s %-9s %s",
-		count, styleUnless(active, stateStyle, stateLabel),
+	lead := fmt.Sprintf("%6d", hit.Count)
+	if m.hitsMode == "ask" {
+		hitsCell := "-"
+		if hit.Count > 0 {
+			hitsCell = fmt.Sprintf("%d", hit.Count)
+		}
+		lead = fmt.Sprintf("%4d %6s", index+1, hitsCell)
+	}
+	row := fmt.Sprintf("  %s  %s %-*s %-7s %-9s %s",
+		lead, styleUnless(active, stateStyle, stateLabel),
 		m.titleWidth(), truncate(title, m.titleWidth()),
 		hit.Session.Target,
 		ago(hit.Session.Modified),
