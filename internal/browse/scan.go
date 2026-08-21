@@ -209,7 +209,10 @@ func Scan(cfg config.Config) []*Project {
 			}
 			// The original stays lost forever, but its row should say a
 			// reconstruction exists — rescued, not silently still-dead.
-			if into, ok := rebuiltInto[session.ID]; ok && session.State == "LOST" {
+			// The audit log alone is not enough: a deleted rebuild must
+			// not leave a rescued label pointing at nothing, so the
+			// target has to still be present in live or backup.
+			if into, ok := rebuiltInto[session.ID]; ok && session.State == "LOST" && seen[into] {
 				session.RebuiltAs = into
 			}
 		}

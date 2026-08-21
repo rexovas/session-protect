@@ -745,20 +745,27 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 		Time: time.Now(), Action: "reconstruct-ai", Target: "claude",
 		SessionID: rebuilt, From: lost,
 	}})
-	projects := Scan(m.cfg)
-	var found *Session
-	for _, project := range projects {
-		for i := range project.Sessions {
-			if project.Sessions[i].ID == lost {
-				found = &project.Sessions[i]
+	find := func(projects []*Project, id string) *Session {
+		for _, project := range projects {
+			for i := range project.Sessions {
+				if project.Sessions[i].ID == id {
+					return &project.Sessions[i]
+				}
 			}
 		}
+		return nil
 	}
-	if found == nil || found.RebuiltAs != rebuilt {
-		t.Fatalf("lost session not linked: %+v", found)
+
+	// An audit entry whose rebuild no longer exists anywhere must NOT
+	// produce a rescued label pointing at nothing.
+	found := find(Scan(m.cfg), lost)
+	if found == nil || found.RebuiltAs != "" {
+		t.Fatalf("dangling rebuild must not link: %+v", found)
 	}
-	// The reconstruction inherits the original's title — it is absent
-	// from prompt history and must not display as a bare uuid.
+
+	// With the rebuilt transcript on disk the link appears, and the
+	// reconstruction inherits the original's title — it is absent from
+	// prompt history and must not display as a bare uuid.
 	slug := ""
 	for _, c := range found.ProjectPath {
 		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
@@ -776,14 +783,12 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var rebuiltSession *Session
-	for _, project := range Scan(m.cfg) {
-		for i := range project.Sessions {
-			if project.Sessions[i].ID == rebuilt {
-				rebuiltSession = &project.Sessions[i]
-			}
-		}
+	projects := Scan(m.cfg)
+	found = find(projects, lost)
+	if found == nil || found.RebuiltAs != rebuilt {
+		t.Fatalf("lost session not linked: %+v", found)
 	}
+	rebuiltSession := find(projects, rebuilt)
 	if rebuiltSession == nil || rebuiltSession.Title != "the lost one" {
 		t.Fatalf("rebuilt title not inherited: %+v", rebuiltSession)
 	}
