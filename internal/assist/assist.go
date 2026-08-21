@@ -79,6 +79,7 @@ func buildPrompt(query string, candidates []Candidate) string {
 	return fmt.Sprintf(`You are helping a developer find a coding-agent session on their machine.
 They describe a session they half-remember; below are candidate sessions with
 metadata and content excerpts. Pick up to 5 likely matches, best first.
+Weigh last_used when the description implies recency ("yesterday", "recent").
 Respond with ONLY this JSON, no other text:
 {"matches":[{"id":"<session id>","reason":"<one short line why>"}]}
 

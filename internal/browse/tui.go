@@ -1603,8 +1603,8 @@ func (m model) hitsView() string {
 	if m.hitsMode == "ask" {
 		countHeader = "RANK"
 	}
-	b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-*s %-7s %s",
-		countHeader, m.titleWidth(), "TITLE", "AGENT", "IN")) + "\n")
+	b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-*s %-7s %-9s %s",
+		countHeader, m.titleWidth(), "TITLE", "AGENT", "MODIFIED", "IN")) + "\n")
 	end := min(len(m.hits), m.hOffset+m.pageSize())
 	for i := m.hOffset; i < end; i++ {
 		b.WriteString(m.hitRow(m.hits[i], i, i == m.hCursor) + "\n")
@@ -1634,10 +1634,11 @@ func (m model) hitRow(hit Hit, index int, active bool) string {
 		count = index + 1
 	}
 	in := tildePath(hit.Session.ProjectPath)
-	row := fmt.Sprintf("  %6d  %-*s %-7s %s",
+	row := fmt.Sprintf("  %6d  %-*s %-7s %-9s %s",
 		count, m.titleWidth(), truncate(title, m.titleWidth()),
 		hit.Session.Target,
-		styleUnless(active, styleDim, truncate(in, max(10, m.width-m.titleWidth()-22))))
+		ago(hit.Session.Modified),
+		styleUnless(active, styleDim, truncate(in, max(10, m.width-m.titleWidth()-32))))
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}

@@ -1,6 +1,7 @@
 package browse
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,34 +37,69 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) []assi
 	var words []string
 	for _, word := range strings.Fields(strings.ToLower(query)) {
 		word = strings.Trim(word, ".,!?\"'()[]")
+		// Possessives search for the base name: lunny's → lunny.
+		word = strings.TrimSuffix(word, "'s")
+		word = strings.TrimSuffix(word, "’s")
 		if len(word) >= 3 && !stopwords[word] {
 			words = append(words, word)
 		}
 	}
 
-	type scored struct {
+	// Two passes: count per word per session, then score with inverse
+	// document frequency so a rare discriminating term (a name, a
+	// project word) outweighs floods of generic vocabulary.
+	type counted struct {
 		session Session
-		score   int
-		excerpt string
+		counts  []int
+		text    string
+		lower   string
 	}
-	var ranked []scored
+	var all []counted
+	df := make([]int, len(words))
 	for _, session := range sessions {
 		if session.State == "LOST" {
 			continue
 		}
-		entry := scored{session: session}
+		entry := counted{session: session, counts: make([]int, len(words))}
 		if data, err := os.ReadFile(filepath.Join(dir, session.ID+".txt")); err == nil && len(data) > 0 {
-			text := string(data)
-			lower := strings.ToLower(text)
-			for _, word := range words {
-				count := strings.Count(lower, word)
-				entry.score += count
-				if count > 0 && entry.excerpt == "" {
-					entry.excerpt = snippetAround(text, lower, word)
+			entry.text = string(data)
+			entry.lower = strings.ToLower(entry.text)
+			for i, word := range words {
+				entry.counts[i] = strings.Count(entry.lower, word)
+				if entry.counts[i] > 0 {
+					df[i]++
 				}
 			}
 		}
-		ranked = append(ranked, entry)
+		all = append(all, entry)
+	}
+	idf := make([]float64, len(words))
+	for i := range words {
+		idf[i] = math.Log(1 + float64(len(all))/float64(1+df[i]))
+	}
+
+	type scored struct {
+		session Session
+		score   float64
+		excerpt string
+	}
+	var ranked []scored
+	for _, entry := range all {
+		item := scored{session: entry.session}
+		bestIDF := 0.0
+		for i := range words {
+			if entry.counts[i] == 0 {
+				continue
+			}
+			item.score += float64(entry.counts[i]) * idf[i]
+			// The excerpt comes from the rarest matched word — the one
+			// that most likely names what the user remembers.
+			if idf[i] > bestIDF {
+				bestIDF = idf[i]
+				item.excerpt = snippetAround(entry.text, entry.lower, words[i])
+			}
+		}
+		ranked = append(ranked, item)
 	}
 	sort.Slice(ranked, func(i, j int) bool {
 		if ranked[i].score != ranked[j].score {
