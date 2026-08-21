@@ -733,3 +733,43 @@ func TestFacetFilterFlow(t *testing.T) {
 		t.Fatalf("claude facet wrong: %d", len(m.visible))
 	}
 }
+
+func TestInspectorActsOnSession(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab) // app sessions
+
+	// o from the inspector: closed session → resume dialog for THAT session.
+	m = press(t, m, "i")
+	if m.detail == nil {
+		t.Fatal("inspector did not open")
+	}
+	inspected := m.detail.ID
+	m = press(t, m, "o")
+	if m.detail != nil {
+		t.Fatal("o should close the inspector")
+	}
+	if m.confirmResume == nil || m.confirmResume.ID != inspected {
+		t.Fatalf("resume dialog session = %v, want %s", m.confirmResume, inspected)
+	}
+	m = press(t, m, tea.KeyEsc)
+
+	// r from the inspector on a lost session → rescue dialog.
+	m = press(t, m, "x") // reveal lost
+	for i, s := range m.visible {
+		if s.State == "LOST" {
+			m.sCursor = i
+		}
+	}
+	m = press(t, m, "i")
+	if m.detail == nil || m.detail.State != "LOST" {
+		t.Fatal("inspector should open on the lost session")
+	}
+	lostID := m.detail.ID
+	m = press(t, m, "r")
+	if m.detail != nil {
+		t.Fatal("r should close the inspector")
+	}
+	if m.confirmRescue == nil || m.confirmRescue.ID != lostID {
+		t.Fatalf("rescue dialog session = %v, want %s", m.confirmRescue, lostID)
+	}
+}

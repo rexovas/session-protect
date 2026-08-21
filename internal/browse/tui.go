@@ -729,6 +729,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "o", "r":
+			session := *m.detail
+			m.detail = nil
+			m.detailTab, m.tailOffset = 0, 0
+			m.tailLines = nil
+			if msg.String() == "r" {
+				return m.pressRescue(session), nil
+			}
+			return m.pressOpen(session), nil
 		case "i", "esc", "q":
 			m.detail = nil
 			m.detailTab, m.tailOffset = 0, 0
@@ -1130,15 +1139,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		(&m).openDetail()
 	case "r":
 		if session := m.selectedSession(); session != nil {
-			copied := *session
-			switch session.State {
-			case "MISSING_SOURCE":
-				m.confirmRestore = &copied
-				m.confirmSel = 1
-			case "LOST":
-				m.confirmRescue = &copied
-				m.confirmSel = len(m.rescueButtons(copied)) - 1
-			}
+			m = m.pressRescue(*session)
 		}
 	case "ctrl+r":
 		m.scanning = true
@@ -1192,31 +1193,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session == nil {
 			break
 		}
-		switch {
-		case session.LiveStatus != "" && session.LivePID > 0:
-			// Open somewhere: jump to its window.
-			if err := focusSession(session.LivePID); err != nil {
-				m.noticeErr = true
-				if errors.Is(err, focus.ErrNotAuthorized) {
-					focus.OpenAutomationSettings()
-					m.notice = "macOS blocked the jump — in the Settings pane just opened, " +
-						"enable your terminal under Automation, then press o again"
-				} else {
-					m.notice = "jump failed: " + err.Error()
-				}
-			} else {
-				m.notice = "brought the session's window to the front"
-			}
-		case session.State == "LOST":
-			m.notice, m.noticeErr = "lost sessions have no transcript to resume", true
-		case session.SourcePath == "":
-			m.notice, m.noticeErr = "backup-only session — restore it first (r), then resume", true
-		default:
-			// Closed: confirm before spawning a window to resume it.
-			copied := *session
-			m.confirmResume = &copied
-			m.confirmSel = 2
-		}
+		m = m.pressOpen(*session)
 	case "t":
 		if m.showSessions || m.showAll || m.showHits {
 			session := m.selectedSession()
@@ -1288,6 +1265,50 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.goUp()
 	}
 	return m, nil
+}
+
+// pressRescue opens the restore or rescue dialog for a session — the r key,
+// shared by the list and the inspector.
+func (m model) pressRescue(session Session) model {
+	switch session.State {
+	case "MISSING_SOURCE":
+		m.confirmRestore = &session
+		m.confirmSel = 1
+	case "LOST":
+		m.confirmRescue = &session
+		m.confirmSel = len(m.rescueButtons(session)) - 1
+	}
+	return m
+}
+
+// pressOpen jumps to a live session or offers to resume a closed one — the
+// o key, shared by the list and the inspector.
+func (m model) pressOpen(session Session) model {
+	switch {
+	case session.LiveStatus != "" && session.LivePID > 0:
+		// Open somewhere: jump to its window.
+		if err := focusSession(session.LivePID); err != nil {
+			m.noticeErr = true
+			if errors.Is(err, focus.ErrNotAuthorized) {
+				focus.OpenAutomationSettings()
+				m.notice = "macOS blocked the jump — in the Settings pane just opened, " +
+					"enable your terminal under Automation, then press o again"
+			} else {
+				m.notice = "jump failed: " + err.Error()
+			}
+		} else {
+			m.notice = "brought the session's window to the front"
+		}
+	case session.State == "LOST":
+		m.notice, m.noticeErr = "lost sessions have no transcript to resume", true
+	case session.SourcePath == "":
+		m.notice, m.noticeErr = "backup-only session — restore it first (r), then resume", true
+	default:
+		// Closed: confirm before spawning a window to resume it.
+		m.confirmResume = &session
+		m.confirmSel = 2
+	}
+	return m
 }
 
 func (m model) selectedSession() *Session {
@@ -2245,13 +2266,13 @@ func (m model) detailView() string {
 	switch m.detailTab {
 	case 1:
 		m.usageTab(&b)
-		return m.pinBottomBare(b.String(), "tab switch · i/esc close · ctrl+c quit")
+		return m.pinBottomBare(b.String(), "o open · r rescue · tab switch · i/esc close")
 	case 2:
 		m.renderTail(&b, max(4, m.height-6))
-		return m.pinBottomBare(b.String(), "↑/↓/wheel scroll · tab switch · i/esc close")
+		return m.pinBottomBare(b.String(), "↑/↓ scroll · o open · r rescue · tab switch · i/esc close")
 	}
 	m.overviewTab(&b, session)
-	return m.pinBottomBare(b.String(), "tab switch · i/esc close · ctrl+c quit")
+	return m.pinBottomBare(b.String(), "o open · r rescue · tab switch · i/esc close")
 }
 
 func (m model) overviewTab(b *strings.Builder, session Session) {
