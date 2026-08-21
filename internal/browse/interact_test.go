@@ -578,10 +578,15 @@ func TestRescueDialogFlow(t *testing.T) {
 		t.Fatalf("rescue dialog state: %v sel=%d", m.confirmRescue != nil, m.confirmSel)
 	}
 	view := m.View()
-	for _, want := range []string{"Rescue lost session?", "Rebuild", "Rebuild with AI", "Export prompts", "Cancel", "the lost one"} {
+	for _, want := range []string{"Rescue lost session?", "Rebuild", "Rebuild with AI", "Export prompts", "Cancel", "the lost one",
+		"without touching anything"} { // Cancel is highlighted: its description shows
 		if !strings.Contains(view, want) {
 			t.Fatalf("rescue dialog missing %q", want)
 		}
+	}
+	// The description follows the highlight.
+	if view := press(t, m, tea.KeyLeft).View(); !strings.Contains(view, "markdown file") {
+		t.Fatal("highlighting Export did not switch the description")
 	}
 
 	// Reflexive enter = Cancel.

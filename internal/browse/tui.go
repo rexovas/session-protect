@@ -1586,26 +1586,37 @@ func (m model) View() string {
 		if title == "" {
 			title = session.ID
 		}
-		explain := func(label string, text string) string {
-			return styleBold.Render(fmt.Sprintf("%-16s", label)) + styleDim.Render(text)
+		// The description follows the highlighted button; both lines are
+		// always present so the dialog never changes height.
+		describe := map[string][2]string{
+			"Rebuild": {
+				"creates a NEW resumable session from your prompts; lost responses",
+				"appear as [response lost] — the original stays marked lost",
+			},
+			"Rebuild with AI": {
+				"rebuilds the session AND adds a model-written brief of where the",
+				"work stood — you pick the model; the original stays marked lost",
+			},
+			"Export prompts": {
+				"writes the surviving prompts to a markdown file you can keep",
+				"anywhere — re-runnable; the original stays marked lost",
+			},
+			"Cancel": {
+				"closes this dialog without touching anything",
+				"",
+			},
 		}
+		labels := m.rescueButtons(session)
+		desc := describe[labels[min(m.confirmSel, len(labels)-1)]]
 		body := []string{
 			styleDim.Render("✕ ") + truncate(title, 68),
 			styleDim.Render(fmt.Sprintf("%d prompt(s) survive in the agent's history; the transcript is gone", session.Prompts)),
 			"",
-			explain("Rebuild", "new resumable session; lost responses show [response lost]"),
-			explain("Rebuild with AI", "the same, plus a model-written brief of where the work stood"),
-			explain("Export prompts", "write the surviving prompts to a markdown file"),
-			"",
-			styleDim.Render("each asks where to write — the original always stays marked lost"),
+			styleDim.Render(desc[0]),
+			styleDim.Render(desc[1]),
+			styleDim.Render("(each action then asks where to write)"),
 		}
-		if session.Target != "claude" {
-			body = append(body[:3],
-				explain("Export prompts", "write the surviving prompts to a markdown file"),
-				"",
-				styleDim.Render("codex sessions can't be rebuilt yet — the original stays marked lost"))
-		}
-		return m.dialog("Rescue lost session?", body, m.rescueButtons(session)...)
+		return m.dialog("Rescue lost session?", body, labels...)
 	}
 	if m.confirmRestore != nil {
 		session := *m.confirmRestore
