@@ -2,6 +2,7 @@ package assist
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -140,5 +141,41 @@ func TestDetectAbsentEverything(t *testing.T) {
 	}
 	if Detect(config.Assist{Backend: "auto", URL: "http://127.0.0.1:1"}) != nil {
 		t.Fatal("auto with nothing available must be nil")
+	}
+}
+
+func TestAvailableModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"models":[{"name":"qwen3:8b"},{"name":"llama3.2:3b"}]}`)
+	}))
+	defer server.Close()
+
+	// Claude present via stub: sonnet leads, then aliases, then ollama.
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/claude", []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	options := AvailableModels(config.Assist{Backend: "auto", URL: server.URL})
+	if len(options) != 5 {
+		t.Fatalf("options = %v", options)
+	}
+	if options[0].Label() != "sonnet · claude" {
+		t.Fatalf("default head = %s", options[0].Label())
+	}
+	if options[3].Backend != "ollama" || options[3].Model != "qwen3:8b" {
+		t.Fatalf("ollama models missing: %v", options)
+	}
+
+	// claude_model changes the head.
+	options = AvailableModels(config.Assist{Backend: "claude", ClaudeModel: "haiku"})
+	if options[0].Label() != "haiku · claude" || len(options) != 3 {
+		t.Fatalf("custom head: %v", options)
+	}
+
+	// none disables everything.
+	if got := AvailableModels(config.Assist{Backend: "none"}); got != nil {
+		t.Fatalf("backend none should yield nothing: %v", got)
 	}
 }

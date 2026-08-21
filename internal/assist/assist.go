@@ -44,6 +44,100 @@ type Backend interface {
 	Rank(query string, candidates []Candidate) ([]Match, error)
 }
 
+// ModelOption is one selectable model across the locally available
+// backends.
+type ModelOption struct {
+	Backend string // ollama | claude
+	Model   string
+}
+
+// Label renders the option for display.
+func (o ModelOption) Label() string {
+	return o.Model + " · " + o.Backend
+}
+
+// AvailableModels probes what can answer locally: claude CLI aliases
+// (default head first) and every installed ollama model. Empty means
+// the feature is unavailable.
+func AvailableModels(cfg config.Assist) []ModelOption {
+	url := cfg.URL
+	if url == "" {
+		url = "http://localhost:11434"
+	}
+	var options []ModelOption
+	claudeOK := false
+	if cfg.Backend != "none" && cfg.Backend != "ollama" {
+		if _, err := exec.LookPath("claude"); err == nil {
+			claudeOK = true
+			head := cfg.ClaudeModel
+			if head == "" {
+				head = "sonnet"
+			}
+			options = append(options, ModelOption{Backend: "claude", Model: head})
+			for _, alias := range []string{"sonnet", "opus", "haiku"} {
+				if alias != head {
+					options = append(options, ModelOption{Backend: "claude", Model: alias})
+				}
+			}
+		}
+	}
+	if cfg.Backend != "none" && cfg.Backend != "claude" {
+		for _, model := range listOllamaModels(url) {
+			options = append(options, ModelOption{Backend: "ollama", Model: model})
+		}
+	}
+	// Ollama-only setups still get a configured default at the head.
+	if !claudeOK && len(options) > 0 && cfg.Model != "" {
+		for i, option := range options {
+			if option.Model == cfg.Model {
+				options[0], options[i] = options[i], options[0]
+			}
+		}
+	}
+	return options
+}
+
+// RankWith runs the query against an explicit model choice.
+func RankWith(cfg config.Assist, option ModelOption, query string, candidates []Candidate) ([]Match, error) {
+	url := cfg.URL
+	if url == "" {
+		url = "http://localhost:11434"
+	}
+	switch option.Backend {
+	case "ollama":
+		backend := &ollamaBackend{url: url, model: option.Model}
+		return backend.Rank(query, candidates)
+	case "claude":
+		backend := &claudeBackend{model: option.Model}
+		return backend.Rank(query, candidates)
+	}
+	return nil, fmt.Errorf("unknown backend %q", option.Backend)
+}
+
+// listOllamaModels returns the installed model names, or nothing when
+// the server is unreachable.
+func listOllamaModels(url string) []string {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url + "/api/tags")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var tags struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil
+	}
+	var names []string
+	for _, model := range tags.Models {
+		names = append(names, model.Name)
+	}
+	return names
+}
+
 // Detect resolves the configured backend, probing availability for auto.
 // nil means the feature is unavailable (or configured off).
 func Detect(cfg config.Assist) Backend {

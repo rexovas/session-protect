@@ -74,10 +74,12 @@ type model struct {
 	tpBusy         bool
 
 	// AI find (ctrl+g) is its own page: a free-text prompt that queries
-	// on enter. askInput persists so a follow-up refines the last ask.
-	showAsk    bool
-	askInput   string
-	askBackend string
+	// on enter; ←/→ pick the answering model. askInput persists so a
+	// follow-up refines the last ask.
+	showAsk   bool
+	askInput  string
+	askModels []assist.ModelOption
+	askModel  int
 
 	// Content search (ctrl+s on a query) counts transcript hits per
 	// session under the current root and shows them as their own pane.
@@ -168,6 +170,12 @@ var (
 var (
 	rescueExport      = rescue.Export
 	rescueReconstruct = rescue.Reconstruct
+)
+
+// Assist plumbing, seam-injected for tests.
+var (
+	assistModels = assist.AvailableModels
+	assistRank   = assist.RankWith
 )
 
 type rescanMsg []*Project
@@ -715,6 +723,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "left":
+			if n := len(m.askModels); n > 0 {
+				m.askModel = (m.askModel + n - 1) % n
+			}
+		case "right", "tab":
+			if n := len(m.askModels); n > 0 {
+				m.askModel = (m.askModel + 1) % n
+			}
 		case "esc", "ctrl+g":
 			m.showAsk = false
 		case "enter":
@@ -1295,13 +1311,15 @@ func (m model) fireTransplant() (tea.Model, tea.Cmd) {
 // filter query when the prompt is empty. The backend is probed once here,
 // never per frame.
 func (m model) openAsk() (tea.Model, tea.Cmd) {
-	backend := assist.Detect(m.cfg.Assist)
-	if backend == nil {
+	m.askModels = assistModels(m.cfg.Assist)
+	if len(m.askModels) == 0 {
 		m.notice = "ai find needs ollama running or the claude CLI on PATH (assist.backend in config)"
 		m.noticeErr = true
 		return m, nil
 	}
-	m.askBackend = backend.Name()
+	if m.askModel >= len(m.askModels) {
+		m.askModel = 0
+	}
 	if m.askInput == "" {
 		m.askInput = m.query
 	}
@@ -1309,15 +1327,13 @@ func (m model) openAsk() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// fireAsk asks the configured local model which sessions match the
+// fireAsk asks the chosen local model which sessions match the
 // description, grounded on keyword-scored candidates with excerpts.
 func (m model) fireAsk() (tea.Model, tea.Cmd) {
-	backend := assist.Detect(m.cfg.Assist)
-	if backend == nil {
-		m.notice = "ai find needs ollama running or the claude CLI on PATH (assist.backend in config)"
-		m.noticeErr = true
+	if len(m.askModels) == 0 {
 		return m, nil
 	}
+	option := m.askModels[m.askModel]
 	m.hitsBusy = true
 	m.hitsMode = "ask"
 	m.hitsQuery = m.askInput
@@ -1325,9 +1341,9 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 	scope := AllUnder(m.projects, m.root)
 	return m, func() tea.Msg {
 		candidates := BuildCandidates(cfg, scope, query)
-		matches, err := backend.Rank(query, candidates)
+		matches, err := assistRank(cfg.Assist, option, query, candidates)
 		if err != nil {
-			return askMsg{backend: backend.Name(), err: err}
+			return askMsg{backend: option.Label(), err: err}
 		}
 		byID := map[string]Session{}
 		for _, session := range scope {
@@ -1339,7 +1355,7 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 				hits = append(hits, Hit{Session: session, Snippet: match.Reason})
 			}
 		}
-		return askMsg{hits: hits, backend: backend.Name()}
+		return askMsg{hits: hits, backend: option.Label()}
 	}
 }
 
@@ -1561,8 +1577,7 @@ func (m model) transplantView() string {
 // asks the configured backend.
 func (m model) askView() string {
 	var b strings.Builder
-	b.WriteString(styleHeader.Render("Session Explorer ▸ ai find") +
-		styleDim.Render("  backend: "+m.askBackend+" ") + "\n")
+	b.WriteString(styleHeader.Render("Session Explorer ▸ ai find") + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n\n")
 
 	b.WriteString(styleDim.Render(" describe the session you're looking for — project names, topics,"+
@@ -1572,9 +1587,17 @@ func (m model) askView() string {
 	prompt := m.askInput + "▌"
 	b.WriteString(detailBox(width).Render(styleActive.Render("❯ ")+
 		strings.Join(wrapPreserve(prompt, inner, 8), "\n  ")) + "\n")
+	if len(m.askModels) > 0 {
+		selector := " model  " + styleDim.Render("‹ ") +
+			styleBold.Render(m.askModels[m.askModel].Label()) + styleDim.Render(" ›")
+		if len(m.askModels) > 1 {
+			selector += styleDim.Render(fmt.Sprintf("   ←/→ change (%d available)", len(m.askModels)))
+		}
+		b.WriteString(selector + "\n")
+	}
 	b.WriteString(styleDim.Render(" matches are grounded in your transcripts and ranked with a short"+
 		" reason each") + "\n")
-	return m.pinBottomBare(b.String(), "enter ask · esc close")
+	return m.pinBottomBare(b.String(), "enter ask · ←/→ model · esc close")
 }
 
 // hitsView lists content-search results ranked by hit count; the

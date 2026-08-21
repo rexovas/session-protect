@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/rexovas/session-protect/internal/assist"
 	"github.com/rexovas/session-protect/internal/config"
 )
 
@@ -277,28 +278,63 @@ func TestHitsPaneLifecycle(t *testing.T) {
 
 func TestAskPageLifecycle(t *testing.T) {
 	m := buildEnv(t)
-	// No backend reachable: notice, no page.
-	t.Setenv("PATH", t.TempDir())
-	m.cfg.Assist = config.Assist{Backend: "auto", URL: "http://127.0.0.1:1"}
+	// No models available: notice, no page.
+	assistModels = func(config.Assist) []assist.ModelOption { return nil }
 	m = press(t, m, tea.KeyCtrlG)
 	if m.showAsk || m.notice == "" {
 		t.Fatal("missing backend should notice, not open")
 	}
-	// Explicit ollama config opens without probing.
-	m.cfg.Assist = config.Assist{Backend: "ollama", URL: "http://127.0.0.1:1"}
+
+	assistModels = func(config.Assist) []assist.ModelOption {
+		return []assist.ModelOption{
+			{Backend: "claude", Model: "sonnet"},
+			{Backend: "claude", Model: "opus"},
+			{Backend: "ollama", Model: "qwen3:8b"},
+		}
+	}
+	defer func() { assistModels = assist.AvailableModels }()
 	m.notice = ""
 	m = press(t, m, tea.KeyCtrlG)
-	if !m.showAsk || m.askBackend != "ollama" {
-		t.Fatalf("ask page state: %v %q", m.showAsk, m.askBackend)
+	if !m.showAsk || m.askModel != 0 {
+		t.Fatalf("ask page state: %v %d", m.showAsk, m.askModel)
+	}
+	if view := m.View(); !strings.Contains(view, "sonnet · claude") || !strings.Contains(view, "3 available") {
+		t.Fatal("model selector missing")
+	}
+	// ←/→ cycle the model, typing still works.
+	m = press(t, m, tea.KeyRight)
+	if m.askModel != 1 {
+		t.Fatalf("askModel = %d", m.askModel)
+	}
+	if view := m.View(); !strings.Contains(view, "opus · claude") {
+		t.Fatal("selector did not advance")
+	}
+	m = press(t, m, tea.KeyLeft, tea.KeyLeft)
+	if m.askModel != 2 {
+		t.Fatalf("wraparound failed: %d", m.askModel)
 	}
 	m = press(t, m, "h", "i", tea.KeySpace, "x")
 	if m.askInput != "hi x" {
 		t.Fatalf("askInput = %q", m.askInput)
 	}
-	if view := m.View(); !strings.Contains(view, "ai find") || !strings.Contains(view, "hi x") {
-		t.Fatal("ask view missing input")
+
+	// Submit routes through the chosen option.
+	var chosen []string
+	assistRank = func(_ config.Assist, opt assist.ModelOption, _ string, _ []assist.Candidate) ([]assist.Match, error) {
+		chosen = append(chosen, opt.Label())
+		return nil, nil
 	}
-	m = press(t, m, tea.KeyEsc)
+	defer func() { assistRank = assist.RankWith }()
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if cmd == nil {
+		t.Fatal("enter did not fire")
+	}
+	_ = cmd()
+	if len(chosen) != 1 || chosen[0] != "qwen3:8b · ollama" {
+		t.Fatalf("chosen = %v", chosen)
+	}
+	m = press(t, m, tea.KeyCtrlG, tea.KeyEsc)
 	if m.showAsk {
 		t.Fatal("esc did not close the ask page")
 	}
