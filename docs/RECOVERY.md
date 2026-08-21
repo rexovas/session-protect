@@ -65,7 +65,26 @@ material for a doc, whatever you need.
 - Responses are *not* recovered (they are gone) and *not* invented —
   the placeholders are honest.
 
-Afterward: open the rebuilt session with `o` and the agent resumes with
+## Rescue tier 3 — Rebuild with AI (claude)
+
+**Rebuild with AI** goes one step further: a model of your choice
+(↑/↓ selects — claude aliases with opus as the default, or any
+installed ollama model) reads the full prompt sequence and writes a
+*reconstruction brief* — the session's inferred goal, the arc of the
+work, decisions the prompts imply, and the open threads — which becomes
+the final message of the new session.
+
+Deliberately, the model does **not** fabricate per-turn responses:
+invented specifics dressed as history would poison every future resume.
+The brief is orientation, explicitly hedged, and clearly marked with
+the model that wrote it (`[AI-reconstructed context — inferred … by
+opus · claude; the original responses were lost and are NOT
+recovered]`). The audit records which model was used.
+
+Both rebuild flavors mint independent sessions — you can run each on
+the same lost session and keep whichever resumes better.
+
+Afterward: open a rebuilt session with `o` and the agent resumes with
 your full prompt history as context, aware it's a reconstruction. The
 original stays marked `✕ lost` forever, and the audit log links the two.
 

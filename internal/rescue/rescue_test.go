@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rexovas/session-protect/internal/assist"
 	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/targets"
@@ -169,5 +170,64 @@ func TestReconstructBuildsResumableSession(t *testing.T) {
 	secondID, _, err := Reconstruct(cfg, lostID, "")
 	if err != nil || secondID == newID {
 		t.Fatalf("second reconstruct: %q %v", secondID, err)
+	}
+}
+
+func TestReconstructAI(t *testing.T) {
+	cfg, project := setup(t)
+	var got string
+	complete = func(_ config.Assist, option assist.ModelOption, prompt string) (string, error) {
+		got = prompt
+		return "The prompts suggest a billing-webhook build with retry logic.\nOpen thread: signature tests.", nil
+	}
+	t.Cleanup(func() { complete = assist.Complete })
+
+	option := assist.ModelOption{Backend: "claude", Model: "opus"}
+	newID, path, err := ReconstructAI(cfg, option, lostID, "billing webhooks work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"billing webhooks", "exponential backoff", "signature check", project} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("synthesis prompt missing %q", want)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "AI-reconstructed context") || !strings.Contains(text, "opus · claude") {
+		t.Fatal("brief not marked with model provenance")
+	}
+	if !strings.Contains(text, "billing-webhook build with retry logic") {
+		t.Fatal("brief content missing")
+	}
+	if !strings.Contains(text, "NOT recovered") {
+		t.Fatal("honesty marker missing")
+	}
+
+	var sawAI bool
+	for _, entry := range audit.Read(cfg.BackupRoot) {
+		if entry.Action == "reconstruct-ai" && entry.SessionID == newID && entry.From == lostID && entry.Detail == "opus · claude" {
+			sawAI = true
+		}
+	}
+	if !sawAI {
+		t.Fatal("reconstruct-ai audit entry missing")
+	}
+
+	// Model failure must not leave any file behind.
+	complete = func(config.Assist, assist.ModelOption, string) (string, error) {
+		return "", fmt.Errorf("model unavailable")
+	}
+	before, _ := os.ReadDir(filepath.Dir(path))
+	if _, _, err := ReconstructAI(cfg, option, lostID, ""); err == nil {
+		t.Fatal("model failure must propagate")
+	}
+	after, _ := os.ReadDir(filepath.Dir(path))
+	if len(after) != len(before) {
+		t.Fatal("failed AI rebuild left a file behind")
 	}
 }

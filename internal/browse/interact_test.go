@@ -571,11 +571,11 @@ func TestRescueDialogFlow(t *testing.T) {
 	defer func() { rescueReconstruct = nil; rescueExport = nil }()
 
 	m = press(t, m, "r")
-	if m.confirmRescue == nil || m.confirmSel != 2 {
+	if m.confirmRescue == nil || m.confirmSel != 3 {
 		t.Fatalf("rescue dialog state: %v sel=%d", m.confirmRescue != nil, m.confirmSel)
 	}
 	view := m.View()
-	for _, want := range []string{"Rescue lost session?", "Rebuild", "Export prompts", "Cancel", "the lost one"} {
+	for _, want := range []string{"Rescue lost session?", "Rebuild", "Rebuild with AI", "Export prompts", "Cancel", "the lost one"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("rescue dialog missing %q", want)
 		}
@@ -596,8 +596,8 @@ func TestRescueDialogFlow(t *testing.T) {
 		t.Fatalf("notice = %q", m.notice)
 	}
 
-	// Rebuild path.
-	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
+	// Rebuild path (mechanical): three lefts from Cancel.
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
 	if len(rebuilt) != 1 || rebuilt[0] != "cccc3333-0000-0000-0000-000000000003" {
 		t.Fatalf("rebuilt = %v", rebuilt)
 	}
@@ -618,5 +618,66 @@ func TestOrphanedFolderMarker(t *testing.T) {
 	}
 	if view := m.View(); !strings.Contains(view, "⌂!") {
 		t.Fatal("orphan marker missing from folder row")
+	}
+}
+
+func TestRescueAIFlow(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab, "x")
+	for i, s := range m.visible {
+		if s.State == "LOST" {
+			m.sCursor = i
+		}
+	}
+	assistModels = func(config.Assist) []assist.ModelOption {
+		return []assist.ModelOption{
+			{Backend: "claude", Model: "sonnet"},
+			{Backend: "claude", Model: "opus"},
+		}
+	}
+	var used []string
+	rescueReconstructAI = func(_ config.Config, opt assist.ModelOption, id string, _ string) (string, string, error) {
+		used = append(used, opt.Label()+" for "+id)
+		return "abcd1234-0000-4000-8000-000000000000", "/fake.jsonl", nil
+	}
+	defer func() { assistModels = assist.AvailableModels; rescueReconstructAI = nil }()
+
+	// r → arrow to "Rebuild with AI" (index 1 of 4; Cancel=3 default).
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
+	if m.rescueAI == nil {
+		t.Fatal("AI stage did not open")
+	}
+	if m.rescueModels[m.rescueModel].Model != "opus" {
+		t.Fatalf("opus not default: %v", m.rescueModels[m.rescueModel])
+	}
+	view := m.View()
+	for _, want := range []string{"Rebuild with AI?", "opus · claude", "NOT recovered"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("AI dialog missing %q", want)
+		}
+	}
+	// ↑/↓ changes model; Cancel default guards enter.
+	m = press(t, m, tea.KeyDown)
+	if m.rescueModels[m.rescueModel].Model != "sonnet" {
+		t.Fatal("model cycle failed")
+	}
+	m = press(t, m, tea.KeyUp, tea.KeyEnter)
+	if m.rescueAI != nil || len(used) != 0 {
+		t.Fatal("enter on Cancel acted")
+	}
+	// Full accept.
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter, tea.KeyLeft)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if !m.rescueBusy || cmd == nil {
+		t.Fatal("accept did not start synthesis")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	if len(used) != 1 || !strings.Contains(used[0], "opus · claude for cccc3333") {
+		t.Fatalf("used = %v", used)
+	}
+	if !strings.Contains(m.notice, "rebuilt with AI as abcd1234") {
+		t.Fatalf("notice = %q", m.notice)
 	}
 }

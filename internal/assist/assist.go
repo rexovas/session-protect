@@ -253,23 +253,31 @@ func (b *ollamaBackend) resolveModel() (string, error) {
 }
 
 func (b *ollamaBackend) Rank(query string, candidates []Candidate) ([]Match, error) {
-	model, err := b.resolveModel()
+	out, err := b.complete(buildPrompt(query, candidates))
 	if err != nil {
 		return nil, err
+	}
+	return parseMatches(out, candidates)
+}
+
+func (b *ollamaBackend) complete(prompt string) (string, error) {
+	model, err := b.resolveModel()
+	if err != nil {
+		return "", err
 	}
 	body, _ := json.Marshal(map[string]any{
 		"model":  model,
 		"stream": false,
 		"messages": []map[string]string{
-			{"role": "user", "content": buildPrompt(query, candidates)},
+			{"role": "user", "content": prompt},
 		},
 		"options": map[string]any{"temperature": 0},
 	})
 	// First use of a model includes load time; be generous.
-	client := &http.Client{Timeout: 180 * time.Second}
+	client := &http.Client{Timeout: 300 * time.Second}
 	resp, err := client.Post(b.url+"/api/chat", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("ollama: %w", err)
+		return "", fmt.Errorf("ollama: %w", err)
 	}
 	defer resp.Body.Close()
 	var reply struct {
@@ -279,12 +287,12 @@ func (b *ollamaBackend) Rank(query string, candidates []Candidate) ([]Match, err
 		Error string `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
-		return nil, fmt.Errorf("ollama response: %w", err)
+		return "", fmt.Errorf("ollama response: %w", err)
 	}
 	if reply.Error != "" {
-		return nil, fmt.Errorf("ollama: %s", reply.Error)
+		return "", fmt.Errorf("ollama: %s", reply.Error)
 	}
-	return parseMatches(reply.Message.Content, candidates)
+	return reply.Message.Content, nil
 }
 
 // --- claude: headless CLI on the user's own subscription ---
@@ -296,23 +304,29 @@ type claudeBackend struct {
 func (b *claudeBackend) Name() string { return "claude" }
 
 func (b *claudeBackend) Rank(query string, candidates []Candidate) ([]Match, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-
 	model := b.model
 	if model == "" {
 		// Ranking a candidate list needs a capable-but-cheap model —
 		// never the user's (possibly premium) default.
 		model = "sonnet"
 	}
-
-	// Run in a throwaway working directory so the helper session never
-	// appears in any real project, then remove the transcript claude
-	// persists for it. Headless runs write no prompt history, so this
-	// leaves zero traces.
-	scratch, err := os.MkdirTemp("", "sp-assist-")
+	out, err := claudeComplete(model, buildPrompt(query, candidates), 120*time.Second)
 	if err != nil {
 		return nil, err
+	}
+	return parseMatches(out, candidates)
+}
+
+// claudeComplete runs one headless turn with full hygiene: pinned model,
+// throwaway working directory, persisted transcript removed after.
+// Headless runs write no prompt history, so this leaves zero traces.
+func claudeComplete(model string, prompt string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	scratch, err := os.MkdirTemp("", "sp-assist-")
+	if err != nil {
+		return "", err
 	}
 	defer os.RemoveAll(scratch)
 	if resolved, err := filepath.EvalSymlinks(scratch); err == nil {
@@ -320,11 +334,28 @@ func (b *claudeBackend) Rank(query string, candidates []Candidate) ([]Match, err
 	}
 	defer os.RemoveAll(filepath.Join(targets.DetectClaude().Source, "projects", targets.ClaudeSlug(scratch)))
 
-	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", model, "--max-turns", "1", buildPrompt(query, candidates))
+	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", model, "--max-turns", "1", prompt)
 	cmd.Dir = scratch
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("claude CLI: %w", err)
+		return "", fmt.Errorf("claude CLI: %w", err)
 	}
-	return parseMatches(string(out), candidates)
+	return string(out), nil
+}
+
+// Complete runs a free-form single-turn prompt against an explicit model
+// choice and returns the raw text.
+func Complete(cfg config.Assist, option ModelOption, prompt string) (string, error) {
+	switch option.Backend {
+	case "claude":
+		return claudeComplete(option.Model, prompt, 300*time.Second)
+	case "ollama":
+		url := cfg.URL
+		if url == "" {
+			url = "http://localhost:11434"
+		}
+		backend := &ollamaBackend{url: url, model: option.Model}
+		return backend.complete(prompt)
+	}
+	return "", fmt.Errorf("unknown backend %q", option.Backend)
 }

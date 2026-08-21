@@ -127,7 +127,12 @@ type model struct {
 	confirmRestore *Session
 	confirmResume  *Session
 	confirmRescue  *Session // a ✕ lost session offered export/rebuild
-	confirmSel     int      // dialog button index; always starts on Cancel
+	// The AI-rebuild stage: model choice (opus-first) before synthesis.
+	rescueAI     *Session
+	rescueModels []assist.ModelOption
+	rescueModel  int
+	rescueBusy   bool
+	confirmSel   int // dialog button index; always starts on Cancel
 
 	// A newer release triggers a launch-time offer; accepting swaps the
 	// binary and relaunches into it.
@@ -168,8 +173,9 @@ var (
 
 // Rescue actions, seam-injected for tests.
 var (
-	rescueExport      = rescue.Export
-	rescueReconstruct = rescue.Reconstruct
+	rescueExport        = rescue.Export
+	rescueReconstruct   = rescue.Reconstruct
+	rescueReconstructAI = rescue.ReconstructAI
 )
 
 // Assist plumbing, seam-injected for tests.
@@ -194,6 +200,11 @@ type transplantMsg struct {
 	moved  int
 	target string
 	copied bool
+}
+
+type rescueAIMsg struct {
+	newID string
+	err   error
 }
 
 type askMsg struct {
@@ -427,6 +438,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scanning = true
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
+	case rescueAIMsg:
+		m.rescueBusy = false
+		m.rescueAI = nil
+		if msg.err != nil {
+			m.notice, m.noticeErr = "ai rebuild failed: "+msg.err.Error(), true
+			return m, nil
+		}
+		m.notice = "rebuilt with AI as " + msg.newID[:8] + "… — resumable now; the original stays marked lost"
+		m.scanning = true
+		cfg := m.cfg
+		return m, func() tea.Msg {
+			_, _ = backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true})
+			return rescanMsg(ScanNamed(cfg))
+		}
 	case askMsg:
 		m.hitsBusy = false
 		if msg.err != nil {
@@ -605,6 +630,50 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.rescueAI != nil {
+		if m.rescueBusy {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "left", "right", "tab", "h", "l":
+			m.confirmSel = (m.confirmSel + 1) % 2
+		case "up", "k":
+			if n := len(m.rescueModels); n > 0 {
+				m.rescueModel = (m.rescueModel + n - 1) % n
+			}
+		case "down", "j":
+			if n := len(m.rescueModels); n > 0 {
+				m.rescueModel = (m.rescueModel + 1) % n
+			}
+		case "esc", "n":
+			m.rescueAI = nil
+		case "y":
+			m.confirmSel = 0
+			fallthrough
+		case "enter":
+			if m.confirmSel != 0 {
+				m.rescueAI = nil
+				break
+			}
+			if len(m.rescueModels) == 0 {
+				m.rescueAI = nil
+				break
+			}
+			m.rescueBusy = true
+			session := *m.rescueAI
+			cfg, option := m.cfg, m.rescueModels[m.rescueModel]
+			return m, func() tea.Msg {
+				newID, _, err := rescueReconstructAI(cfg, option, session.ID, session.Title)
+				return rescueAIMsg{newID: newID, err: err}
+			}
+		}
+		return m, nil
+	}
 	if m.confirmRescue != nil {
 		buttons := len(m.rescueButtons(*m.confirmRescue))
 		switch msg.String() {
@@ -621,6 +690,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmRescue = nil
 			labels := m.rescueButtons(session)
 			switch labels[m.confirmSel] {
+			case "Rebuild with AI":
+				m.rescueModels = rescueAIModels(m.cfg.Assist)
+				if len(m.rescueModels) == 0 {
+					m.notice, m.noticeErr = "ai rebuild needs ollama running or the claude CLI on PATH", true
+					break
+				}
+				m.rescueAI = &session
+				m.rescueModel = 0
+				m.confirmSel = 1 // Cancel default in the AI stage too
 			case "Rebuild":
 				newID, _, err := rescueReconstruct(m.cfg, session.ID, session.Title)
 				if err != nil {
@@ -1139,6 +1217,31 @@ func (m model) View() string {
 				styleDim.Render("in    ") + truncate(tildePath(project), 64),
 				styleDim.Render("runs  ") + truncate(resumeCommand(session, project), 64),
 			}, "New window", "This terminal", "Cancel")
+	}
+	if m.rescueAI != nil {
+		session := *m.rescueAI
+		title := session.Title
+		if title == "" {
+			title = session.ID
+		}
+		model := "—"
+		if len(m.rescueModels) > 0 {
+			model = m.rescueModels[m.rescueModel].Label()
+		}
+		body := []string{
+			styleDim.Render("✕ ") + truncate(title, 68),
+			"",
+			" model  " + styleDim.Render("‹ ") + styleBold.Render(model) + styleDim.Render(" ›") +
+				styleDim.Render("   ↑/↓ change"),
+			"",
+			styleDim.Render("The model reads your surviving prompts and writes a reconstruction"),
+			styleDim.Render("brief — clearly marked AI-inferred — as the session's final message."),
+			styleDim.Render("Original responses are NOT recovered or invented."),
+		}
+		if m.rescueBusy {
+			body = append(body, "", styleStale.Render("synthesizing with "+model+" …"))
+		}
+		return m.dialog("Rebuild with AI?", body, "Rebuild", "Cancel")
 	}
 	if m.confirmRescue != nil {
 		session := *m.confirmRescue
@@ -2008,9 +2111,22 @@ func (m model) usageTab(b *strings.Builder) {
 // currently only be exported.
 func (m model) rescueButtons(session Session) []string {
 	if session.Target == "claude" {
-		return []string{"Rebuild", "Export prompts", "Cancel"}
+		return []string{"Rebuild", "Rebuild with AI", "Export prompts", "Cancel"}
 	}
 	return []string{"Export prompts", "Cancel"}
+}
+
+// rescueAIModels lists model choices for intelligent rebuilds, opus
+// first — synthesis deserves a capable model.
+func rescueAIModels(cfg config.Assist) []assist.ModelOption {
+	options := assistModels(cfg)
+	for i, option := range options {
+		if option.Backend == "claude" && option.Model == "opus" {
+			head := append([]assist.ModelOption{option}, options[:i]...)
+			return append(head, options[i+1:]...)
+		}
+	}
+	return options
 }
 
 // dialog renders a centered modal: title, body, and a button row driven

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rexovas/session-protect/internal/assist"
 	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/targets"
@@ -134,6 +135,81 @@ func Reconstruct(cfg config.Config, sessionID string, title string) (newID strin
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", "", err
 	}
+	note := "[reconstructed by session-protect — the original transcript was lost; " +
+		"only the prompt history survived. The conversation continues from here.]"
+	newID, path, err = writeReconstruction(project, prompts, note)
+	if err != nil {
+		return "", "", err
+	}
+	audit.Append(cfg.BackupRoot, []audit.Entry{{
+		Time: time.Now(), Action: "reconstruct", Target: "claude",
+		SessionID: newID, From: sessionID, To: path,
+	}})
+	_ = title
+	return newID, path, nil
+}
+
+// complete is the model seam for AI reconstruction.
+var complete = assist.Complete
+
+// ReconstructAI is the intelligent rebuild: a model reads the surviving
+// prompt sequence and writes a reconstruction brief — inferred goals,
+// arc of the work, decisions the prompts imply, open threads — which
+// becomes the final message of a new resumable session. The brief is
+// explicitly marked AI-inferred; per-turn responses are never invented.
+func ReconstructAI(cfg config.Config, option assist.ModelOption, sessionID string, title string) (newID string, path string, err error) {
+	prompts, project, err := LostPrompts("claude", sessionID)
+	if err != nil {
+		return "", "", err
+	}
+	if project == "" {
+		return "", "", fmt.Errorf("session %s has no recorded project path", sessionID)
+	}
+
+	var log strings.Builder
+	for i, prompt := range prompts {
+		fmt.Fprintf(&log, "%d. [%s] %s\n", i+1, prompt.At.Format("2006-01-02 15:04"), prompt.Text)
+	}
+	brief, err := complete(cfg.Assist, option, fmt.Sprintf(
+		`A coding-agent session's transcript was lost; only the user's prompts survive,
+in order, below. Write a RECONSTRUCTION BRIEF that will be handed to the agent
+when this session is resumed. Cover: the session's goal, the arc of the work,
+decisions the prompts imply, and the open threads at the end. Infer carefully
+and hedge anything uncertain ("the prompts suggest…"). Do NOT invent specific
+code, file contents, or exact answers — orientation, not fabrication. Be
+concise (under 400 words).
+
+Project: %s
+Prompts:
+%s`, project, log.String()))
+	if err != nil {
+		return "", "", fmt.Errorf("reconstruction brief: %w", err)
+	}
+
+	final := "[AI-reconstructed context — inferred from the surviving prompts by " +
+		option.Label() + "; the original responses were lost and are NOT recovered]\n\n" +
+		strings.TrimSpace(brief) +
+		"\n\n[reconstructed by session-protect — the conversation continues from here.]"
+	newID, path, err = writeReconstruction(project, prompts, final)
+	if err != nil {
+		return "", "", err
+	}
+	audit.Append(cfg.BackupRoot, []audit.Entry{{
+		Time: time.Now(), Action: "reconstruct-ai", Target: "claude",
+		SessionID: newID, From: sessionID, To: path, Detail: option.Label(),
+	}})
+	_ = title
+	return newID, path, nil
+}
+
+// writeReconstruction lays out the transcript: user prompts interleaved
+// with loss placeholders, the given text as the final assistant message,
+// under a fresh identity that can never overwrite anything.
+func writeReconstruction(project string, prompts []Prompt, finalText string) (newID string, path string, err error) {
+	dir := filepath.Join(targets.DetectClaude().Source, "projects", targets.ClaudeSlug(project))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", err
+	}
 	newID = newUUID()
 	path = filepath.Join(dir, newID+".jsonl")
 
@@ -159,13 +235,11 @@ func Reconstruct(cfg config.Config, sessionID string, title string) (newID strin
 		b.WriteByte('\n')
 	}
 
-	note := "[reconstructed by session-protect — the original transcript was lost; " +
-		"only the prompt history survived. The conversation continues from here.]"
 	for i, prompt := range prompts {
 		write("user", prompt.At, map[string]any{"role": "user", "content": prompt.Text})
 		text := "[response lost]"
 		if i == len(prompts)-1 {
-			text = note
+			text = finalText
 		}
 		write("assistant", prompt.At.Add(time.Second), map[string]any{
 			"role":    "assistant",
@@ -173,7 +247,6 @@ func Reconstruct(cfg config.Config, sessionID string, title string) (newID strin
 		})
 	}
 
-	// O_EXCL: a fresh identity must never overwrite anything.
 	out, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", "", err
@@ -185,12 +258,6 @@ func Reconstruct(cfg config.Config, sessionID string, title string) (newID strin
 	if err := out.Close(); err != nil {
 		return "", "", err
 	}
-
-	audit.Append(cfg.BackupRoot, []audit.Entry{{
-		Time: time.Now(), Action: "reconstruct", Target: "claude",
-		SessionID: newID, From: sessionID, To: path,
-	}})
-	_ = title
 	return newID, path, nil
 }
 
