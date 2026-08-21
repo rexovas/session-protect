@@ -757,6 +757,36 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 	if found == nil || found.RebuiltAs != rebuilt {
 		t.Fatalf("lost session not linked: %+v", found)
 	}
+	// The reconstruction inherits the original's title — it is absent
+	// from prompt history and must not display as a bare uuid.
+	slug := ""
+	for _, c := range found.ProjectPath {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+			slug += string(c)
+		} else {
+			slug += "-"
+		}
+	}
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".claude", "projects", slug, rebuilt+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","cwd":"` + found.ProjectPath + `","sessionId":"` + rebuilt + `","message":{"role":"user","content":"the lost one"}}`
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var rebuiltSession *Session
+	for _, project := range Scan(m.cfg) {
+		for i := range project.Sessions {
+			if project.Sessions[i].ID == rebuilt {
+				rebuiltSession = &project.Sessions[i]
+			}
+		}
+	}
+	if rebuiltSession == nil || rebuiltSession.Title != "the lost one" {
+		t.Fatalf("rebuilt title not inherited: %+v", rebuiltSession)
+	}
 	label, _ := sessionStateFor(*found)
 	if !strings.Contains(label, "rescued") {
 		t.Fatalf("state label = %q", label)

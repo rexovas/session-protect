@@ -200,6 +200,12 @@ func Scan(cfg config.Config) []*Project {
 				if session.State == "OK" || session.State == "MISSING_BACKUP" {
 					session.State = "REBUILT"
 				}
+				// A reconstruction never appears in the agent's prompt
+				// history, so it has no title of its own — inherit the
+				// original's, which opens with the same first prompt.
+				if session.Title == "" {
+					session.Title = titles[from]
+				}
 			}
 			// The original stays lost forever, but its row should say a
 			// reconstruction exists — rescued, not silently still-dead.
