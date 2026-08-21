@@ -1144,7 +1144,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if n := len(m.askModels); n > 0 {
 				m.askModel = (m.askModel + 1) % n
 			}
-		case "up":
+		case "down":
+			// The list sits under the input, so down walks into it.
 			if m.askHistSel+1 < len(m.askHistory) {
 				if m.askHistSel == -1 {
 					m.askDraft = m.askInput
@@ -1152,7 +1153,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.askHistSel++
 				m.askInput = m.askHistory[m.askHistSel]
 			}
-		case "down":
+		case "up":
 			if m.askHistSel > -1 {
 				m.askHistSel--
 				if m.askHistSel == -1 {
@@ -2212,7 +2213,7 @@ func (m model) askView() string {
 			b.WriteString(styleDim.Render(fmt.Sprintf("   … %d more (↑ to reach)", len(m.askHistory)-shown)) + "\n")
 		}
 	}
-	return m.pinBottomBare(b.String(), "enter ask · ↑/↓ history · ←/→ model · esc close")
+	return m.pinBottomBare(b.String(), "enter ask · ↓ recent searches · ←/→ model · esc close")
 }
 
 // filterView is the f facet page: grouped checkboxes over what exists

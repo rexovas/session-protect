@@ -1105,21 +1105,21 @@ func TestAskHistoryReplay(t *testing.T) {
 		t.Fatal("history list not rendered")
 	}
 	m = press(t, m, "dra")
-	m = press(t, m, tea.KeyUp)
+	m = press(t, m, tea.KeyDown)
 	if m.askInput != "second query" || m.askHistSel != 0 {
 		t.Fatalf("recall: %q sel=%d", m.askInput, m.askHistSel)
 	}
-	m = press(t, m, tea.KeyUp)
+	m = press(t, m, tea.KeyDown)
 	if m.askInput != "first query" {
 		t.Fatalf("recall 2: %q", m.askInput)
 	}
-	m = press(t, m, tea.KeyDown, tea.KeyDown)
+	m = press(t, m, tea.KeyUp, tea.KeyUp)
 	if m.askInput != "dra" || m.askHistSel != -1 {
 		t.Fatalf("draft restore: %q sel=%d", m.askInput, m.askHistSel)
 	}
 
 	// Replaying a recalled query re-fires it and moves it to the front.
-	m = press(t, m, tea.KeyUp, tea.KeyUp) // first query
+	m = press(t, m, tea.KeyDown, tea.KeyDown) // first query
 	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(model)
 	if cmd != nil {
