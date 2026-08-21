@@ -75,12 +75,14 @@ func TestDetectNone(t *testing.T) {
 
 func TestClaudeBackendViaStub(t *testing.T) {
 	dir := t.TempDir()
+	argsFile := dir + "/args"
 	stub := dir + "/claude"
-	script := "#!/bin/sh\necho 'Sure!'\necho '{\"matches\":[{\"id\":\"bbb\",\"reason\":\"stubbed\"}]}'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\npwd >> " + argsFile + "\necho 'Sure!'\necho '{\"matches\":[{\"id\":\"bbb\",\"reason\":\"stubbed\"}]}'\n"
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
+	t.Setenv("HOME", t.TempDir()) // scratch-slug cleanup targets this home
 
 	backend := Detect(config.Assist{Backend: "claude"})
 	if backend == nil || backend.Name() != "claude" {
@@ -92,6 +94,36 @@ func TestClaudeBackendViaStub(t *testing.T) {
 	}
 	if len(matches) != 1 || matches[0].ID != "bbb" || matches[0].Reason != "stubbed" {
 		t.Fatalf("matches = %+v", matches)
+	}
+
+	// The helper run must pin a cheap model, cap turns, and execute in a
+	// throwaway directory — never the caller's project.
+	recorded, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := string(recorded)
+	if !strings.Contains(args, "--model\nsonnet") {
+		t.Fatalf("model not pinned: %q", args)
+	}
+	if !strings.Contains(args, "--max-turns\n1") {
+		t.Fatalf("turns not capped: %q", args)
+	}
+	cwd, _ := os.Getwd()
+	lines := strings.Split(strings.TrimSpace(args), "\n")
+	ranIn := lines[len(lines)-1]
+	if ranIn == cwd || !strings.Contains(ranIn, "sp-assist-") {
+		t.Fatalf("ran in %q, want a scratch dir", ranIn)
+	}
+
+	// A configured claude_model overrides the default.
+	custom := Detect(config.Assist{Backend: "claude", ClaudeModel: "haiku"})
+	if _, err := custom.Rank("find it", testCandidates); err != nil {
+		t.Fatal(err)
+	}
+	recorded, _ = os.ReadFile(argsFile)
+	if !strings.Contains(string(recorded), "--model\nhaiku") {
+		t.Fatalf("claude_model not honored: %q", recorded)
 	}
 
 	// auto with no ollama reachable falls through to the CLI.

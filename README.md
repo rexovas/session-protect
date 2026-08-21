@@ -148,6 +148,8 @@ time = "12:00"           # daily backup, local time
 [assist]                 # AI find backend
 backend = "auto"         # auto | ollama | claude | none
 model = ""               # ollama model; empty = first installed
+claude_model = "sonnet"  # claude backend model; helper runs are
+                         # throwaway and never appear in your sessions
 
 [update]
 check = true             # daily new-release check + explorer prompt

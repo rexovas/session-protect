@@ -32,6 +32,9 @@ type Assist struct {
 	Backend string `toml:"backend" json:"backend"` // auto | ollama | claude | none
 	// Model is the ollama model to use; empty picks the first installed.
 	Model string `toml:"model" json:"model,omitempty"`
+	// ClaudeModel is passed to the claude CLI backend; empty means a
+	// cheap capable default (sonnet), never the user's session default.
+	ClaudeModel string `toml:"claude_model" json:"claude_model,omitempty"`
 	// URL is the ollama server address.
 	URL string `toml:"url" json:"url,omitempty"`
 }

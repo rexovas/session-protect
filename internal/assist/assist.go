@@ -11,11 +11,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 // Candidate is one session offered to the model, with just enough context
@@ -57,13 +60,13 @@ func Detect(cfg config.Assist) Backend {
 		if _, err := exec.LookPath("claude"); err != nil {
 			return nil
 		}
-		return &claudeBackend{}
+		return &claudeBackend{model: cfg.ClaudeModel}
 	default: // auto: local server first, then the CLI
 		if ollamaAlive(url) {
 			return &ollamaBackend{url: url, model: cfg.Model}
 		}
 		if _, err := exec.LookPath("claude"); err == nil {
-			return &claudeBackend{}
+			return &claudeBackend{model: cfg.ClaudeModel}
 		}
 		return nil
 	}
@@ -191,14 +194,39 @@ func (b *ollamaBackend) Rank(query string, candidates []Candidate) ([]Match, err
 
 // --- claude: headless CLI on the user's own subscription ---
 
-type claudeBackend struct{}
+type claudeBackend struct {
+	model string
+}
 
 func (b *claudeBackend) Name() string { return "claude" }
 
 func (b *claudeBackend) Rank(query string, candidates []Candidate) ([]Match, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "claude", "-p", buildPrompt(query, candidates))
+
+	model := b.model
+	if model == "" {
+		// Ranking a candidate list needs a capable-but-cheap model —
+		// never the user's (possibly premium) default.
+		model = "sonnet"
+	}
+
+	// Run in a throwaway working directory so the helper session never
+	// appears in any real project, then remove the transcript claude
+	// persists for it. Headless runs write no prompt history, so this
+	// leaves zero traces.
+	scratch, err := os.MkdirTemp("", "sp-assist-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(scratch)
+	if resolved, err := filepath.EvalSymlinks(scratch); err == nil {
+		scratch = resolved
+	}
+	defer os.RemoveAll(filepath.Join(targets.DetectClaude().Source, "projects", targets.ClaudeSlug(scratch)))
+
+	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", model, "--max-turns", "1", buildPrompt(query, candidates))
+	cmd.Dir = scratch
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("claude CLI: %w", err)
