@@ -697,37 +697,54 @@ func TestRescuePickerFilterAndJump(t *testing.T) {
 		t.Fatalf("right arrow acted: dest=%v dirs=%v", m.rescueDest != nil, dirs)
 	}
 
-	// Typing filters the rows, highlights the first match, and is visible.
+	// Letters do nothing while browsing; / enters filter mode like the
+	// main list, and the filter narrows rows with the first match live.
 	m = press(t, m, "inn")
-	if got := m.rescueSubdirs(); len(got) != 1 || got[0] != "inner" || m.rescueCursor != 2 {
-		t.Fatalf("filter: %v cursor=%d", got, m.rescueCursor)
+	if m.rescueMode != "" || m.rescueFilter != "" {
+		t.Fatalf("stray typing registered: mode=%q text=%q", m.rescueMode, m.rescueFilter)
 	}
-	if view := m.View(); !strings.Contains(view, "filter: inn") {
+	m = press(t, m, "/", "inn")
+	if got := m.rescueSubdirs(); m.rescueMode != "filter" || len(got) != 1 || got[0] != "inner" || m.rescueCursor != 2 {
+		t.Fatalf("filter: mode=%q %v cursor=%d", m.rescueMode, got, m.rescueCursor)
+	}
+	if view := m.View(); !strings.Contains(view, "/inn") {
 		t.Fatal("filter text not rendered")
 	}
 	m = press(t, m, tea.KeyEnter) // descend into the match
-	if want := tildePath(filepath.Join(project, "inner")); m.rescueInput != want || m.rescueFilter != "" {
-		t.Fatalf("descend: input=%q filter=%q", m.rescueInput, m.rescueFilter)
+	if want := tildePath(filepath.Join(project, "inner")); m.rescueInput != want || m.rescueMode != "" {
+		t.Fatalf("descend: input=%q mode=%q", m.rescueInput, m.rescueMode)
+	}
+
+	// Backspace only edits text: it drains the filter, exits the mode,
+	// and then does nothing — never up-dir, never closing the picker.
+	here := m.rescueInput
+	m = press(t, m, "/", "xy", tea.KeyBackspace, tea.KeyBackspace, tea.KeyBackspace)
+	if m.rescueMode != "" {
+		t.Fatalf("mode = %q", m.rescueMode)
+	}
+	m = press(t, m, tea.KeyBackspace, tea.KeyBackspace)
+	if m.rescueDest == nil || m.rescueInput != here {
+		t.Fatal("backspace navigated or closed the picker")
 	}
 
 	// Esc clears an active filter before it closes the picker.
-	m = press(t, m, "xyz")
+	m = press(t, m, "/", "xyz")
 	if m.rescueFilter != "xyz" {
 		t.Fatalf("filter = %q", m.rescueFilter)
 	}
 	m = press(t, m, tea.KeyEsc)
-	if m.rescueFilter != "" || m.rescueDest == nil {
+	if m.rescueMode != "" || m.rescueDest == nil {
 		t.Fatal("esc should only clear the filter")
 	}
 
-	// A leading ~ or / turns the text into a path jump, rendered as such.
-	m = press(t, m, "~/somewhere/else")
+	// ~ opens a path jump, rendered as such.
+	m = press(t, m, "~", "/somewhere/else")
 	if view := m.View(); !strings.Contains(view, "go to: ~/somewhere/else") {
 		t.Fatal("jump text not rendered")
 	}
 	m = press(t, m, tea.KeyEnter)
-	if m.rescueInput != "~/somewhere/else" || m.rescueFilter != "" {
-		t.Fatalf("jump: input=%q filter=%q", m.rescueInput, m.rescueFilter)
+	if m.rescueInput != "~/somewhere/else" || m.rescueMode != "" {
+		t.Fatalf("jump: input=%q mode=%q", m.rescueInput, m.rescueMode)
 	}
 	if view := m.View(); !strings.Contains(view, "will be created") {
 		t.Fatal("jump target should show will-be-created")

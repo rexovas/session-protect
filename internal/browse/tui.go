@@ -153,7 +153,8 @@ type model struct {
 	rescueCursor int      // highlighted row in the picker list
 	rescueNaming bool     // typing a new folder name
 	rescueName   string   // the name being typed
-	rescueFilter string   // type-to-filter text; a leading ~ or / makes it a path jump
+	rescueMode   string   // "" browsing | "filter" (/) | "jump" (~) — what typed text means
+	rescueFilter string   // the typed filter or jump text
 	rescueDir    string   // resolved destination carried into the AI model stage
 	confirmSel   int      // dialog button index; always starts on Cancel
 
@@ -958,12 +959,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		subdirs := m.rescueSubdirs()
 		rows := len(subdirs) + 3 // use-this-dir, .., dirs…, new-folder
+		clearTyping := func() {
+			m.rescueMode, m.rescueFilter = "", ""
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "esc":
-			if m.rescueFilter != "" {
-				m.rescueFilter = ""
+			if m.rescueMode != "" {
+				clearTyping()
 				m.rescueCursor = 0
 				break
 			}
@@ -976,31 +980,59 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "down":
 			m.rescueCursor = (m.rescueCursor + 1) % rows
 		case "backspace":
-			if m.rescueFilter != "" {
-				runes := []rune(m.rescueFilter)
-				m.rescueFilter = string(runes[:len(runes)-1])
+			// Backspace edits typed text, nothing else — it never
+			// navigates and never leaves the picker.
+			if m.rescueMode == "" {
 				break
+			}
+			if runes := []rune(m.rescueFilter); len(runes) > 0 {
+				m.rescueFilter = string(runes[:len(runes)-1])
+			} else {
+				clearTyping()
+			}
+		case "left":
+			if m.rescueMode != "" {
+				break // typing; left is not navigation mid-entry
 			}
 			m.rescueInput = pickerUp(m.rescueInput)
 			m.rescueCursor = 0
-		case "left":
-			m.rescueInput = pickerUp(m.rescueInput)
-			m.rescueCursor, m.rescueFilter = 0, ""
+		case "/":
+			if m.rescueMode == "" {
+				m.rescueMode, m.rescueFilter = "filter", ""
+				break
+			}
+			if m.rescueMode == "jump" {
+				m.rescueFilter += "/"
+			}
+		case "~":
+			if m.rescueMode == "" {
+				m.rescueMode, m.rescueFilter = "jump", "~"
+				break
+			}
+			m.rescueFilter += "~"
 		case "right", "enter":
-			if m.rescueJumping() {
-				m.rescueInput = tildePath(filepath.Clean(expandTilde(strings.TrimSpace(m.rescueFilter))))
-				m.rescueCursor, m.rescueFilter = 0, ""
+			if m.rescueMode == "jump" {
+				if msg.String() == "right" {
+					break
+				}
+				if text := strings.TrimSpace(m.rescueFilter); text != "" && text != "~" {
+					m.rescueInput = tildePath(filepath.Clean(expandTilde(text)))
+				}
+				clearTyping()
+				m.rescueCursor = 0
 				break
 			}
 			switch {
 			case m.rescueCursor == 1: // ..
 				m.rescueInput = pickerUp(m.rescueInput)
-				m.rescueCursor, m.rescueFilter = 0, ""
+				clearTyping()
+				m.rescueCursor = 0
 			case m.rescueCursor == rows-1: // + new folder…
 				m.rescueNaming, m.rescueName = true, ""
 			case m.rescueCursor > 1: // descend
 				m.rescueInput = tildePath(filepath.Join(expandTilde(m.rescueInput), subdirs[m.rescueCursor-2]))
-				m.rescueCursor, m.rescueFilter = 0, ""
+				clearTyping()
+				m.rescueCursor = 0
 			default: // ✓ use this directory — enter only; → must never run an action
 				if msg.String() == "right" {
 					break
@@ -1014,9 +1046,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.runRescue(session, dir)
 			}
 		default:
-			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+			if m.rescueMode != "" && (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) {
 				m.rescueFilter += msg.String()
-				if !m.rescueJumping() {
+				if m.rescueMode == "filter" {
 					if len(m.rescueSubdirs()) > 0 {
 						m.rescueCursor = 2 // first match
 					} else {
@@ -1663,12 +1695,11 @@ func (m model) View() string {
 			styleActive.Render(truncate(m.rescueInput, 72)) + "  " + note,
 			"",
 		}
-		if m.rescueFilter != "" {
-			typed := "  filter: " + m.rescueFilter + "▌"
-			if m.rescueJumping() {
-				typed = "  go to: " + m.rescueFilter + "▌" + styleDim.Render("  (enter jumps there)")
-			}
-			body = append(body, typed, "")
+		switch m.rescueMode {
+		case "filter":
+			body = append(body, "  /"+m.rescueFilter+"▌", "")
+		case "jump":
+			body = append(body, "  go to: "+m.rescueFilter+"▌"+styleDim.Render("  (enter jumps there)"), "")
 		}
 		if m.rescueNaming {
 			body = append(body,
@@ -1706,7 +1737,7 @@ func (m model) View() string {
 		rows = append(rows, row(len(subdirs)+2, "+ new folder…", styleDim))
 		body = append(body, rows...)
 		body = append(body, "", styleDim.Render(truncate(detail, 74)))
-		return m.inputDialog(heading, body, "↑/↓ choose · enter confirm · → open · ← up · type to filter, ~/ to jump")
+		return m.inputDialog(heading, body, "↑/↓ choose · enter confirm · → open · ← up · / filter · ~ jump to path")
 	}
 	if m.confirmRescue != nil {
 		session := *m.confirmRescue
@@ -2738,21 +2769,15 @@ func (m model) openRescuePicker(session Session, action string) model {
 	m.rescueInput = rescueDefaultDir(m.cfg, session, action)
 	m.rescueCursor = 0
 	m.rescueNaming, m.rescueName = false, ""
-	m.rescueFilter = ""
+	m.rescueMode, m.rescueFilter = "", ""
 	return m
 }
 
-// rescueJumping reports whether the typed text is a path jump rather
-// than a filter.
-func (m model) rescueJumping() bool {
-	return strings.HasPrefix(m.rescueFilter, "/") || strings.HasPrefix(m.rescueFilter, "~")
-}
-
 // rescueSubdirs lists the picker's directory rows, narrowed by the
-// type-to-filter text.
+// active / filter.
 func (m model) rescueSubdirs() []string {
 	subdirs := subdirsOf(expandTilde(m.rescueInput))
-	if m.rescueFilter == "" || m.rescueJumping() {
+	if m.rescueMode != "filter" || m.rescueFilter == "" {
 		return subdirs
 	}
 	needle := strings.ToLower(m.rescueFilter)
