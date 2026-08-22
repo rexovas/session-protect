@@ -710,6 +710,12 @@ func TestRescuePickerFilterAndJump(t *testing.T) {
 	if view := m.View(); !strings.Contains(view, "/inn") {
 		t.Fatal("filter text not rendered")
 	}
+	// The RENDERED list must be the filtered one — the highlight and the
+	// action work on it, so showing unfiltered rows points enter at the
+	// wrong directory.
+	if view := m.View(); strings.Contains(view, "other/") || strings.Contains(view, "third/") {
+		t.Fatal("view shows unfiltered rows")
+	}
 	m = press(t, m, tea.KeyEnter) // descend into the match
 	if want := tildePath(filepath.Join(project, "inner")); m.rescueInput != want || m.rescueMode != "" {
 		t.Fatalf("descend: input=%q mode=%q", m.rescueInput, m.rescueMode)

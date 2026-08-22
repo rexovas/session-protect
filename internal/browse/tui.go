@@ -1708,7 +1708,7 @@ func (m model) View() string {
 				styleDim.Render(truncate(detail, 74)))
 			return m.inputDialog(heading, body, "type name · enter add · esc cancel")
 		}
-		subdirs := subdirsOf(expanded)
+		subdirs := m.rescueSubdirs()
 		row := func(index int, label string, style lipgloss.Style) string {
 			if index == m.rescueCursor {
 				return styleCursor.Render("❯ " + label)
