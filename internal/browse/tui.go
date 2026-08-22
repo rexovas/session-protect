@@ -143,20 +143,21 @@ type model struct {
 	confirmRescue  *Session // a ✕ lost session offered export/rebuild
 	resumeHeading  string   // overrides the resume dialog title (rebuild-complete flow)
 	// The AI-rebuild stage: model choice (opus-first) before synthesis.
-	rescueAI     *Session
-	rescueModels []assist.ModelOption
-	rescueModel  int
-	rescueBusy   bool
-	rescueDest   *Session // destination stage between choosing a rescue action and running it
-	rescueAction string   // export | rebuild | rebuild-ai
-	rescueInput  string   // current directory of the destination picker (~ form)
-	rescueCursor int      // highlighted row in the picker list
-	rescueNaming bool     // typing a new folder name
-	rescueName   string   // the name being typed
-	rescueMode   string   // "" browsing | "filter" (/) | "jump" (~) — what typed text means
-	rescueFilter string   // the typed filter or jump text
-	rescueDir    string   // resolved destination carried into the AI model stage
-	confirmSel   int      // dialog button index; always starts on Cancel
+	rescueAI      *Session
+	rescueModels  []assist.ModelOption
+	rescueModel   int
+	rescueBusy    bool
+	rescueQuitArm bool     // one ctrl+c seen during synthesis; next one quits
+	rescueDest    *Session // destination stage between choosing a rescue action and running it
+	rescueAction  string   // export | rebuild | rebuild-ai
+	rescueInput   string   // current directory of the destination picker (~ form)
+	rescueCursor  int      // highlighted row in the picker list
+	rescueNaming  bool     // typing a new folder name
+	rescueName    string   // the name being typed
+	rescueMode    string   // "" browsing | "filter" (/) | "jump" (~) — what typed text means
+	rescueFilter  string   // the typed filter or jump text
+	rescueDir     string   // resolved destination carried into the AI model stage
+	confirmSel    int      // dialog button index; always starts on Cancel
 
 	// A newer release triggers a launch-time offer; accepting swaps the
 	// binary and relaunches into it.
@@ -687,6 +688,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
 	case rescueAIMsg:
 		m.rescueBusy = false
+		m.rescueQuitArm = false
 		m.rescueAI = nil
 		if msg.err != nil {
 			m.notice, m.noticeErr = "ai rebuild failed: "+msg.err.Error(), true
@@ -891,8 +893,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.rescueAI != nil {
 		if m.rescueBusy {
+			// Quitting mid-synthesis abandons the rebuild with nothing
+			// written — require a deliberate second ctrl+c.
 			if msg.String() == "ctrl+c" {
-				return m, tea.Quit
+				if m.rescueQuitArm {
+					return m, tea.Quit
+				}
+				m.rescueQuitArm = true
+				return m, nil
 			}
 			return m, nil
 		}
@@ -1669,7 +1677,12 @@ func (m model) View() string {
 			styleDim.Render("Original responses are NOT recovered or invented."),
 		}
 		if m.rescueBusy {
-			body = append(body, "", styleStale.Render("synthesizing with "+model+" …"))
+			busy := "synthesizing with " + model + " … usually well under a minute"
+			body = append(body, "", styleStale.Render(busy),
+				styleDim.Render("quitting now abandons the rebuild — nothing would be written"))
+			if m.rescueQuitArm {
+				body = append(body, styleStale.Render("ctrl+c again to abandon the rebuild and quit"))
+			}
 		}
 		return m.dialog("Rebuild with AI?", body, "Rebuild", "Cancel")
 	}
