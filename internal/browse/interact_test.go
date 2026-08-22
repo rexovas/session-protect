@@ -968,6 +968,9 @@ func TestRescueAIFlow(t *testing.T) {
 	if m.rescueAI != nil || len(used) != 0 {
 		t.Fatal("enter on Cancel acted")
 	}
+	if !strings.Contains(m.notice, "cancelled") {
+		t.Fatalf("cancel must announce itself: %q", m.notice)
+	}
 	// Full accept.
 	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter, tea.KeyEnter, tea.KeyLeft)
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})

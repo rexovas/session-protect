@@ -911,12 +911,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "esc", "n":
 			m.rescueAI = nil
+			m.notice, m.noticeErr = "ai rebuild cancelled — nothing was written (the session stays lost)", true
 		case "y":
 			m.confirmSel = 0
 			fallthrough
 		case "enter":
 			if m.confirmSel != 0 {
+				// Cancel is the default: a reflexive enter lands here, so
+				// say loudly that no rebuild happened.
 				m.rescueAI = nil
+				m.notice, m.noticeErr = "ai rebuild cancelled — nothing was written (the session stays lost)", true
 				break
 			}
 			if len(m.rescueModels) == 0 {
