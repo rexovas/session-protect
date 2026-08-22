@@ -978,6 +978,15 @@ func TestRescueAIFlow(t *testing.T) {
 	if !m.rescueBusy || cmd == nil {
 		t.Fatal("accept did not start synthesis")
 	}
+	// One ctrl+c mid-synthesis arms the guard instead of quitting.
+	next, quitCmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = next.(model)
+	if quitCmd != nil || !m.rescueQuitArm {
+		t.Fatal("first ctrl+c must warn, not quit")
+	}
+	if view := m.View(); !strings.Contains(view, "ctrl+c again") {
+		t.Fatal("quit warning not rendered")
+	}
 	next, _ = m.Update(cmd())
 	m = next.(model)
 	if len(used) != 1 || !strings.Contains(used[0], "opus · claude for cccc3333") {
