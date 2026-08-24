@@ -32,7 +32,7 @@ type Session struct {
 	State          string    // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE | LOST (+ synthesized ACTIVE | OPEN | RESTORED)
 	RestoredAt     time.Time // last restore recorded in the audit log, badge or not
 	RebuiltFrom    string    // lost session this one was reconstructed from
-	RebuiltAs      string    // for LOST sessions: id of a reconstruction built from it
+	RebuiltAs      []string  // for LOST sessions: its reconstructions, newest first
 	Modified       time.Time
 	BackupModified time.Time
 	Size           int64
@@ -141,7 +141,7 @@ func Scan(cfg config.Config) []*Project {
 	}
 	restoredAt := map[string]time.Time{}
 	rebuiltFrom := map[string]string{}
-	rebuiltInto := map[string]string{}
+	rebuiltInto := map[string][]string{}
 	for _, entry := range audit.Read(cfg.BackupRoot) {
 		if entry.Action == "restore" && entry.SessionID != "" && entry.Time.After(restoredAt[entry.SessionID]) {
 			restoredAt[entry.SessionID] = entry.Time
@@ -149,7 +149,8 @@ func Scan(cfg config.Config) []*Project {
 		if (entry.Action == "reconstruct" || entry.Action == "reconstruct-ai") && entry.SessionID != "" {
 			rebuiltFrom[entry.SessionID] = entry.From
 			if entry.From != "" {
-				rebuiltInto[entry.From] = entry.SessionID
+				// Audit order is chronological; prepend for newest first.
+				rebuiltInto[entry.From] = append([]string{entry.SessionID}, rebuiltInto[entry.From]...)
 			}
 		}
 	}
@@ -214,13 +215,17 @@ func Scan(cfg config.Config) []*Project {
 					session.Title = titles[from]
 				}
 			}
-			// The original stays lost forever, but its row should say a
-			// reconstruction exists — rescued, not silently still-dead.
+			// The original stays lost forever, but its row should say its
+			// reconstructions exist — rescued, not silently still-dead.
 			// The audit log alone is not enough: a deleted rebuild must
-			// not leave a rescued label pointing at nothing, so the
+			// not leave a rescued label pointing at nothing, so each
 			// target has to still be present in live or backup.
-			if into, ok := rebuiltInto[session.ID]; ok && session.State == "LOST" && seen[into] {
-				session.RebuiltAs = into
+			if session.State == "LOST" {
+				for _, into := range rebuiltInto[session.ID] {
+					if seen[into] {
+						session.RebuiltAs = append(session.RebuiltAs, into)
+					}
+				}
 			}
 		}
 		sort.Slice(project.Sessions, func(i, j int) bool {

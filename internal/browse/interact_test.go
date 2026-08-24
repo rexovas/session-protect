@@ -782,7 +782,7 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 	// An audit entry whose rebuild no longer exists anywhere must NOT
 	// produce a rescued label pointing at nothing.
 	found := find(Scan(m.cfg), lost)
-	if found == nil || found.RebuiltAs != "" {
+	if found == nil || len(found.RebuiltAs) != 0 {
 		t.Fatalf("dangling rebuild must not link: %+v", found)
 	}
 
@@ -808,7 +808,7 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 	}
 	projects := Scan(m.cfg)
 	found = find(projects, lost)
-	if found == nil || found.RebuiltAs != rebuilt {
+	if found == nil || len(found.RebuiltAs) != 1 || found.RebuiltAs[0] != rebuilt {
 		t.Fatalf("lost session not linked: %+v", found)
 	}
 	rebuiltSession := find(projects, rebuilt)
@@ -828,8 +828,51 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 	m.hits = []Hit{{Session: Session{ID: lost, State: "LOST"}}}
 	next, _ := m.Update(rescanMsg(projects))
 	m = next.(model)
-	if m.hits[0].Session.RebuiltAs != rebuilt {
+	if len(m.hits[0].Session.RebuiltAs) != 1 {
 		t.Fatal("hits row not refreshed by rescan")
+	}
+	m.projects = projects
+
+	// The rescue dialog on a rescued original lists its reconstructions
+	// and warns another will be created alongside.
+	rescued := *find(projects, lost)
+	m = m.pressRescue(rescued)
+	view := m.View()
+	for _, want := range []string{"already rebuilt", rebuilt[:8], "ANOTHER session"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("rescue dialog missing %q", want)
+		}
+	}
+	m.confirmRescue = nil
+
+	// o on the rescued original routes to its newest rebuild.
+	m = m.pressOpen(rescued)
+	if m.confirmResume == nil || m.confirmResume.ID != rebuilt {
+		t.Fatalf("o routed to %+v, want the rebuild", m.confirmResume)
+	}
+	if !strings.Contains(m.resumeHeading, "rebuild") {
+		t.Fatalf("heading = %q", m.resumeHeading)
+	}
+	m.confirmResume, m.resumeHeading = nil, ""
+
+	// The inspector's middle tab becomes Recovery for lost sessions,
+	// listing the reconstructions and the export state.
+	m.detail = &rescued
+	m.detailTab = 1
+	view = m.View()
+	for _, want := range []string{"Recovery", rebuilt[:8], "export", "reconstruct-ai"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("recovery tab missing %q", want)
+		}
+	}
+	m.detail = nil
+
+	// A rebuilt session's overview names its original.
+	rebuiltSession = find(projects, rebuilt)
+	m.detail = rebuiltSession
+	m.detailTab = 0
+	if view := m.View(); !strings.Contains(view, "rebuilt") || !strings.Contains(view, lost[:8]) {
+		t.Fatal("overview missing rebuilt-from lineage")
 	}
 }
 

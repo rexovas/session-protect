@@ -1506,6 +1506,17 @@ func (m model) pressOpen(session Session) model {
 			m.notice = "brought the session's window to the front"
 		}
 	case session.State == "LOST":
+		// The original is never resumable — but its newest rebuild is,
+		// so o routes there instead of dead-ending.
+		if len(session.RebuiltAs) > 0 {
+			if rebuilt := m.sessionByID(session.RebuiltAs[0]); rebuilt != nil {
+				copied := *rebuilt
+				m.confirmResume = &copied
+				m.resumeHeading = "Lost original — resume its rebuild " + copied.ID[:8] + "…?"
+				m.confirmSel = 2
+				break
+			}
+		}
 		m.notice, m.noticeErr = "lost sessions have no transcript to resume", true
 	case session.SourcePath == "":
 		m.notice, m.noticeErr = "backup-only session — restore it first (r), then resume", true
@@ -1515,6 +1526,18 @@ func (m model) pressOpen(session Session) model {
 		m.confirmSel = 2
 	}
 	return m
+}
+
+// sessionByID finds a session anywhere in the scan.
+func (m model) sessionByID(id string) *Session {
+	for _, project := range m.projects {
+		for i := range project.Sessions {
+			if project.Sessions[i].ID == id {
+				return &project.Sessions[i]
+			}
+		}
+	}
+	return nil
 }
 
 func (m model) selectedSession() *Session {
@@ -1818,11 +1841,26 @@ func (m model) View() string {
 		body := []string{
 			styleDim.Render("✕ ") + truncate(title, 68),
 			styleDim.Render(fmt.Sprintf("%d prompt(s) survive in the agent's history; the transcript is gone", session.Prompts)),
-			"",
+		}
+		if len(session.RebuiltAs) > 0 {
+			body = append(body, "", styleRecover.Render("already rebuilt — resumable now:"))
+			for i, id := range session.RebuiltAs {
+				if i == 2 && len(session.RebuiltAs) > 3 {
+					body = append(body, styleDim.Render(fmt.Sprintf("  … and %d more", len(session.RebuiltAs)-i)))
+					break
+				}
+				line := "  ⟳ " + id[:8] + "…"
+				if rebuilt := m.sessionByID(id); rebuilt != nil {
+					line += styleDim.Render("  " + ago(rebuilt.Modified) + "  " + truncate(tildePath(rebuilt.ProjectPath), 44))
+				}
+				body = append(body, line)
+			}
+			body = append(body, styleDim.Render("  rebuilding again creates ANOTHER session mapped to this original"))
+		}
+		body = append(body, "",
 			styleDim.Render(desc[0]),
 			styleDim.Render(desc[1]),
-			styleDim.Render("(each action then asks where to write)"),
-		}
+			styleDim.Render("(each action then asks where to write)"))
 		return m.dialog("Rescue lost session?", body, labels...)
 	}
 	if m.confirmRestore != nil {
@@ -2622,8 +2660,12 @@ func (m model) detailView() string {
 		}
 		return styleDim.Render(" " + label + " ")
 	}
+	middle := "Usage"
+	if session.State == "LOST" {
+		middle = "Recovery"
+	}
 	left := styleHeader.Render("▸ " + name)
-	right := tab("Overview", 0) + tab("Usage", 1) + tab("Transcript", 2)
+	right := tab("Overview", 0) + tab(middle, 1) + tab("Transcript", 2)
 	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
 		left += strings.Repeat(" ", pad)
 	}
@@ -2634,6 +2676,10 @@ func (m model) detailView() string {
 
 	switch m.detailTab {
 	case 1:
+		if session.State == "LOST" {
+			m.recoveryTab(&b, session)
+			return m.pinBottomBare(b.String(), "o resume rebuild · r rescue · tab switch · i/esc close")
+		}
 		m.usageTab(&b)
 		return m.pinBottomBare(b.String(), "o open · r rescue · tab switch · i/esc close")
 	case 2:
@@ -2660,6 +2706,13 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	kv("state", strings.TrimSpace(style.Render(state))+liveNote)
 	kv("agent", session.Target)
 	kv("session", session.ID)
+	if session.RebuiltFrom != "" {
+		kv("rebuilt", "from "+styleRecover.Render("✕ "+session.RebuiltFrom[:8]+"…")+
+			styleDim.Render("  — a reconstruction; the original stays marked lost"))
+	}
+	if len(session.RebuiltAs) > 0 {
+		kv("rebuilds", fmt.Sprintf("%d resumable reconstruction(s) — see the Recovery tab", len(session.RebuiltAs)))
+	}
 	project := session.ProjectPath
 	if project == "" {
 		project = m.root
@@ -2778,6 +2831,61 @@ func (m model) usageTab(b *strings.Builder) {
 		" (cache read 0.1×, cache write 1.25× input rate); no external calls") + "\n")
 	if data.Messages > 0 {
 		b.WriteString(styleDim.Render(fmt.Sprintf("  %d messages in transcript", data.Messages)) + "\n")
+	}
+}
+
+// recoveryTab is the lost-session dossier: what survives, every
+// reconstruction built from it, the export artifact, and the audit
+// trail — the map from a dead transcript to its living descendants.
+func (m model) recoveryTab(b *strings.Builder, session Session) {
+	kv := func(key string, value string) {
+		b.WriteString(styleDim.Render(fmt.Sprintf(" %-10s", key)) + value + "\n")
+	}
+	b.WriteString(styleDim.Render(" the transcript is gone from live and backup; this record is permanent —") + "\n")
+	b.WriteString(styleDim.Render(" only the prompts survive (Transcript tab). Rescue actions: r") + "\n\n")
+
+	if len(session.RebuiltAs) == 0 {
+		kv("rebuilds", styleDim.Render("none yet — r offers Rebuild, Rebuild with AI, and Export"))
+	}
+	for i, id := range session.RebuiltAs {
+		label := "rebuilds"
+		if i > 0 {
+			label = ""
+		}
+		line := styleRecover.Render("⟳ "+id[:8]+"…") + styleDim.Render("  gone from scan")
+		if rebuilt := m.sessionByID(id); rebuilt != nil {
+			stateLabel, stateStyle := sessionStateFor(*rebuilt)
+			line = styleRecover.Render("⟳ "+id[:8]+"…") + "  " + stateStyle.Render(strings.TrimSpace(stateLabel)) +
+				styleDim.Render("  "+ago(rebuilt.Modified)+"  "+truncate(tildePath(rebuilt.ProjectPath), 48))
+		}
+		kv(label, line)
+	}
+
+	exportPath := filepath.Join(m.cfg.BackupRoot, "exports", session.ID+".md")
+	if info, err := os.Stat(exportPath); err == nil {
+		kv("export", tildePath(exportPath)+styleDim.Render("  ("+ago(info.ModTime())+" ago)"))
+	} else {
+		kv("export", styleDim.Render("no prompt export yet — r → Export prompts"))
+	}
+
+	var trail []audit.Entry
+	for _, entry := range audit.Read(m.cfg.BackupRoot) {
+		if entry.SessionID == session.ID || entry.From == session.ID {
+			trail = append(trail, entry)
+		}
+	}
+	if len(trail) > 0 {
+		b.WriteString("\n" + styleDim.Render(" history") + "\n")
+		if len(trail) > 6 {
+			trail = trail[len(trail)-6:]
+		}
+		for _, entry := range trail {
+			line := fmt.Sprintf("   %s  %-14s %s", entry.Time.Format("2006-01-02 15:04"), entry.Action, entry.SessionID[:8]+"…")
+			if entry.Detail != "" {
+				line += styleDim.Render("  " + entry.Detail)
+			}
+			b.WriteString(line + "\n")
+		}
 	}
 }
 
@@ -3278,7 +3386,7 @@ func sessionTitle(session Session, width int, active bool) string {
 // sessionStateFor renders a session's state cell, marking lost sessions
 // that already have a reconstruction as rescued.
 func sessionStateFor(session Session) (string, lipgloss.Style) {
-	if session.State == "LOST" && session.RebuiltAs != "" {
+	if session.State == "LOST" && len(session.RebuiltAs) > 0 {
 		return "✕ rescued  ", styleRecover
 	}
 	return sessionState(session.State)
