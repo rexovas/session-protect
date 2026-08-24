@@ -92,6 +92,7 @@ type model struct {
 	askModels  []assist.ModelOption
 	askHistory []askHistoryEntry // prior searches with saved results, most recent first
 	hitsCached time.Time         // when ask results were saved; zero = fresh model run
+	spinFrame  int               // busy-spinner animation frame
 	askHistSel int               // -1 = composing; otherwise index into askHistory
 	askDraft   string            // in-progress text stashed while browsing history
 	askModel   int
@@ -248,6 +249,15 @@ type askMsg struct {
 }
 
 type tickMsg time.Time
+
+// spinMsg animates the busy spinner while an AI call is in flight.
+type spinMsg struct{}
+
+var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func spin() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinMsg{} })
+}
 
 // refreshEvery is the live-update cadence; rescans run asynchronously so
 // the UI never blocks on them.
@@ -622,6 +632,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.buildTailLines()
 		}
 		return m, nil
+	case spinMsg:
+		if m.hitsBusy || m.rescueBusy {
+			m.spinFrame++
+			return m, spin()
+		}
+		return m, nil
 	case tickMsg:
 		if m.scanning {
 			return m, tick()
@@ -988,10 +1004,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rescueBusy = true
 			session := *m.rescueAI
 			cfg, option, dir := m.cfg, m.rescueModels[m.rescueModel], m.rescueDir
-			return m, func() tea.Msg {
+			return m, tea.Batch(spin(), func() tea.Msg {
 				newID, path, err := rescueReconstructAI(cfg, option, session.ID, session.Title, dir)
 				return rescueAIMsg{original: session, path: path, dir: dir, newID: newID, err: err}
-			}
+			})
 		}
 		return m, nil
 	}
@@ -1598,6 +1614,11 @@ func (m model) validRebuilds(session Session) []string {
 	return out
 }
 
+// spinGlyph is the current busy-spinner frame.
+func (m model) spinGlyph() string {
+	return spinFrames[m.spinFrame%len(spinFrames)]
+}
+
 // sessionByID finds a session anywhere in the scan.
 func (m model) sessionByID(id string) *Session {
 	for _, project := range m.projects {
@@ -1825,7 +1846,7 @@ func (m model) View() string {
 			styleDim.Render("Original responses are NOT recovered or invented."),
 		}
 		if m.rescueBusy {
-			busy := "synthesizing with " + model + " … usually well under a minute"
+			busy := m.spinGlyph() + " synthesizing with " + model + " … usually well under a minute"
 			body = append(body, "", styleStale.Render(busy),
 				styleDim.Render("quitting now abandons the rebuild — nothing would be written"))
 			if m.rescueQuitArm {
@@ -2082,9 +2103,9 @@ func (m model) View() string {
 		help = "f:" + summary + "   " + help
 	}
 	if m.hitsBusy {
-		help = "searching transcripts for /" + m.hitsQuery + " … (first run builds the text index)"
+		help = m.spinGlyph() + " searching transcripts for /" + m.hitsQuery + " … (first run builds the text index)"
 		if m.hitsMode == "ask" {
-			help = "asking the local model about \"" + m.hitsQuery + "\" …"
+			help = m.spinGlyph() + " asking the local model about \"" + m.hitsQuery + "\" …"
 		}
 	}
 
@@ -2098,7 +2119,7 @@ func (m model) fireContentSearch() (tea.Model, tea.Cmd) {
 	m.hitsQuery = m.query
 	cfg, query := m.cfg, m.query
 	scope := AllUnder(m.projects, m.root)
-	return m, func() tea.Msg { return hitsMsg(ContentSearch(cfg, scope, query)) }
+	return m, tea.Batch(spin(), func() tea.Msg { return hitsMsg(ContentSearch(cfg, scope, query)) })
 }
 
 func (m model) transplantOptions() transplant.Options {
@@ -2165,7 +2186,7 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 	m.showAsk = false
 	cfg, query := m.cfg, strings.TrimSpace(m.askInput)
 	scope := AllUnder(m.projects, m.root)
-	return m, func() tea.Msg {
+	return m, tea.Batch(spin(), func() tea.Msg {
 		candidates, rawHits := BuildCandidates(cfg, scope, query)
 		matches, err := assistRank(cfg.Assist, option, query, candidates)
 		if err != nil {
@@ -2182,7 +2203,7 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 			}
 		}
 		return askMsg{query: query, hits: hits, backend: option.Label()}
-	}
+	})
 }
 
 // replayAsk shows a saved search's results without a model call,

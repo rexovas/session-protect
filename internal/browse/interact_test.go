@@ -79,6 +79,27 @@ func buildEnv(t *testing.T) model {
 	return m
 }
 
+// deliver runs a command and feeds its message(s) back to the model,
+// unwrapping batches (the AI commands ship with a spinner tick).
+func deliver(t *testing.T, m model, cmd tea.Cmd) model {
+	t.Helper()
+	if cmd == nil {
+		return m
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, sub := range msg {
+			m = deliver(t, m, sub)
+		}
+	case spinMsg:
+		// animation only; nothing to assert through
+	default:
+		next, _ := m.Update(msg)
+		m = next.(model)
+	}
+	return m
+}
+
 func press(t *testing.T, m model, keys ...any) model {
 	t.Helper()
 	for _, key := range keys {
@@ -331,7 +352,7 @@ func TestAskPageLifecycle(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("enter did not fire")
 	}
-	_ = cmd()
+	m = deliver(t, m, cmd)
 	if len(chosen) != 1 || chosen[0] != "qwen3:8b · ollama" {
 		t.Fatalf("chosen = %v", chosen)
 	}
@@ -1093,8 +1114,7 @@ func TestRescueAIFlow(t *testing.T) {
 	if view := m.View(); !strings.Contains(view, "ctrl+c again") {
 		t.Fatal("quit warning not rendered")
 	}
-	next, _ = m.Update(cmd())
-	m = next.(model)
+	m = deliver(t, m, cmd)
 	if len(used) != 1 || !strings.Contains(used[0], "opus · claude for cccc3333") {
 		t.Fatalf("used = %v", used)
 	}
@@ -1222,10 +1242,7 @@ func TestAskHistoryReplay(t *testing.T) {
 		m = press(t, m, query)
 		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 		m = next.(model)
-		if cmd != nil {
-			next, _ = m.Update(cmd()) // run the rank call, deliver its result
-			m = next.(model)
-		}
+		m = deliver(t, m, cmd)
 		return m
 	}
 
