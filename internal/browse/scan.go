@@ -26,7 +26,7 @@ type Session struct {
 	CustomName     string    // user-assigned name, from custom-title events
 	LiveStatus     string    // non-empty when open in a running agent process
 	LivePID        int       // process holding the session open, for jumping to it
-	ProjectPath    string    // set on aggregated (AllUnder) sessions for display
+	ProjectPath    string    // the session's working directory (resume cd target)
 	Prompts        int       // for LOST sessions: prompt count from history
 	LastModel      string    // most recent model seen in the transcript
 	State          string    // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE | LOST (+ synthesized ACTIVE | OPEN | RESTORED)
@@ -158,6 +158,13 @@ func Scan(cfg config.Config) []*Project {
 		for i := range project.Sessions {
 			session := &project.Sessions[i]
 			session.Title = titles[session.ID]
+			// Every session knows its project. Resume, the inspector, and
+			// rescue destinations all read this; leaving it to the
+			// aggregated view meant folder-view sessions fell back to the
+			// browse root and resumed in the wrong directory.
+			if session.ProjectPath == "" && filepath.IsAbs(project.Path) {
+				session.ProjectPath = project.Path
+			}
 			if info, ok := open[session.ID]; ok {
 				session.LiveStatus = info.Status
 				session.LivePID = info.PID

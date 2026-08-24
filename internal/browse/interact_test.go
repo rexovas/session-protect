@@ -1069,6 +1069,12 @@ func TestInspectorActsOnSession(t *testing.T) {
 	if m.confirmResume == nil || m.confirmResume.ID != inspected {
 		t.Fatalf("resume dialog session = %v, want %s", m.confirmResume, inspected)
 	}
+	// The resume must land in the session's own project directory, not
+	// wherever the browser is rooted (the browser here is rooted at work,
+	// one level above the session's project).
+	if base := filepath.Base(m.confirmResume.ProjectPath); base != "app" {
+		t.Fatalf("resume project = %q, want the session's own dir", m.confirmResume.ProjectPath)
+	}
 	m = press(t, m, tea.KeyEsc)
 
 	// r from the inspector on a lost session → rescue dialog.
