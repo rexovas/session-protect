@@ -1,13 +1,16 @@
 package browse
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 func writeFile(t *testing.T, path string, content string) {
@@ -172,5 +175,44 @@ func TestScanSurfacesLostSessions(t *testing.T) {
 	// The live session must not be duplicated as lost.
 	if len(projects[0].Sessions) != 2 {
 		t.Fatalf("expected 2 sessions total, got %d", len(projects[0].Sessions))
+	}
+}
+
+func TestProjectPathPrefersSlugConsistentCwd(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+
+	// A session that started in ~/work before cd'ing into the real
+	// project: early lines carry the foreign cwd, later lines the real
+	// one. The file lives under the real project's slug.
+	project := filepath.Join(home, "legal", "tello-case")
+	slug := targets.ClaudeSlug(project)
+	dir := filepath.Join(home, ".claude", "projects", slug)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(home, "work")
+	var b strings.Builder
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&b, `{"type":"user","cwd":%q,"sessionId":"s1","message":{"role":"user","content":"early"}}`+"\n", foreign)
+	}
+	fmt.Fprintf(&b, `{"type":"user","cwd":%q,"sessionId":"s1","message":{"role":"user","content":"late"}}`+"\n", project)
+	if err := os.WriteFile(filepath.Join(dir, "11111111-0000-0000-0000-000000000001.jsonl"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{BackupRoot: filepath.Join(home, "root"), Topology: "combined"}
+	var found *Project
+	for _, p := range Scan(cfg) {
+		if p.Slug == slug {
+			found = p
+		}
+	}
+	if found == nil {
+		t.Fatal("project not scanned")
+	}
+	if found.Path != project {
+		t.Fatalf("path = %q, want the slug-consistent cwd %q", found.Path, project)
 	}
 }

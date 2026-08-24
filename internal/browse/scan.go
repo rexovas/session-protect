@@ -289,7 +289,7 @@ func scanClaude(cfg config.Config, byPath map[string]*Project) {
 		if len(sessions) == 0 {
 			continue
 		}
-		path := claudeProjectPath(sessions)
+		path := claudeProjectPath(sessions, slug)
 		if path == "" {
 			path = slug
 		}
@@ -1356,44 +1356,68 @@ func scanFileMeta(path string) (name string, model string) {
 	return name, model
 }
 
-// claudeProjectPath recovers the real project path by reading the cwd field
-// from the newest session file's first lines; slugs are not reversible.
-func claudeProjectPath(sessions []Session) string {
-	best := ""
-	var bestTime time.Time
+// claudeProjectPath recovers the real project path by reading cwd fields
+// from the session files; slugs are not reversible. A transcript can
+// carry cwds from OTHER directories — claude records the process cwd per
+// line, and a session that started elsewhere before cd'ing into the
+// project opens with foreign paths — so a cwd only wins outright when
+// claude's own slug of it matches the directory the file lives under.
+// With no slug-consistent cwd anywhere, the newest first-seen cwd is
+// still better than nothing.
+func claudeProjectPath(sessions []Session, slug string) string {
+	best, fallback := "", ""
+	var bestTime, fallbackTime time.Time
 	for _, session := range sessions {
 		path := session.SourcePath
 		if path == "" {
 			path = session.BackupPath
 		}
-		if path == "" || newest(session).Before(bestTime) {
+		if path == "" {
 			continue
 		}
-		if cwd := claudeCwd(path); cwd != "" {
-			best = cwd
+		matched, first := claudeCwd(path, slug)
+		if matched != "" && !newest(session).Before(bestTime) {
+			best = matched
 			bestTime = newest(session)
 		}
+		if first != "" && !newest(session).Before(fallbackTime) {
+			fallback = first
+			fallbackTime = newest(session)
+		}
 	}
-	return best
+	if best != "" {
+		return best
+	}
+	return fallback
 }
 
-func claudeCwd(path string) string {
+// claudeCwd scans a transcript for cwd fields: matched is the first one
+// whose claude slug equals the wanted slug, first is the first cwd of
+// any kind. The scan is capped — enough to get past a long foreign
+// prefix without reading multi-MB transcripts end to end.
+func claudeCwd(path string, slug string) (matched string, first string) {
 	file, err := os.Open(path)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-	for i := 0; i < 20 && scanner.Scan(); i++ {
+	for i := 0; i < 4000 && scanner.Scan(); i++ {
 		var event struct {
 			Cwd string `json:"cwd"`
 		}
-		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Cwd != "" {
-			return event.Cwd
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Cwd == "" {
+			continue
+		}
+		if first == "" {
+			first = event.Cwd
+		}
+		if targets.ClaudeSlug(event.Cwd) == slug {
+			return event.Cwd, first
 		}
 	}
-	return ""
+	return "", first
 }
 
 func newest(session Session) time.Time {
