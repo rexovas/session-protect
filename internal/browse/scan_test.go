@@ -216,3 +216,41 @@ func TestProjectPathPrefersSlugConsistentCwd(t *testing.T) {
 		t.Fatalf("path = %q, want the slug-consistent cwd %q", found.Path, project)
 	}
 }
+
+func TestProjectPathDecodesSlugForManualCopies(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+
+	// A manually copied transcript: it lives under the slug of a real
+	// directory (dashes and a dot in the name — both slug to '-'), but
+	// every cwd inside is foreign; it was never resumed here.
+	project := filepath.Join(home, "legal", "tello-case.v2")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	slug := targets.ClaudeSlug(project)
+	dir := filepath.Join(home, ".claude", "projects", slug)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(home, "elsewhere")
+	line := fmt.Sprintf(`{"type":"user","cwd":%q,"sessionId":"s1","message":{"role":"user","content":"copied"}}`+"\n", foreign)
+	if err := os.WriteFile(filepath.Join(dir, "22222222-0000-0000-0000-000000000002.jsonl"), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{BackupRoot: filepath.Join(home, "root"), Topology: "combined"}
+	var found *Project
+	for _, p := range Scan(cfg) {
+		if p.Slug == slug {
+			found = p
+		}
+	}
+	if found == nil {
+		t.Fatal("project not scanned")
+	}
+	if found.Path != project {
+		t.Fatalf("path = %q, want the decoded slug path %q", found.Path, project)
+	}
+}

@@ -1388,7 +1388,74 @@ func claudeProjectPath(sessions []Session, slug string) string {
 	if best != "" {
 		return best
 	}
+	// No transcript line agrees with the slug — a manual copy that was
+	// never resumed here has only foreign cwds. Decoding the slug
+	// against the real filesystem beats trusting a foreign path.
+	if decoded := decodeClaudeSlug(slug); decoded != "" {
+		return decoded
+	}
 	return fallback
+}
+
+// decodeClaudeSlug reverses a claude project slug by walking the
+// filesystem: every non-alphanumeric character slugs to '-', so the
+// mapping is lossy, but only one chain of real directories usually
+// slug-matches. Returns "" when no existing path decodes.
+func decodeClaudeSlug(slug string) string {
+	if !strings.HasPrefix(slug, "-") {
+		return ""
+	}
+	budget := 400 // ReadDir calls; ambiguity is rare, runaway walks are not free
+	return decodeSlugStep(string(os.PathSeparator), slug[1:], 0, &budget)
+}
+
+func decodeSlugStep(dir string, rest string, depth int, budget *int) string {
+	if rest == "" {
+		return dir
+	}
+	if depth > 24 || *budget <= 0 {
+		return ""
+	}
+	*budget--
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		isDir := entry.IsDir()
+		if !isDir && entry.Type()&os.ModeSymlink != 0 {
+			// Symlinked directories (like macOS's /var) count.
+			if info, err := os.Stat(filepath.Join(dir, entry.Name())); err == nil && info.IsDir() {
+				isDir = true
+			}
+		}
+		if !isDir {
+			continue
+		}
+		es := nameSlug(entry.Name())
+		if es == rest {
+			return filepath.Join(dir, entry.Name())
+		}
+		if strings.HasPrefix(rest, es+"-") {
+			if found := decodeSlugStep(filepath.Join(dir, entry.Name()), rest[len(es)+1:], depth+1, budget); found != "" {
+				return found
+			}
+		}
+	}
+	return ""
+}
+
+// nameSlug applies claude's slug mapping to a single path segment.
+func nameSlug(name string) string {
+	out := []byte(name)
+	for i, c := range out {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		default:
+			out[i] = '-'
+		}
+	}
+	return string(out)
 }
 
 // claudeCwd scans a transcript for cwd fields: matched is the first one
