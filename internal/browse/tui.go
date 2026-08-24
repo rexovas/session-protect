@@ -143,6 +143,7 @@ type model struct {
 	confirmResume  *Session
 	confirmRescue  *Session // a ✕ lost session offered export/rebuild
 	rebuildChoice  *Session // rescued original with several rebuilds: pick which to resume
+	rescueHow      bool     // rescue dialog page 2: mechanical rebuild vs rebuild with AI
 	resumeHeading  string   // overrides the resume dialog title (rebuild-complete flow)
 	// The AI-rebuild stage: model choice (opus-first) before synthesis.
 	rescueAI      *Session
@@ -1035,7 +1036,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			session := *m.rescueDest
 			m.rescueDest = nil
 			m.confirmRescue = &session
-			m.confirmSel = len(m.rescueButtons(session)) - 1
+			m.rescueHow = false
+			m.confirmSel = m.rescueDefaultSel(session)
 		case "up":
 			m.rescueCursor = (m.rescueCursor + rows - 1) % rows
 		case "down":
@@ -1121,7 +1123,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.confirmRescue != nil {
-		buttons := len(m.rescueButtons(*m.confirmRescue))
+		labels := m.rescueButtons(*m.confirmRescue)
+		if m.rescueHow {
+			labels = rescueHowButtons()
+		}
+		buttons := len(labels)
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -1130,23 +1136,40 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "left", "h", "up", "k":
 			m.confirmSel = (m.confirmSel + buttons - 1) % buttons
 		case "esc", "n":
+			if m.rescueHow {
+				m.rescueHow = false
+				m.confirmSel = m.rescueDefaultSel(*m.confirmRescue)
+				break
+			}
 			m.confirmRescue = nil
 		case "enter":
 			session := *m.confirmRescue
-			m.confirmRescue = nil
-			labels := m.rescueButtons(session)
 			switch labels[m.confirmSel] {
+			case "Resume":
+				m.confirmRescue = nil
+				m = m.pressOpen(session)
+			case "Rebuild…":
+				m.rescueHow = true
+				m.confirmSel = len(rescueHowButtons()) - 1 // Back default
 			case "Rebuild with AI":
 				m.rescueModels = rescueAIModels(m.cfg.Assist)
 				if len(m.rescueModels) == 0 {
 					m.notice, m.noticeErr = "ai rebuild needs ollama running or the claude CLI on PATH", true
 					break
 				}
+				m.confirmRescue, m.rescueHow = nil, false
 				m = m.openRescuePicker(session, "rebuild-ai")
 			case "Rebuild":
+				m.confirmRescue, m.rescueHow = nil, false
 				m = m.openRescuePicker(session, "rebuild")
 			case "Export prompts":
+				m.confirmRescue = nil
 				m = m.openRescuePicker(session, "export")
+			case "Back":
+				m.rescueHow = false
+				m.confirmSel = m.rescueDefaultSel(session)
+			case "Cancel":
+				m.confirmRescue = nil
 			}
 		}
 		return m, nil
@@ -1512,7 +1535,8 @@ func (m model) pressRescue(session Session) model {
 		m.confirmSel = 1
 	case "LOST":
 		m.confirmRescue = &session
-		m.confirmSel = len(m.rescueButtons(session)) - 1
+		m.rescueHow = false
+		m.confirmSel = m.rescueDefaultSel(session)
 	}
 	return m
 }
@@ -1889,6 +1913,14 @@ func (m model) View() string {
 		// The description follows the highlighted button; both lines are
 		// always present so the dialog never changes height.
 		describe := map[string][2]string{
+			"Resume": {
+				"opens the resume dialog for the existing reconstruction —",
+				"the resumable descendant of this lost original",
+			},
+			"Rebuild…": {
+				"reconstruction options: a mechanical replay of your prompts, or",
+				"one with an AI-written brief of where the work stood (next page)",
+			},
 			"Rebuild": {
 				"creates a NEW resumable session from your prompts; lost responses",
 				"appear as [response lost] — the original stays marked lost",
@@ -1901,12 +1933,21 @@ func (m model) View() string {
 				"writes the surviving prompts to a markdown file you can keep",
 				"anywhere — re-runnable; the original stays marked lost",
 			},
+			"Back": {
+				"returns to the previous page",
+				"",
+			},
 			"Cancel": {
 				"closes this dialog without touching anything",
 				"",
 			},
 		}
 		labels := m.rescueButtons(session)
+		heading := "Rescue lost session?"
+		if m.rescueHow {
+			labels = rescueHowButtons()
+			heading = "Rebuild how?"
+		}
 		desc := describe[labels[min(m.confirmSel, len(labels)-1)]]
 		body := []string{
 			styleDim.Render("✕ ") + truncate(title, 68),
@@ -1931,7 +1972,7 @@ func (m model) View() string {
 			styleDim.Render(desc[0]),
 			styleDim.Render(desc[1]),
 			styleDim.Render("(each action then asks where to write)"))
-		return m.dialog("Rescue lost session?", body, labels...)
+		return m.dialog(heading, body, labels...)
 	}
 	if m.confirmRestore != nil {
 		session := *m.confirmRestore
@@ -2963,10 +3004,29 @@ func (m model) recoveryTab(b *strings.Builder, session Session) {
 // sessions can be rebuilt into a resumable transcript; codex history can
 // currently only be exported.
 func (m model) rescueButtons(session Session) []string {
-	if session.Target == "claude" {
-		return []string{"Rebuild", "Rebuild with AI", "Export prompts", "Cancel"}
+	if session.Target != "claude" {
+		return []string{"Export prompts", "Cancel"}
 	}
-	return []string{"Export prompts", "Cancel"}
+	if len(m.validRebuilds(session)) > 0 {
+		return []string{"Resume", "Rebuild…", "Export prompts", "Cancel"}
+	}
+	return []string{"Rebuild…", "Export prompts", "Cancel"}
+}
+
+// rescueDefaultSel: Resume is the default when a reconstruction already
+// exists — it only opens the resume dialog, so a reflexive enter is
+// safe. Otherwise the usual Cancel default.
+func (m model) rescueDefaultSel(session Session) int {
+	buttons := m.rescueButtons(session)
+	if buttons[0] == "Resume" {
+		return 0
+	}
+	return len(buttons) - 1
+}
+
+// rescueHowButtons is the dialog's second page.
+func rescueHowButtons() []string {
+	return []string{"Rebuild", "Rebuild with AI", "Back"}
 }
 
 // rescueAIModels lists model choices for intelligent rebuilds, opus

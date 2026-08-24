@@ -575,19 +575,35 @@ func TestRescueDialogFlow(t *testing.T) {
 	defer func() { rescueReconstruct = nil; rescueExport = nil }()
 
 	m = press(t, m, "r")
-	if m.confirmRescue == nil || m.confirmSel != 3 {
+	if m.confirmRescue == nil || m.confirmSel != 2 {
 		t.Fatalf("rescue dialog state: %v sel=%d", m.confirmRescue != nil, m.confirmSel)
 	}
 	view := m.View()
-	for _, want := range []string{"Rescue lost session?", "Rebuild", "Rebuild with AI", "Export prompts", "Cancel", "the lost one",
+	for _, want := range []string{"Rescue lost session?", "Rebuild…", "Export prompts", "Cancel", "the lost one",
 		"without touching anything"} { // Cancel is highlighted: its description shows
 		if !strings.Contains(view, want) {
 			t.Fatalf("rescue dialog missing %q", want)
 		}
 	}
+	if strings.Contains(view, "Rebuild with AI") {
+		t.Fatal("the rebuild flavors belong to page 2")
+	}
 	// The description follows the highlight.
 	if view := press(t, m, tea.KeyLeft).View(); !strings.Contains(view, "markdown file") {
 		t.Fatal("highlighting Export did not switch the description")
+	}
+	// Rebuild… advances to page 2 with Back as the safe default; esc
+	// returns to page 1.
+	m2 := press(t, m, tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
+	if !m2.rescueHow || m2.confirmSel != 2 {
+		t.Fatalf("page 2 state: how=%v sel=%d", m2.rescueHow, m2.confirmSel)
+	}
+	if view := m2.View(); !strings.Contains(view, "Rebuild how?") || !strings.Contains(view, "Rebuild with AI") {
+		t.Fatal("page 2 missing the rebuild flavors")
+	}
+	m2 = press(t, m2, tea.KeyEsc)
+	if m2.rescueHow || m2.confirmRescue == nil {
+		t.Fatal("esc should return to page 1")
 	}
 
 	// Reflexive enter = Cancel.
@@ -632,9 +648,9 @@ func TestRescueDialogFlow(t *testing.T) {
 	}
 	m = press(t, m, tea.KeyEsc)
 
-	// Rebuild path (mechanical): three lefts from Cancel, then confirm the
-	// prefilled project directory.
-	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
+	// Rebuild path (mechanical): page 1 Rebuild…, then page 2 Rebuild,
+	// then confirm the prefilled project directory.
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter, tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
 	if m.rescueDest == nil || m.rescueAction != "rebuild" {
 		t.Fatal("rebuild destination stage missing")
 	}
@@ -836,14 +852,24 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 	// The rescue dialog on a rescued original lists its reconstructions
 	// and warns another will be created alongside.
 	rescued := *find(projects, lost)
+	m.projects = projects
 	m = m.pressRescue(rescued)
+	if m.confirmSel != 0 {
+		t.Fatalf("Resume must be the default, sel=%d", m.confirmSel)
+	}
 	view := m.View()
-	for _, want := range []string{"already rebuilt", rebuilt[:8], "ANOTHER session"} {
+	for _, want := range []string{"already rebuilt", rebuilt[:8], "ANOTHER session", "Resume"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("rescue dialog missing %q", want)
 		}
 	}
-	m.confirmRescue = nil
+	// Enter on the Resume default routes straight to the rebuild's
+	// resume dialog.
+	m = press(t, m, tea.KeyEnter)
+	if m.confirmRescue != nil || m.confirmResume == nil || m.confirmResume.ID != rebuilt {
+		t.Fatalf("Resume routed to %+v", m.confirmResume)
+	}
+	m.confirmResume, m.resumeHeading = nil, ""
 
 	// o on the rescued original routes to its newest rebuild.
 	m = m.pressOpen(rescued)
@@ -1020,9 +1046,9 @@ func TestRescueAIFlow(t *testing.T) {
 	}
 	defer func() { assistModels = assist.AvailableModels; rescueReconstructAI = nil }()
 
-	// r → arrow to "Rebuild with AI" (index 1 of 4; Cancel=3 default),
-	// then confirm the prefilled destination.
-	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
+	// r → Rebuild… (page 1) → Rebuild with AI (page 2), then confirm the
+	// prefilled destination.
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter, tea.KeyLeft, tea.KeyEnter)
 	if m.rescueDest == nil || m.rescueAction != "rebuild-ai" {
 		t.Fatal("destination stage did not open")
 	}
@@ -1052,7 +1078,7 @@ func TestRescueAIFlow(t *testing.T) {
 		t.Fatalf("cancel must announce itself: %q", m.notice)
 	}
 	// Full accept.
-	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter, tea.KeyEnter, tea.KeyLeft)
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter, tea.KeyLeft, tea.KeyEnter, tea.KeyEnter, tea.KeyLeft)
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(model)
 	if !m.rescueBusy || cmd == nil {
