@@ -1106,44 +1106,44 @@ func TestAskHistoryReplay(t *testing.T) {
 	var asked []string
 	assistRank = func(_ config.Assist, _ assist.ModelOption, query string, _ []assist.Candidate) ([]assist.Match, error) {
 		asked = append(asked, query)
-		return nil, nil
+		return []assist.Match{{ID: "aaaa1111-0000-0000-0000-000000000001", Reason: "matched alpha"}}, nil
 	}
 	defer func() { assistModels = assist.AvailableModels; assistRank = nil }()
+	fire := func(m model, query string) model {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+		m = next.(model)
+		m.askInput = ""
+		m = press(t, m, query)
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = next.(model)
+		if cmd != nil {
+			next, _ = m.Update(cmd()) // run the rank call, deliver its result
+			m = next.(model)
+		}
+		return m
+	}
 
-	// Two searches land in history, newest first, persisted to disk.
+	// Two searches land in history, newest first, persisted with results.
+	m = fire(m, "first query")
+	m = fire(m, "second query")
+	if len(m.askHistory) != 2 || m.askHistory[0].Query != "second query" || m.askHistory[1].Query != "first query" {
+		t.Fatalf("history = %+v", m.askHistory)
+	}
+	persisted := loadAskHistory(m.cfg)
+	if len(persisted) != 2 || persisted[0].Query != "second query" {
+		t.Fatalf("persisted = %+v", persisted)
+	}
+	if len(persisted[0].Results) != 1 || persisted[0].Results[0].ID != "aaaa1111-0000-0000-0000-000000000001" {
+		t.Fatalf("results not saved: %+v", persisted[0].Results)
+	}
+
+	// Reopen: the list renders with the saved marker; ↓ recalls entries,
+	// ↑ returns to the draft.
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
 	m = next.(model)
 	m.askInput = ""
-	m = press(t, m, "first query")
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = next.(model)
-	if cmd != nil {
-		next, _ = m.Update(cmd()) // run the rank call, deliver its result
-		m = next.(model)
-	}
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
-	m = next.(model)
-	m.askInput = ""
-	m = press(t, m, "second query")
-	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = next.(model)
-	if cmd != nil {
-		next, _ = m.Update(cmd())
-		m = next.(model)
-	}
-	if len(m.askHistory) != 2 || m.askHistory[0] != "second query" || m.askHistory[1] != "first query" {
-		t.Fatalf("history = %v", m.askHistory)
-	}
-	if got := loadAskHistory(m.cfg); len(got) != 2 || got[0] != "second query" {
-		t.Fatalf("persisted = %v", got)
-	}
-
-	// Reopen: the list renders; ↑ recalls entries, ↓ returns to the draft.
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
-	m = next.(model)
-	m.askInput = ""
-	if view := m.View(); !strings.Contains(view, "recent searches") || !strings.Contains(view, "first query") {
-		t.Fatal("history list not rendered")
+	if view := m.View(); !strings.Contains(view, "recent searches") || !strings.Contains(view, "1 saved") {
+		t.Fatal("history list or saved marker not rendered")
 	}
 	m = press(t, m, "dra")
 	m = press(t, m, tea.KeyDown)
@@ -1159,18 +1159,37 @@ func TestAskHistoryReplay(t *testing.T) {
 		t.Fatalf("draft restore: %q sel=%d", m.askInput, m.askHistSel)
 	}
 
-	// Replaying a recalled query re-fires it and moves it to the front.
+	// Enter on a recalled search replays the SAVED results — no model
+	// call, sessions rehydrated live, the saved age shown.
+	before := len(asked)
 	m = press(t, m, tea.KeyDown, tea.KeyDown) // first query
-	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = next.(model)
-	if cmd != nil {
-		next, _ = m.Update(cmd())
-		m = next.(model)
+	m = press(t, m, tea.KeyEnter)
+	if len(asked) != before {
+		t.Fatalf("cached replay called the model: %v", asked)
 	}
-	if len(asked) != 3 || asked[2] != "first query" {
-		t.Fatalf("asked = %v", asked)
+	if !m.showHits || len(m.hits) != 1 || m.hits[0].Session.ID != "aaaa1111-0000-0000-0000-000000000001" {
+		t.Fatalf("replayed hits = %+v", m.hits)
 	}
-	if m.askHistory[0] != "first query" || len(m.askHistory) != 2 {
-		t.Fatalf("reorder: %v", m.askHistory)
+	if m.hits[0].Session.Title == "" {
+		t.Fatal("replayed session not rehydrated from the scan")
+	}
+	if m.hitsCached.IsZero() {
+		t.Fatal("cached marker missing")
+	}
+	if view := m.View(); !strings.Contains(view, "saved") {
+		t.Fatal("saved age not shown")
+	}
+
+	// A fresh run of the same text (not recalled) still asks the model.
+	m = press(t, m, tea.KeyEsc)
+	m = fire(m, "first query")
+	if len(asked) != before+1 {
+		t.Fatalf("fresh run did not ask the model: %v", asked)
+	}
+	if !m.hitsCached.IsZero() {
+		t.Fatal("fresh results wrongly marked cached")
+	}
+	if m.askHistory[0].Query != "first query" || len(m.askHistory) != 2 {
+		t.Fatalf("reorder: %+v", m.askHistory)
 	}
 }

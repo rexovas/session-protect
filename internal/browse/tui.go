@@ -90,9 +90,10 @@ type model struct {
 	showAsk    bool
 	askInput   string
 	askModels  []assist.ModelOption
-	askHistory []string // prior queries, most recent first
-	askHistSel int      // -1 = composing; otherwise index into askHistory
-	askDraft   string   // in-progress text stashed while browsing history
+	askHistory []askHistoryEntry // prior searches with saved results, most recent first
+	hitsCached time.Time         // when ask results were saved; zero = fresh model run
+	askHistSel int               // -1 = composing; otherwise index into askHistory
+	askDraft   string            // in-progress text stashed while browsing history
 	askModel   int
 
 	// Content search (ctrl+s on a query) counts transcript hits per
@@ -237,6 +238,8 @@ type rescueAIMsg struct {
 }
 
 type askMsg struct {
+	query string
+
 	hits    []Hit
 	backend string
 	err     error
@@ -704,12 +707,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case askMsg:
 		m.hitsBusy = false
+		entry := askHistoryEntry{Query: msg.query, Model: msg.backend, At: time.Now()}
 		if msg.err != nil {
+			// Keep the query recallable even when the run failed.
+			if msg.query != "" {
+				appendAskHistory(m.cfg, entry)
+				m.askHistory = pushHistory(m.askHistory, entry)
+			}
 			m.notice, m.noticeErr = "ai find failed: "+msg.err.Error(), true
 			return m, nil
 		}
+		for _, hit := range msg.hits {
+			entry.Results = append(entry.Results, cachedResult{
+				ID: hit.Session.ID, Reason: hit.Snippet, Count: hit.Count,
+			})
+		}
+		if msg.query != "" {
+			appendAskHistory(m.cfg, entry)
+			m.askHistory = pushHistory(m.askHistory, entry)
+		}
 		m.hitsMode = "ask"
 		m.hitsNote = msg.backend
+		m.hitsCached = time.Time{}
 		m.hits = msg.hits
 		m.showHits = true
 		m.hCursor, m.hOffset = 0, 0
@@ -1195,7 +1214,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.askDraft = m.askInput
 				}
 				m.askHistSel++
-				m.askInput = m.askHistory[m.askHistSel]
+				m.askInput = m.askHistory[m.askHistSel].Query
 			}
 		case "up":
 			if m.askHistSel > -1 {
@@ -1203,16 +1222,28 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.askHistSel == -1 {
 					m.askInput = m.askDraft
 				} else {
-					m.askInput = m.askHistory[m.askHistSel]
+					m.askInput = m.askHistory[m.askHistSel].Query
 				}
 			}
 		case "esc", "ctrl+g":
 			m.showAsk = false
 		case "enter":
-			if strings.TrimSpace(m.askInput) != "" && !m.hitsBusy {
-				m.showAsk = false
-				return m.fireAsk()
+			if strings.TrimSpace(m.askInput) == "" || m.hitsBusy {
+				break
 			}
+			// A recalled search with saved results replays instantly —
+			// no model call. Typing a query fresh, or recalling an entry
+			// without results, runs the model.
+			if m.askHistSel >= 0 {
+				entry := m.askHistory[m.askHistSel]
+				if len(entry.Results) > 0 && strings.TrimSpace(m.askInput) == entry.Query {
+					if done, ok := m.replayAsk(entry); ok {
+						return done, nil
+					}
+				}
+			}
+			m.showAsk = false
+			return m.fireAsk()
 		case "backspace":
 			m.askHistSel = -1
 			if runes := []rune(m.askInput); len(runes) > 0 {
@@ -1974,25 +2005,22 @@ func (m model) openAsk() (tea.Model, tea.Cmd) {
 // fireAsk asks the chosen local model which sessions match the
 // description, grounded on keyword-scored candidates with excerpts.
 func (m model) fireAsk() (tea.Model, tea.Cmd) {
-	if query := strings.TrimSpace(m.askInput); query != "" {
-		appendAskHistory(m.cfg, query, m.askModels[m.askModel].Label())
-		m.askHistory = pushHistory(m.askHistory, query)
-		m.askHistSel = -1
-	}
 	if len(m.askModels) == 0 {
 		return m, nil
 	}
+	m.askHistSel = -1
 	option := m.askModels[m.askModel]
 	m.hitsBusy = true
 	m.hitsMode = "ask"
 	m.hitsQuery = m.askInput
-	cfg, query := m.cfg, m.askInput
+	m.showAsk = false
+	cfg, query := m.cfg, strings.TrimSpace(m.askInput)
 	scope := AllUnder(m.projects, m.root)
 	return m, func() tea.Msg {
 		candidates, rawHits := BuildCandidates(cfg, scope, query)
 		matches, err := assistRank(cfg.Assist, option, query, candidates)
 		if err != nil {
-			return askMsg{backend: option.Label(), err: err}
+			return askMsg{query: query, backend: option.Label(), err: err}
 		}
 		byID := map[string]Session{}
 		for _, session := range scope {
@@ -2004,8 +2032,37 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 				hits = append(hits, Hit{Session: session, Snippet: match.Reason, Count: rawHits[match.ID]})
 			}
 		}
-		return askMsg{hits: hits, backend: option.Label()}
+		return askMsg{query: query, hits: hits, backend: option.Label()}
 	}
+}
+
+// replayAsk shows a saved search's results without a model call,
+// rehydrating each result against the current scan so states, badges,
+// and titles are current. Returns ok=false when none of the saved
+// sessions exist anymore — the caller then runs the model live.
+func (m model) replayAsk(entry askHistoryEntry) (model, bool) {
+	byID := map[string]Session{}
+	for _, session := range AllUnder(m.projects, m.root) {
+		byID[session.ID] = session
+	}
+	var hits []Hit
+	for _, saved := range entry.Results {
+		if session, ok := byID[saved.ID]; ok {
+			hits = append(hits, Hit{Session: session, Snippet: saved.Reason, Count: saved.Count})
+		}
+	}
+	if len(hits) == 0 {
+		return m, false
+	}
+	m.showAsk = false
+	m.hitsMode = "ask"
+	m.hitsQuery = entry.Query
+	m.hitsNote = entry.Model
+	m.hitsCached = entry.At
+	m.hits = hits
+	m.showHits = true
+	m.hCursor, m.hOffset = 0, 0
+	return m, true
 }
 
 // resumeCommand is the shell line a spawned window runs to pick the
@@ -2250,18 +2307,27 @@ func (m model) askView() string {
 		b.WriteString("\n" + styleDim.Render(" recent searches") + "\n")
 		shown := min(len(m.askHistory), 6)
 		for i := 0; i < shown; i++ {
-			line := truncate(m.askHistory[i], inner-4)
+			entry := m.askHistory[i]
+			line := truncate(entry.Query, inner-16)
+			saved := ""
+			if len(entry.Results) > 0 {
+				saved = fmt.Sprintf("  · %d saved", len(entry.Results))
+			}
 			if i == m.askHistSel {
-				b.WriteString(styleCursor.Render(" ❯ "+line) + "\n")
+				b.WriteString(styleCursor.Render(" ❯ "+line) + styleDim.Render(saved) + "\n")
 			} else {
-				b.WriteString(styleDim.Render("   "+line) + "\n")
+				b.WriteString(styleDim.Render("   "+line+saved) + "\n")
 			}
 		}
 		if len(m.askHistory) > shown {
 			b.WriteString(styleDim.Render(fmt.Sprintf("   … %d more (↑ to reach)", len(m.askHistory)-shown)) + "\n")
 		}
 	}
-	return m.pinBottomBare(b.String(), "enter ask · ↓ recent searches · ←/→ model · esc close")
+	help := "enter ask · ↓ recent searches · ←/→ model · esc close"
+	if m.askHistSel >= 0 && len(m.askHistory[m.askHistSel].Results) > 0 {
+		help = "enter show saved results · edit text to re-ask the model · esc close"
+	}
+	return m.pinBottomBare(b.String(), help)
 }
 
 // filterView is the f facet page: grouped checkboxes over what exists
@@ -2306,6 +2372,9 @@ func (m model) hitsView() string {
 	if m.hitsMode == "ask" {
 		heading = "Session Explorer ▸ ai find"
 		note = fmt.Sprintf("  \"%s\" · %d match(es) via %s ", m.hitsQuery, len(m.hits), m.hitsNote)
+		if !m.hitsCached.IsZero() {
+			note += styleStale.Render(fmt.Sprintf("· saved %s ago ", ago(m.hitsCached)))
+		}
 	}
 	b.WriteString(styleHeader.Render(heading) + styleDim.Render(note) + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
@@ -2339,7 +2408,11 @@ func (m model) hitsView() string {
 			b.WriteString("\n " + styleDim.Render(prefix+truncate(snippet, m.width-4-len(prefix))) + "\n")
 		}
 	}
-	return m.pinBottomBare(b.String(), "↑/↓ move · enter open · esc back · / new search")
+	help := "↑/↓ move · enter open · esc back · / new search"
+	if m.hitsMode == "ask" && !m.hitsCached.IsZero() {
+		help = "↑/↓ move · enter open · ctrl+g re-ask the model · esc back"
+	}
+	return m.pinBottomBare(b.String(), help)
 }
 
 func (m model) hitRow(hit Hit, index int, active bool) string {

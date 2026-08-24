@@ -17,21 +17,31 @@ func askHistoryPath(cfg config.Config) string {
 	return filepath.Join(cfg.BackupRoot, "ask-history.jsonl")
 }
 
-type askHistoryEntry struct {
-	Query string    `json:"q"`
-	Model string    `json:"model,omitempty"`
-	At    time.Time `json:"at"`
+// cachedResult is one saved AI-find match: enough to re-display the
+// result without asking the model again. Sessions are stored by id and
+// rehydrated against the current scan, so state stays truthful.
+type cachedResult struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason,omitempty"`
+	Count  int    `json:"count,omitempty"`
 }
 
-// loadAskHistory returns prior queries, most recent first, deduplicated
-// to their latest occurrence.
-func loadAskHistory(cfg config.Config) []string {
+type askHistoryEntry struct {
+	Query   string         `json:"q"`
+	Model   string         `json:"model,omitempty"`
+	At      time.Time      `json:"at"`
+	Results []cachedResult `json:"results,omitempty"`
+}
+
+// loadAskHistory returns prior searches, most recent first, deduplicated
+// by query to their latest occurrence.
+func loadAskHistory(cfg config.Config) []askHistoryEntry {
 	file, err := os.Open(askHistoryPath(cfg))
 	if err != nil {
 		return nil
 	}
 	defer file.Close()
-	var queries []string
+	var entries []askHistoryEntry
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -39,16 +49,16 @@ func loadAskHistory(cfg config.Config) []string {
 		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.Query == "" {
 			continue
 		}
-		queries = append(queries, entry.Query)
+		entries = append(entries, entry)
 	}
 	seen := map[string]bool{}
-	var out []string
-	for i := len(queries) - 1; i >= 0; i-- {
-		if seen[queries[i]] {
+	var out []askHistoryEntry
+	for i := len(entries) - 1; i >= 0; i-- {
+		if seen[entries[i].Query] {
 			continue
 		}
-		seen[queries[i]] = true
-		out = append(out, queries[i])
+		seen[entries[i].Query] = true
+		out = append(out, entries[i])
 		if len(out) == askHistoryLimit {
 			break
 		}
@@ -56,9 +66,9 @@ func loadAskHistory(cfg config.Config) []string {
 	return out
 }
 
-// appendAskHistory records a fired query. Failures are silent — history
-// is a convenience, never a blocker.
-func appendAskHistory(cfg config.Config, query string, model string) {
+// appendAskHistory records a completed search. Failures are silent —
+// history is a convenience, never a blocker.
+func appendAskHistory(cfg config.Config, entry askHistoryEntry) {
 	if err := os.MkdirAll(cfg.BackupRoot, 0o700); err != nil {
 		return
 	}
@@ -67,15 +77,16 @@ func appendAskHistory(cfg config.Config, query string, model string) {
 		return
 	}
 	defer file.Close()
-	line, _ := json.Marshal(askHistoryEntry{Query: query, Model: model, At: time.Now()})
+	line, _ := json.Marshal(entry)
 	file.Write(append(line, '\n'))
 }
 
-// pushHistory prepends a query to the in-memory list, deduplicating.
-func pushHistory(history []string, query string) []string {
-	out := []string{query}
+// pushHistory prepends an entry to the in-memory list, deduplicating by
+// query.
+func pushHistory(history []askHistoryEntry, entry askHistoryEntry) []askHistoryEntry {
+	out := []askHistoryEntry{entry}
 	for _, prior := range history {
-		if prior != query && len(out) < askHistoryLimit {
+		if prior.Query != entry.Query && len(out) < askHistoryLimit {
 			out = append(out, prior)
 		}
 	}
