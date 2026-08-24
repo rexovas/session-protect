@@ -255,8 +255,13 @@ func writeReconstruction(project string, prompts []Prompt, finalText string) (ne
 		if i == len(prompts)-1 {
 			text = finalText
 		}
+		// message.model is required by claude's INTERACTIVE resume (its
+		// absence fails the load with "Failed to resume session", while
+		// headless -p resume works without it — bisected live). The
+		// value itself is not validated, so it stays honest.
 		write("assistant", prompt.At.Add(time.Second), map[string]any{
 			"role":    "assistant",
+			"model":   "reconstructed",
 			"content": []map[string]any{{"type": "text", "text": text}},
 		})
 	}

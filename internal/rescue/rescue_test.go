@@ -151,6 +151,16 @@ func TestReconstructBuildsResumableSession(t *testing.T) {
 		}
 		prevUUID = line["uuid"]
 	}
+	for i, line := range lines {
+		if line["type"] != "assistant" {
+			continue
+		}
+		// Interactive resume refuses transcripts whose assistant
+		// messages lack a model field.
+		if line["message"].(map[string]any)["model"] != "reconstructed" {
+			t.Fatalf("line %d assistant message missing model field", i)
+		}
+	}
 	last := lines[5]["message"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(last, "reconstructed by session-protect") {
 		t.Fatalf("final placeholder missing marker: %q", last)
