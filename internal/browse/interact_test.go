@@ -855,6 +855,43 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 	}
 	m.confirmResume, m.resumeHeading = nil, ""
 
+	// A second reconstruction: o now opens a chooser listing both, and
+	// picking one lands in its resume dialog.
+	const second = "1a1a1a1a-0000-4000-8000-000000000000"
+	audit.Append(m.cfg.BackupRoot, []audit.Entry{{
+		Time: time.Now(), Action: "reconstruct", Target: "claude",
+		SessionID: second, From: lost,
+	}})
+	secondPath := filepath.Join(filepath.Dir(path), second+".jsonl")
+	if err := os.WriteFile(secondPath, []byte(strings.ReplaceAll(line, rebuilt, second)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projects = Scan(m.cfg)
+	m.projects = projects
+	rescued = *find(projects, lost)
+	if len(rescued.RebuiltAs) != 2 || rescued.RebuiltAs[0] != second {
+		t.Fatalf("RebuiltAs = %v, want newest first", rescued.RebuiltAs)
+	}
+	m = m.pressOpen(rescued)
+	if m.rebuildChoice == nil || m.confirmResume != nil {
+		t.Fatal("several rebuilds must open the chooser")
+	}
+	view = m.View()
+	for _, want := range []string{"Resume which rebuild?", second[:8], rebuilt[:8]} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("chooser missing %q", want)
+		}
+	}
+	// Cancel is default; arrow to the first (newest) rebuild and confirm.
+	if m.confirmSel != 2 {
+		t.Fatalf("chooser default = %d, want Cancel", m.confirmSel)
+	}
+	m = press(t, m, tea.KeyLeft, tea.KeyLeft, tea.KeyEnter)
+	if m.rebuildChoice != nil || m.confirmResume == nil || m.confirmResume.ID != second {
+		t.Fatalf("chosen resume = %+v", m.confirmResume)
+	}
+	m.confirmResume, m.resumeHeading = nil, ""
+
 	// The inspector's middle tab becomes Recovery for lost sessions,
 	// listing the reconstructions and the export state.
 	m.detail = &rescued

@@ -142,6 +142,7 @@ type model struct {
 	confirmRestore *Session
 	confirmResume  *Session
 	confirmRescue  *Session // a ✕ lost session offered export/rebuild
+	rebuildChoice  *Session // rescued original with several rebuilds: pick which to resume
 	resumeHeading  string   // overrides the resume dialog title (rebuild-complete flow)
 	// The AI-rebuild stage: model choice (opus-first) before synthesis.
 	rescueAI      *Session
@@ -867,6 +868,35 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.rebuildChoice != nil {
+		rebuilds := m.validRebuilds(*m.rebuildChoice)
+		buttons := len(rebuilds) + 1
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "right", "tab", "l", "down", "j":
+			m.confirmSel = (m.confirmSel + 1) % buttons
+		case "left", "h", "up", "k":
+			m.confirmSel = (m.confirmSel + buttons - 1) % buttons
+		case "esc", "n":
+			m.rebuildChoice = nil
+		case "enter":
+			if m.confirmSel >= len(rebuilds) {
+				m.rebuildChoice = nil
+				break
+			}
+			rebuilt := m.sessionByID(rebuilds[m.confirmSel])
+			m.rebuildChoice = nil
+			if rebuilt == nil {
+				break
+			}
+			copied := *rebuilt
+			m.confirmResume = &copied
+			m.resumeHeading = "Lost original — resume its rebuild " + copied.ID[:8] + "…?"
+			m.confirmSel = 2
+		}
+		return m, nil
+	}
 	if m.confirmResume != nil {
 		switch msg.String() {
 		case "ctrl+c":
@@ -1506,18 +1536,22 @@ func (m model) pressOpen(session Session) model {
 			m.notice = "brought the session's window to the front"
 		}
 	case session.State == "LOST":
-		// The original is never resumable — but its newest rebuild is,
-		// so o routes there instead of dead-ending.
-		if len(session.RebuiltAs) > 0 {
-			if rebuilt := m.sessionByID(session.RebuiltAs[0]); rebuilt != nil {
-				copied := *rebuilt
-				m.confirmResume = &copied
-				m.resumeHeading = "Lost original — resume its rebuild " + copied.ID[:8] + "…?"
-				m.confirmSel = 2
-				break
-			}
+		// The original is never resumable — but its rebuilds are, so o
+		// routes there instead of dead-ending: straight to the resume
+		// dialog for a single rebuild, a chooser when there are several.
+		switch rebuilds := m.validRebuilds(session); len(rebuilds) {
+		case 0:
+			m.notice, m.noticeErr = "lost sessions have no transcript to resume", true
+		case 1:
+			copied := *m.sessionByID(rebuilds[0])
+			m.confirmResume = &copied
+			m.resumeHeading = "Lost original — resume its rebuild " + copied.ID[:8] + "…?"
+			m.confirmSel = 2
+		default:
+			copied := session
+			m.rebuildChoice = &copied
+			m.confirmSel = len(rebuilds) // Cancel default
 		}
-		m.notice, m.noticeErr = "lost sessions have no transcript to resume", true
 	case session.SourcePath == "":
 		m.notice, m.noticeErr = "backup-only session — restore it first (r), then resume", true
 	default:
@@ -1526,6 +1560,18 @@ func (m model) pressOpen(session Session) model {
 		m.confirmSel = 2
 	}
 	return m
+}
+
+// validRebuilds returns the reconstructions of an original that still
+// exist in the scan, newest first.
+func (m model) validRebuilds(session Session) []string {
+	var out []string
+	for _, id := range session.RebuiltAs {
+		if m.sessionByID(id) != nil {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // sessionByID finds a session anywhere in the scan.
@@ -1685,6 +1731,30 @@ func (m model) View() string {
 			body = append(body, "", styleDim.Render("updating …"))
 		}
 		return m.dialog("Update to "+m.updateOffer+"?", body, "Update", "Later")
+	}
+	if m.rebuildChoice != nil {
+		original := *m.rebuildChoice
+		title := original.Title
+		if title == "" {
+			title = original.ID
+		}
+		rebuilds := m.validRebuilds(original)
+		body := []string{
+			styleDim.Render("✕ ") + truncate(title, 68),
+			styleDim.Render("this lost original has several reconstructions — resume which?"),
+			"",
+		}
+		labels := make([]string, 0, len(rebuilds)+1)
+		for _, id := range rebuilds {
+			line := "  ⟳ " + id[:8] + "…"
+			if rebuilt := m.sessionByID(id); rebuilt != nil {
+				line += styleDim.Render("  " + ago(rebuilt.Modified) + "  " + truncate(tildePath(rebuilt.ProjectPath), 48))
+			}
+			body = append(body, line)
+			labels = append(labels, id[:8]+"…")
+		}
+		labels = append(labels, "Cancel")
+		return m.dialog("Resume which rebuild?", body, labels...)
 	}
 	if m.confirmResume != nil {
 		session := *m.confirmResume
