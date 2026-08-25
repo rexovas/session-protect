@@ -1136,6 +1136,37 @@ func TestRescueAIFlow(t *testing.T) {
 	if !strings.Contains(m.notice, "rebuilt with AI as abcd1234") {
 		t.Fatalf("notice = %q", m.notice)
 	}
+
+	// A failed synthesis persists to the audit log — transient notices
+	// are not forensics.
+	if err := os.MkdirAll(m.cfg.BackupRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m = press(t, m, tea.KeyEsc) // close the rebuild-complete dialog
+	for i, s := range m.visible {
+		if s.State == "LOST" {
+			m.sCursor = i
+		}
+	}
+	rescueReconstructAI = func(_ config.Config, _ assist.ModelOption, _ string, _ string, _ string) (string, string, error) {
+		return "", "", fmt.Errorf("model exploded")
+	}
+	m = press(t, m, "r", tea.KeyLeft, tea.KeyLeft, tea.KeyEnter, tea.KeyLeft, tea.KeyEnter, tea.KeyEnter, tea.KeyLeft)
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	m = deliver(t, m, cmd)
+	if !strings.Contains(m.notice, "model exploded") {
+		t.Fatalf("failure notice = %q", m.notice)
+	}
+	var recorded bool
+	for _, entry := range audit.Read(m.cfg.BackupRoot) {
+		if entry.Action == "rescue-failed" && strings.Contains(entry.Detail, "model exploded") {
+			recorded = true
+		}
+	}
+	if !recorded {
+		t.Fatal("failure not persisted to the audit log")
+	}
 }
 
 func TestFacetFilterFlow(t *testing.T) {

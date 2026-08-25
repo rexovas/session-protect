@@ -712,6 +712,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rescueQuitArm = false
 		m.rescueAI = nil
 		if msg.err != nil {
+			// The notice is transient; the audit log answers "why did
+			// that fail an hour ago" after the screen has moved on.
+			audit.Append(m.cfg.BackupRoot, []audit.Entry{{
+				Time: time.Now(), Action: "rescue-failed", Target: "claude",
+				SessionID: msg.original.ID, Detail: "rebuild-ai: " + msg.err.Error(),
+			}})
 			m.notice, m.noticeErr = "ai rebuild failed: "+msg.err.Error(), true
 			return m, nil
 		}
@@ -3170,6 +3176,10 @@ func (m model) runRescue(session Session, dir string) (model, tea.Cmd) {
 	case "export":
 		path, err := rescueExport(m.cfg, session.Target, session.ID, session.Title, dir)
 		if err != nil {
+			audit.Append(m.cfg.BackupRoot, []audit.Entry{{
+				Time: time.Now(), Action: "rescue-failed", Target: session.Target,
+				SessionID: session.ID, Detail: "export: " + err.Error(),
+			}})
 			m.notice, m.noticeErr = "export failed: "+err.Error(), true
 			break
 		}
@@ -3177,6 +3187,10 @@ func (m model) runRescue(session Session, dir string) (model, tea.Cmd) {
 	case "rebuild":
 		newID, path, err := rescueReconstruct(m.cfg, session.ID, session.Title, dir)
 		if err != nil {
+			audit.Append(m.cfg.BackupRoot, []audit.Entry{{
+				Time: time.Now(), Action: "rescue-failed", Target: "claude",
+				SessionID: session.ID, Detail: "rebuild: " + err.Error(),
+			}})
 			m.notice, m.noticeErr = "rebuild failed: "+err.Error(), true
 			break
 		}
