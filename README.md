@@ -38,17 +38,21 @@ no telemetry, no accounts, no external services.
   very first message
 - Three tiers of search: instant filtering (`/`), full-transcript search
   ranked by hit count (`ctrl+s`), and AI find — describe the session you
-  half-remember and a local model identifies it (`ctrl+g`, via ollama or
-  the claude CLI; optional, auto-detected)
+  half-remember and a model of your choice identifies it (`ctrl+g`;
+  claude, codex, or fully local via ollama — enumerated live,
+  auto-detected, optional). Past searches replay instantly from saved
+  results, no repeat model calls
 - Lost-session detection: sessions recorded in agent history but missing
   from disk are surfaced permanently, so nothing disappears silently —
   and can be rescued: export their surviving prompts, or rebuild them
-  into a new resumable session ([how recovery works](docs/RECOVERY.md))
+  into a new resumable session, optionally with an AI-written brief of
+  where the work stood ([how recovery works](docs/RECOVERY.md))
 
 **Command**
 - One-key restore of deleted sessions from backup
 - `o` opens any session: jumps to its terminal window if it's running
-  (Spaces included), or resumes it in a fresh window if it's closed
+  (Spaces included); a closed one resumes in a fresh terminal window or
+  right in the current one — your choice, in the right project directory
 - Transplant: move or copy sessions — project memory included — to a
   different directory, rewriting internal paths so resume continuity
   survives; copies mint a fresh session identity
@@ -105,10 +109,11 @@ shows the essentials; the complete reference lives under `m` → Keys.
 | `ctrl+e` | expand/collapse the whole folder tree in place |
 | `/` | filter the current pane as you type |
 | `ctrl+s` | search transcripts for the query, ranked by hits |
-| `ctrl+g` | AI find: describe a session, a local model ranks matches |
+| `ctrl+g` | AI find: describe a session, your chosen model ranks matches |
+| `f` | facet filter: states, agents, models, modified window |
 | `i` or `enter` | inspect: overview · usage/cost · full transcript |
-| `o` | open: jump to a running session, or resume a closed one |
-| `r` | restore a deleted-but-backed-up session |
+| `o` | open: jump to a running session, or resume a closed one (new window or in place) |
+| `r` | restore from backup, or rescue a lost session (export · rebuild) |
 | `t` | transplant a session or project to another directory |
 | `x` | show/hide lost sessions |
 | `m` | menu: stats · activity log · key reference |
@@ -148,7 +153,7 @@ mode = "none"            # or "git-crypt": first backup initializes the
 time = "12:00"           # daily backup, local time
 
 [assist]                 # AI find backend
-backend = "auto"         # auto | ollama | claude | none
+backend = "auto"         # auto | ollama | claude | codex | none
 model = ""               # ollama model; empty = first installed
 claude_model = "sonnet"  # claude backend model; helper runs are
                          # throwaway and never appear in your sessions
@@ -174,7 +179,8 @@ enabled = true           # per-agent enable/source overrides
 - **Agent state is respected.** SessionProtect never rewrites agent
   history files; lost sessions stay marked lost even after recovery.
 - **Everything is local.** Sessions never leave your machine. AI find
-  talks only to your own local ollama server or your own claude CLI.
+  talks only to your own local ollama server or your own claude or
+  codex CLI.
   The sole outbound call the tool ever makes is the release check
   against GitHub (once a day, version numbers only, off with
   `update.check = false`).
