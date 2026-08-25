@@ -17,6 +17,10 @@ export GIT_AUTHOR_NAME=demo GIT_AUTHOR_EMAIL=demo@example.invalid
 export GIT_COMMITTER_NAME=demo GIT_COMMITTER_EMAIL=demo@example.invalid
 
 cat > "$DEMO/config.toml" <<EOF
+# recordings must be hermetic: no launch update prompt over the demo
+[update]
+check = false
+
 backup_root = "$DEMO/backup"
 EOF
 
@@ -59,7 +63,7 @@ touch -t "$(date -v-3d +%Y%m%d%H%M)" "$HOME/.claude/projects/$(slug "$P2")/0a1b2
 touch -t "$(date -v-5d +%Y%m%d%H%M)" "$HOME/.claude/projects/$(slug "$P3")/0a1b2c3d-3333-4a4a-8a8a-000000000006.jsonl"
 
 # Build the demo binary and take the first backup.
-( cd "$SP_SRC" && go build -ldflags "-X github.com/rexovas/session-protect/internal/version.Version=v1.0.0 -X github.com/rexovas/session-protect/internal/version.Channel=release" -o "$DEMO/bin/session-protect" ./cmd/session-protect )
+( cd "$SP_SRC" && go build -ldflags "-X github.com/rexovas/session-protect/internal/version.Version=v1.0.1 -X github.com/rexovas/session-protect/internal/version.Channel=release" -o "$DEMO/bin/session-protect" ./cmd/session-protect )
 ln -sf "$DEMO/bin/session-protect" "$DEMO/bin/sp"
 "$DEMO/bin/session-protect" backup >/dev/null
 

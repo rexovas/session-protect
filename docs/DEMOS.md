@@ -17,9 +17,10 @@ Three tiers, one flow:
   mentions a term thirteen times is the one you meant), with the best
   matching line previewed for the selection. `enter` opens the session.
 - `ctrl+g` opens AI find: describe the session you half-remember in
-  plain words, and a local model (your own ollama or claude CLI —
-  auto-detected, never a hosted API) ranks likely matches with a short
-  reason each.
+  plain words, and the model of your choice (claude, codex, or fully
+  local via ollama — auto-detected, never a hosted service of ours)
+  ranks likely matches with a short reason each. Fired searches are
+  saved and replay instantly, and hit counts show beside the ranking.
 
 ## Rescue: lost sessions, restore, resume
 
@@ -32,8 +33,9 @@ Three tiers, one flow:
   with `r`: the dialog previews exactly which file goes where, and the
   restored session gets a `✚ restored` badge until its next live write.
 - `o` opens any session: a running one gets its terminal window raised;
-  a closed one resumes in a fresh window of your terminal, in the right
-  project directory.
+  a closed one resumes in a fresh terminal window or right in the
+  current one — your choice, in the right project directory. On a lost
+  session that has been rebuilt, `o` routes straight to the rebuild.
 
 ## Transplant: move sessions between projects
 
