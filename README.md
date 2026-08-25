@@ -9,8 +9,10 @@ moves. SessionProtect is a single-binary CLI that backs them up safely,
 lets you browse and search everything you've ever discussed, and puts
 you back inside any session in one keystroke.
 
-Supports **Claude Code** and **OpenAI Codex** side by side. Local-only:
-no telemetry, no accounts, no external services.
+Supports **Claude Code** and **OpenAI Codex** side by side. Local-first:
+no telemetry, no accounts, and your sessions never leave your machine.
+The only network call is an optional once-daily release check
+(`update.check = false` turns it off).
 
 <img src="assets/demo.gif" alt="The SessionProtect session explorer: live sessions, health states, inspector, search, and restore" width="900">
 
