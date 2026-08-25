@@ -6,10 +6,12 @@
 package assist
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -83,11 +85,21 @@ func AvailableModels(cfg config.Assist) []ModelOption {
 	}
 	if cfg.Backend == "auto" || cfg.Backend == "" || cfg.Backend == "codex" {
 		if _, err := exec.LookPath("codex"); err == nil {
-			// One passthrough entry, no model enumeration: execution never
-			// passes a model flag, so codex's own config decides — the
-			// same indirection that keeps claude's aliases from going
-			// stale. The label is a live read of that config.
-			options = append(options, ModelOption{Backend: "codex", Model: codexConfiguredModel()})
+			// Live enumeration via the CLI's own model/list RPC — the
+			// same source its /model picker uses, so it cannot go
+			// stale. Older CLIs without the RPC fall back to one
+			// passthrough entry resolved by codex's config.
+			models := codexListModels()
+			if len(models) == 0 {
+				models = []string{""}
+			}
+			for _, model := range models {
+				label := model
+				if label == "" {
+					label = codexConfiguredModel()
+				}
+				options = append(options, ModelOption{Backend: "codex", Model: label})
+			}
 		}
 	}
 	if cfg.Backend != "none" && cfg.Backend != "claude" && cfg.Backend != "codex" {
@@ -120,13 +132,26 @@ func RankWith(cfg config.Assist, option ModelOption, query string, candidates []
 		backend := &claudeBackend{model: option.Model}
 		return backend.Rank(query, candidates)
 	case "codex":
-		out, err := codexComplete(buildPrompt(query, candidates), 120*time.Second)
+		out, err := codexComplete(codexExecModel(option.Model), buildPrompt(query, candidates), 120*time.Second)
 		if err != nil {
 			return nil, err
 		}
 		return parseMatches(out, candidates)
 	}
 	return nil, fmt.Errorf("unknown backend %q", option.Backend)
+}
+
+// codexExecModel maps a picker entry back to an exec flag: ids that came
+// from live enumeration are passed through; the config-passthrough
+// fallback entry (labeled with the configured model) omits the flag so
+// codex resolves its own config.
+func codexExecModel(model string) string {
+	for _, live := range codexListModels() {
+		if live == model {
+			return model
+		}
+	}
+	return ""
 }
 
 // codexConfiguredModel reads the model codex itself would use — display
@@ -149,11 +174,93 @@ func codexConfiguredModel() string {
 	return "default"
 }
 
+// codexModelsCache keeps picker reopens snappy; the list changes only
+// when the CLI updates.
+var codexModelsCache struct {
+	at   time.Time
+	list []string
+}
+
+// codexListModels asks the codex CLI for its live model catalog via the
+// app-server model/list RPC. Returns nil when the CLI predates the RPC
+// or anything times out — callers fall back to config passthrough.
+func codexListModels() []string {
+	if time.Since(codexModelsCache.at) < 2*time.Minute {
+		return codexModelsCache.list
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "codex", "app-server")
+	// stdin must stay open until the response arrives — the server
+	// exits on EOF before answering otherwise.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil
+	}
+	if err := cmd.Start(); err != nil {
+		return nil
+	}
+	defer func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	if _, err := io.WriteString(stdin,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"session-protect","title":"session-protect","version":"1"}}}`+"\n"+
+			`{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}`+"\n"); err != nil {
+		return nil
+	}
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		models, ok := parseCodexModelList(scanner.Bytes())
+		if ok {
+			codexModelsCache.at, codexModelsCache.list = time.Now(), models
+			return models
+		}
+	}
+	return nil
+}
+
+// parseCodexModelList extracts visible model ids from a model/list
+// response line, default model first.
+func parseCodexModelList(line []byte) ([]string, bool) {
+	var resp struct {
+		ID     int `json:"id"`
+		Result *struct {
+			Data []struct {
+				Model     string `json:"model"`
+				Hidden    bool   `json:"hidden"`
+				IsDefault bool   `json:"isDefault"`
+			} `json:"data"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(line, &resp) != nil || resp.ID != 2 || resp.Result == nil {
+		return nil, false
+	}
+	var models []string
+	for _, entry := range resp.Result.Data {
+		if entry.Hidden || entry.Model == "" {
+			continue
+		}
+		if entry.IsDefault {
+			models = append([]string{entry.Model}, models...)
+		} else {
+			models = append(models, entry.Model)
+		}
+	}
+	return models, true
+}
+
 // codexComplete runs a single-turn prompt through the codex CLI.
 // --ephemeral keeps it traceless (no session files written — verified
 // against codex-cli 0.147.0); the prompt goes via stdin to dodge arg
 // limits; the answer comes back through --output-last-message.
-func codexComplete(prompt string, timeout time.Duration) (string, error) {
+func codexComplete(model string, prompt string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -164,8 +271,12 @@ func codexComplete(prompt string, timeout time.Duration) (string, error) {
 	defer os.RemoveAll(scratch)
 	outFile := filepath.Join(scratch, "answer.txt")
 
-	cmd := exec.CommandContext(ctx, "codex", "exec",
-		"--ephemeral", "--skip-git-repo-check", "--output-last-message", outFile, "-")
+	args := []string{"exec", "--ephemeral", "--skip-git-repo-check", "--output-last-message", outFile}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, "-")
+	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Dir = scratch
 	cmd.Stdin = strings.NewReader(prompt)
 	if _, err := cmd.Output(); err != nil {
@@ -414,7 +525,7 @@ func Complete(cfg config.Assist, option ModelOption, prompt string) (string, err
 	case "claude":
 		return claudeComplete(option.Model, prompt, 300*time.Second)
 	case "codex":
-		return codexComplete(prompt, 300*time.Second)
+		return codexComplete(codexExecModel(option.Model), prompt, 300*time.Second)
 	case "ollama":
 		url := cfg.URL
 		if url == "" {
