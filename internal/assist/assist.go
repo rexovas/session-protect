@@ -6,16 +6,21 @@
 package assist
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 // Candidate is one session offered to the model, with just enough context
@@ -41,6 +46,280 @@ type Backend interface {
 	Rank(query string, candidates []Candidate) ([]Match, error)
 }
 
+// ModelOption is one selectable model across the locally available
+// backends.
+type ModelOption struct {
+	Backend string // ollama | claude
+	Model   string
+}
+
+// Label renders the option for display.
+func (o ModelOption) Label() string {
+	return o.Model + " · " + o.Backend
+}
+
+// AvailableModels probes what can answer locally: claude CLI aliases
+// (default head first) and every installed ollama model. Empty means
+// the feature is unavailable.
+func AvailableModels(cfg config.Assist) []ModelOption {
+	url := cfg.URL
+	if url == "" {
+		url = "http://localhost:11434"
+	}
+	var options []ModelOption
+	claudeOK := false
+	if cfg.Backend != "none" && cfg.Backend != "ollama" {
+		if _, err := exec.LookPath("claude"); err == nil {
+			claudeOK = true
+			head := cfg.ClaudeModel
+			if head == "" {
+				head = "sonnet"
+			}
+			options = append(options, ModelOption{Backend: "claude", Model: head})
+			for _, alias := range []string{"sonnet", "opus", "haiku"} {
+				if alias != head {
+					options = append(options, ModelOption{Backend: "claude", Model: alias})
+				}
+			}
+		}
+	}
+	if cfg.Backend == "auto" || cfg.Backend == "" || cfg.Backend == "codex" {
+		if _, err := exec.LookPath("codex"); err == nil {
+			// Live enumeration via the CLI's own model/list RPC — the
+			// same source its /model picker uses, so it cannot go
+			// stale. Older CLIs without the RPC fall back to one
+			// passthrough entry resolved by codex's config.
+			models := codexListModels()
+			if len(models) == 0 {
+				models = []string{""}
+			}
+			for _, model := range models {
+				label := model
+				if label == "" {
+					label = codexConfiguredModel()
+				}
+				options = append(options, ModelOption{Backend: "codex", Model: label})
+			}
+		}
+	}
+	if cfg.Backend != "none" && cfg.Backend != "claude" && cfg.Backend != "codex" {
+		for _, model := range listOllamaModels(url) {
+			options = append(options, ModelOption{Backend: "ollama", Model: model})
+		}
+	}
+	// Ollama-only setups still get a configured default at the head.
+	if !claudeOK && len(options) > 0 && cfg.Model != "" {
+		for i, option := range options {
+			if option.Model == cfg.Model {
+				options[0], options[i] = options[i], options[0]
+			}
+		}
+	}
+	return options
+}
+
+// RankWith runs the query against an explicit model choice.
+func RankWith(cfg config.Assist, option ModelOption, query string, candidates []Candidate) ([]Match, error) {
+	url := cfg.URL
+	if url == "" {
+		url = "http://localhost:11434"
+	}
+	switch option.Backend {
+	case "ollama":
+		backend := &ollamaBackend{url: url, model: option.Model}
+		return backend.Rank(query, candidates)
+	case "claude":
+		backend := &claudeBackend{model: option.Model}
+		return backend.Rank(query, candidates)
+	case "codex":
+		out, err := codexComplete(codexExecModel(option.Model), buildPrompt(query, candidates), 120*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		return parseMatches(out, candidates)
+	}
+	return nil, fmt.Errorf("unknown backend %q", option.Backend)
+}
+
+// codexExecModel maps a picker entry back to an exec flag: ids that came
+// from live enumeration are passed through; the config-passthrough
+// fallback entry (labeled with the configured model) omits the flag so
+// codex resolves its own config.
+func codexExecModel(model string) string {
+	for _, live := range codexListModels() {
+		if live == model {
+			return model
+		}
+	}
+	return ""
+}
+
+// codexConfiguredModel reads the model codex itself would use — display
+// only; execution deliberately omits the model flag so the value can
+// never drift from what actually runs.
+func codexConfiguredModel() string {
+	data, err := os.ReadFile(filepath.Join(targets.DetectCodex().Source, "config.toml"))
+	if err != nil {
+		return "default"
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if value, ok := strings.CutPrefix(trimmed, "model"); ok {
+			value = strings.TrimSpace(value)
+			if value, ok := strings.CutPrefix(value, "="); ok {
+				return strings.Trim(strings.TrimSpace(value), `"`)
+			}
+		}
+	}
+	return "default"
+}
+
+// codexModelsCache keeps picker reopens snappy; the list changes only
+// when the CLI updates. Failures cache too — the RPC is experimental,
+// and a broken or hanging app-server must degrade to the passthrough
+// entry once per interval, not stall every picker open for the probe
+// timeout.
+var codexModelsCache struct {
+	at   time.Time
+	list []string
+}
+
+// codexListModels asks the codex CLI for its live model catalog via the
+// app-server model/list RPC. Returns nil when the CLI predates the RPC
+// or anything times out — callers fall back to config passthrough.
+func codexListModels() []string {
+	if !codexModelsCache.at.IsZero() && time.Since(codexModelsCache.at) < 2*time.Minute {
+		return codexModelsCache.list
+	}
+	models := codexProbeModels()
+	codexModelsCache.at, codexModelsCache.list = time.Now(), models
+	return models
+}
+
+func codexProbeModels() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "codex", "app-server")
+	// stdin must stay open until the response arrives — the server
+	// exits on EOF before answering otherwise.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil
+	}
+	if err := cmd.Start(); err != nil {
+		return nil
+	}
+	defer func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	if _, err := io.WriteString(stdin,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"session-protect","title":"session-protect","version":"1"}}}`+"\n"+
+			`{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}`+"\n"); err != nil {
+		return nil
+	}
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		if models, ok := parseCodexModelList(scanner.Bytes()); ok {
+			return models
+		}
+	}
+	return nil
+}
+
+// parseCodexModelList extracts visible model ids from a model/list
+// response line, default model first.
+func parseCodexModelList(line []byte) ([]string, bool) {
+	var resp struct {
+		ID     int `json:"id"`
+		Result *struct {
+			Data []struct {
+				Model     string `json:"model"`
+				Hidden    bool   `json:"hidden"`
+				IsDefault bool   `json:"isDefault"`
+			} `json:"data"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(line, &resp) != nil || resp.ID != 2 || resp.Result == nil {
+		return nil, false
+	}
+	var models []string
+	for _, entry := range resp.Result.Data {
+		if entry.Hidden || entry.Model == "" {
+			continue
+		}
+		if entry.IsDefault {
+			models = append([]string{entry.Model}, models...)
+		} else {
+			models = append(models, entry.Model)
+		}
+	}
+	return models, true
+}
+
+// codexComplete runs a single-turn prompt through the codex CLI.
+// --ephemeral keeps it traceless (no session files written — verified
+// against codex-cli 0.147.0); the prompt goes via stdin to dodge arg
+// limits; the answer comes back through --output-last-message.
+func codexComplete(model string, prompt string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	scratch, err := os.MkdirTemp("", "sp-assist-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(scratch)
+	outFile := filepath.Join(scratch, "answer.txt")
+
+	args := []string{"exec", "--ephemeral", "--skip-git-repo-check", "--output-last-message", outFile}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, "-")
+	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmd.Dir = scratch
+	cmd.Stdin = strings.NewReader(prompt)
+	if _, err := cmd.Output(); err != nil {
+		return "", fmt.Errorf("codex CLI: %w", err)
+	}
+	out, err := os.ReadFile(outFile)
+	if err != nil {
+		return "", fmt.Errorf("codex CLI wrote no answer: %w", err)
+	}
+	return string(out), nil
+}
+
+// listOllamaModels returns the installed model names, or nothing when
+// the server is unreachable.
+func listOllamaModels(url string) []string {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url + "/api/tags")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var tags struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil
+	}
+	var names []string
+	for _, model := range tags.Models {
+		names = append(names, model.Name)
+	}
+	return names
+}
+
 // Detect resolves the configured backend, probing availability for auto.
 // nil means the feature is unavailable (or configured off).
 func Detect(cfg config.Assist) Backend {
@@ -57,13 +336,13 @@ func Detect(cfg config.Assist) Backend {
 		if _, err := exec.LookPath("claude"); err != nil {
 			return nil
 		}
-		return &claudeBackend{}
+		return &claudeBackend{model: cfg.ClaudeModel}
 	default: // auto: local server first, then the CLI
 		if ollamaAlive(url) {
 			return &ollamaBackend{url: url, model: cfg.Model}
 		}
 		if _, err := exec.LookPath("claude"); err == nil {
-			return &claudeBackend{}
+			return &claudeBackend{model: cfg.ClaudeModel}
 		}
 		return nil
 	}
@@ -76,6 +355,7 @@ func buildPrompt(query string, candidates []Candidate) string {
 	return fmt.Sprintf(`You are helping a developer find a coding-agent session on their machine.
 They describe a session they half-remember; below are candidate sessions with
 metadata and content excerpts. Pick up to 5 likely matches, best first.
+Weigh last_used when the description implies recency ("yesterday", "recent").
 Respond with ONLY this JSON, no other text:
 {"matches":[{"id":"<session id>","reason":"<one short line why>"}]}
 
@@ -155,23 +435,31 @@ func (b *ollamaBackend) resolveModel() (string, error) {
 }
 
 func (b *ollamaBackend) Rank(query string, candidates []Candidate) ([]Match, error) {
-	model, err := b.resolveModel()
+	out, err := b.complete(buildPrompt(query, candidates))
 	if err != nil {
 		return nil, err
+	}
+	return parseMatches(out, candidates)
+}
+
+func (b *ollamaBackend) complete(prompt string) (string, error) {
+	model, err := b.resolveModel()
+	if err != nil {
+		return "", err
 	}
 	body, _ := json.Marshal(map[string]any{
 		"model":  model,
 		"stream": false,
 		"messages": []map[string]string{
-			{"role": "user", "content": buildPrompt(query, candidates)},
+			{"role": "user", "content": prompt},
 		},
 		"options": map[string]any{"temperature": 0},
 	})
 	// First use of a model includes load time; be generous.
-	client := &http.Client{Timeout: 180 * time.Second}
+	client := &http.Client{Timeout: 300 * time.Second}
 	resp, err := client.Post(b.url+"/api/chat", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("ollama: %w", err)
+		return "", fmt.Errorf("ollama: %w", err)
 	}
 	defer resp.Body.Close()
 	var reply struct {
@@ -181,27 +469,77 @@ func (b *ollamaBackend) Rank(query string, candidates []Candidate) ([]Match, err
 		Error string `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
-		return nil, fmt.Errorf("ollama response: %w", err)
+		return "", fmt.Errorf("ollama response: %w", err)
 	}
 	if reply.Error != "" {
-		return nil, fmt.Errorf("ollama: %s", reply.Error)
+		return "", fmt.Errorf("ollama: %s", reply.Error)
 	}
-	return parseMatches(reply.Message.Content, candidates)
+	return reply.Message.Content, nil
 }
 
 // --- claude: headless CLI on the user's own subscription ---
 
-type claudeBackend struct{}
+type claudeBackend struct {
+	model string
+}
 
 func (b *claudeBackend) Name() string { return "claude" }
 
 func (b *claudeBackend) Rank(query string, candidates []Candidate) ([]Match, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	model := b.model
+	if model == "" {
+		// Ranking a candidate list needs a capable-but-cheap model —
+		// never the user's (possibly premium) default.
+		model = "sonnet"
+	}
+	out, err := claudeComplete(model, buildPrompt(query, candidates), 120*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return parseMatches(out, candidates)
+}
+
+// claudeComplete runs one headless turn with full hygiene: pinned model,
+// throwaway working directory, persisted transcript removed after.
+// Headless runs write no prompt history, so this leaves zero traces.
+func claudeComplete(model string, prompt string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "claude", "-p", buildPrompt(query, candidates))
+
+	scratch, err := os.MkdirTemp("", "sp-assist-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(scratch)
+	if resolved, err := filepath.EvalSymlinks(scratch); err == nil {
+		scratch = resolved
+	}
+	defer os.RemoveAll(filepath.Join(targets.DetectClaude().Source, "projects", targets.ClaudeSlug(scratch)))
+
+	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", model, "--max-turns", "1", prompt)
+	cmd.Dir = scratch
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("claude CLI: %w", err)
+		return "", fmt.Errorf("claude CLI: %w", err)
 	}
-	return parseMatches(string(out), candidates)
+	return string(out), nil
+}
+
+// Complete runs a free-form single-turn prompt against an explicit model
+// choice and returns the raw text.
+func Complete(cfg config.Assist, option ModelOption, prompt string) (string, error) {
+	switch option.Backend {
+	case "claude":
+		return claudeComplete(option.Model, prompt, 300*time.Second)
+	case "codex":
+		return codexComplete(codexExecModel(option.Model), prompt, 300*time.Second)
+	case "ollama":
+		url := cfg.URL
+		if url == "" {
+			url = "http://localhost:11434"
+		}
+		backend := &ollamaBackend{url: url, model: option.Model}
+		return backend.complete(prompt)
+	}
+	return "", fmt.Errorf("unknown backend %q", option.Backend)
 }

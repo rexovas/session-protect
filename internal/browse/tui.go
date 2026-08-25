@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/focus"
 	"github.com/rexovas/session-protect/internal/human"
+	"github.com/rexovas/session-protect/internal/rescue"
 	"github.com/rexovas/session-protect/internal/transplant"
 	"github.com/rexovas/session-protect/internal/update"
 	"github.com/rexovas/session-protect/internal/version"
@@ -54,6 +56,16 @@ type model struct {
 	// toggle for the whole view rather than per-folder state.
 	expandAll bool
 
+	// The f facet filter: multi-select states/agents/models plus a
+	// modified-time window, applied to session panes alongside the query.
+	showFilter   bool
+	filterItems  []filterItem
+	filterCursor int
+	fStates      map[string]bool
+	fAgents      map[string]bool
+	fModels      map[string]bool
+	fWindow      time.Duration // 0 = any
+
 	// query filters the current pane: the folder tree prunes to matching
 	// branches (auto-expanded down to each match), session panes to
 	// matching names/titles/ids. searching is true while / input is live.
@@ -73,10 +85,17 @@ type model struct {
 	tpBusy         bool
 
 	// AI find (ctrl+g) is its own page: a free-text prompt that queries
-	// on enter. askInput persists so a follow-up refines the last ask.
+	// on enter; ←/→ pick the answering model. askInput persists so a
+	// follow-up refines the last ask.
 	showAsk    bool
 	askInput   string
-	askBackend string
+	askModels  []assist.ModelOption
+	askHistory []askHistoryEntry // prior searches with saved results, most recent first
+	hitsCached time.Time         // when ask results were saved; zero = fresh model run
+	spinFrame  int               // busy-spinner animation frame
+	askHistSel int               // -1 = composing; otherwise index into askHistory
+	askDraft   string            // in-progress text stashed while browsing history
+	askModel   int
 
 	// Content search (ctrl+s on a query) counts transcript hits per
 	// session under the current root and shows them as their own pane.
@@ -123,7 +142,26 @@ type model struct {
 	// until the next keypress.
 	confirmRestore *Session
 	confirmResume  *Session
-	confirmSel     int // dialog button index; always starts on Cancel
+	confirmRescue  *Session // a ✕ lost session offered export/rebuild
+	rebuildChoice  *Session // rescued original with several rebuilds: pick which to resume
+	rescueHow      bool     // rescue dialog page 2: mechanical rebuild vs rebuild with AI
+	resumeHeading  string   // overrides the resume dialog title (rebuild-complete flow)
+	// The AI-rebuild stage: model choice (opus-first) before synthesis.
+	rescueAI      *Session
+	rescueModels  []assist.ModelOption
+	rescueModel   int
+	rescueBusy    bool
+	rescueQuitArm bool     // one ctrl+c seen during synthesis; next one quits
+	rescueDest    *Session // destination stage between choosing a rescue action and running it
+	rescueAction  string   // export | rebuild | rebuild-ai
+	rescueInput   string   // current directory of the destination picker (~ form)
+	rescueCursor  int      // highlighted row in the picker list
+	rescueNaming  bool     // typing a new folder name
+	rescueName    string   // the name being typed
+	rescueMode    string   // "" browsing | "filter" (/) | "jump" (~) — what typed text means
+	rescueFilter  string   // the typed filter or jump text
+	rescueDir     string   // resolved destination carried into the AI model stage
+	confirmSel    int      // dialog button index; always starts on Cancel
 
 	// A newer release triggers a launch-time offer; accepting swaps the
 	// binary and relaunches into it.
@@ -162,6 +200,19 @@ var (
 	updateApply = update.Apply
 )
 
+// Rescue actions, seam-injected for tests.
+var (
+	rescueExport        = rescue.Export
+	rescueReconstruct   = rescue.Reconstruct
+	rescueReconstructAI = rescue.ReconstructAI
+)
+
+// Assist plumbing, seam-injected for tests.
+var (
+	assistModels = assist.AvailableModels
+	assistRank   = assist.RankWith
+)
+
 type rescanMsg []*Project
 
 type hitsMsg []Hit
@@ -180,13 +231,33 @@ type transplantMsg struct {
 	copied bool
 }
 
+type rescueAIMsg struct {
+	original Session
+	path     string
+	dir      string
+
+	newID string
+	err   error
+}
+
 type askMsg struct {
+	query string
+
 	hits    []Hit
 	backend string
 	err     error
 }
 
 type tickMsg time.Time
+
+// spinMsg animates the busy spinner while an AI call is in flight.
+type spinMsg struct{}
+
+var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func spin() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinMsg{} })
+}
 
 // refreshEvery is the live-update cadence; rescans run asynchronously so
 // the UI never blocks on them.
@@ -218,10 +289,10 @@ func (m *model) rebuild() {
 	m.visible = nil
 	if m.here != nil {
 		LoadCustomNames(m.here)
-		m.visible = m.filterQuery(m.filterLost(m.here.Sessions))
+		m.visible = m.filterFacets(m.filterQuery(m.filterLost(m.here.Sessions)))
 	}
 	if m.showAll {
-		m.allSessions = m.filterQuery(m.filterLost(AllUnder(m.projects, m.root)))
+		m.allSessions = m.filterFacets(m.filterQuery(m.filterLost(AllUnder(m.projects, m.root))))
 	}
 	// Show the pane that has content when the other is empty — but never
 	// while a query is active: a search with no matches yet must not yank
@@ -287,6 +358,210 @@ func (m model) filterQuery(sessions []Session) []Session {
 	return out
 }
 
+type filterItem struct {
+	kind  string // header | state | agent | model | window
+	key   string
+	label string
+}
+
+// filterActive reports whether any facet constrains the list.
+func (m model) filterActive() bool {
+	return len(m.fStates) > 0 || len(m.fAgents) > 0 || len(m.fModels) > 0 || m.fWindow > 0
+}
+
+// matchesFacets applies the f-filter to one session.
+func (m model) matchesFacets(session Session) bool {
+	if len(m.fStates) > 0 && !m.fStates[displayState(session)] {
+		return false
+	}
+	if len(m.fAgents) > 0 && !m.fAgents[session.Target] {
+		return false
+	}
+	if len(m.fModels) > 0 && !m.fModels[displayModel(session.LastModel)] {
+		return false
+	}
+	if m.fWindow > 0 && time.Since(newest(session)) > m.fWindow {
+		return false
+	}
+	return true
+}
+
+// displayState is the facet key for a session's state.
+func displayState(session Session) string {
+	label, _ := sessionState(session.State)
+	return strings.TrimSpace(strings.TrimLeft(label, "●○~!✝✕✚⟳▶ "))
+}
+
+func (m model) filterFacets(sessions []Session) []Session {
+	if !m.filterActive() {
+		return sessions
+	}
+	var out []Session
+	for _, session := range sessions {
+		if m.matchesFacets(session) {
+			out = append(out, session)
+		}
+	}
+	return out
+}
+
+// buildFilterItems lays out the filter page from what actually exists
+// under the current root.
+func (m *model) buildFilterItems() {
+	sessions := AllUnder(m.projects, m.root)
+	states := map[string]int{}
+	agents := map[string]int{}
+	models := map[string]int{}
+	for _, session := range sessions {
+		states[displayState(session)]++
+		agents[session.Target]++
+		if model := displayModel(session.LastModel); model != "" && model != "-" {
+			models[model]++
+		}
+	}
+	var items []filterItem
+	items = append(items, filterItem{kind: "header", label: "STATE"})
+	for _, state := range []string{"ok", "open", "active", "stale", "unbacked", "recover", "lost", "restored", "rebuilt"} {
+		if states[state] > 0 {
+			items = append(items, filterItem{kind: "state", key: state,
+				label: fmt.Sprintf("%-10s %d", state, states[state])})
+		}
+	}
+	items = append(items, filterItem{kind: "header", label: "AGENT"})
+	for _, agent := range []string{"claude", "codex"} {
+		if agents[agent] > 0 {
+			items = append(items, filterItem{kind: "agent", key: agent,
+				label: fmt.Sprintf("%-10s %d", agent, agents[agent])})
+		}
+	}
+	if len(models) > 0 {
+		items = append(items, filterItem{kind: "header", label: "MODEL"})
+		var names []string
+		for name := range models {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			items = append(items, filterItem{kind: "model", key: name,
+				label: fmt.Sprintf("%-16s %d", name, models[name])})
+		}
+	}
+	items = append(items, filterItem{kind: "header", label: "MODIFIED"})
+	for _, window := range []struct {
+		key   string
+		label string
+	}{{"any", "any time"}, {"24h", "last 24 hours"}, {"168h", "last 7 days"}, {"720h", "last 30 days"}} {
+		items = append(items, filterItem{kind: "window", key: window.key, label: window.label})
+	}
+	m.filterItems = items
+	if m.filterCursor >= len(items) {
+		m.filterCursor = 0
+	}
+	m.filterCursorSkip(1)
+}
+
+// filterCursorSkip moves off header rows in the given direction.
+func (m *model) filterCursorSkip(direction int) {
+	for m.filterCursor >= 0 && m.filterCursor < len(m.filterItems) &&
+		m.filterItems[m.filterCursor].kind == "header" {
+		m.filterCursor += direction
+	}
+	if m.filterCursor < 0 {
+		m.filterCursor = 0
+		m.filterCursorSkip(1)
+	}
+	if m.filterCursor >= len(m.filterItems) {
+		m.filterCursor = len(m.filterItems) - 1
+		m.filterCursorSkip(-1)
+	}
+}
+
+// toggleFilterItem flips the item under the cursor.
+func (m *model) toggleFilterItem() {
+	if m.filterCursor >= len(m.filterItems) {
+		return
+	}
+	item := m.filterItems[m.filterCursor]
+	ensure := func(set *map[string]bool) *map[string]bool {
+		if *set == nil {
+			*set = map[string]bool{}
+		}
+		return set
+	}
+	switch item.kind {
+	case "state":
+		set := *ensure(&m.fStates)
+		if set[item.key] {
+			delete(set, item.key)
+		} else {
+			set[item.key] = true
+		}
+	case "agent":
+		set := *ensure(&m.fAgents)
+		if set[item.key] {
+			delete(set, item.key)
+		} else {
+			set[item.key] = true
+		}
+	case "model":
+		set := *ensure(&m.fModels)
+		if set[item.key] {
+			delete(set, item.key)
+		} else {
+			set[item.key] = true
+		}
+	case "window":
+		if item.key == "any" {
+			m.fWindow = 0
+		} else if d, err := time.ParseDuration(item.key); err == nil {
+			if m.fWindow == d {
+				m.fWindow = 0
+			} else {
+				m.fWindow = d
+			}
+		}
+	}
+}
+
+// filterItemChecked reports the display state of an item.
+func (m model) filterItemChecked(item filterItem) bool {
+	switch item.kind {
+	case "state":
+		return m.fStates[item.key]
+	case "agent":
+		return m.fAgents[item.key]
+	case "model":
+		return m.fModels[item.key]
+	case "window":
+		if item.key == "any" {
+			return m.fWindow == 0
+		}
+		d, _ := time.ParseDuration(item.key)
+		return m.fWindow == d
+	}
+	return false
+}
+
+// filterSummary is the footer chip describing active facets.
+func (m model) filterSummary() string {
+	var parts []string
+	appendSet := func(set map[string]bool) {
+		var keys []string
+		for key := range set {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts = append(parts, keys...)
+	}
+	appendSet(m.fStates)
+	appendSet(m.fAgents)
+	appendSet(m.fModels)
+	if m.fWindow > 0 {
+		parts = append(parts, "<"+m.fWindow.String())
+	}
+	return strings.Join(parts, "·")
+}
+
 func (m model) sessionCount() int {
 	return len(m.visible)
 }
@@ -295,7 +570,7 @@ func (m model) sessionCount() int {
 // active search overrides the toggle: a lost session is the one you most
 // need to be able to find.
 func (m model) filterLost(sessions []Session) []Session {
-	if m.showLost || m.query != "" {
+	if m.showLost || m.query != "" || m.fStates["lost"] {
 		return sessions
 	}
 	var out []Session
@@ -357,6 +632,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.buildTailLines()
 		}
 		return m, nil
+	case spinMsg:
+		if m.hitsBusy || m.rescueBusy {
+			m.spinFrame++
+			return m, spin()
+		}
+		return m, nil
 	case tickMsg:
 		if m.scanning {
 			return m, tick()
@@ -367,6 +648,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case rescanMsg:
 		m.scanning = false
 		m.projects = msg
+		// The hits pane holds Session copies from before the rescan;
+		// refresh them so state changes (a rescue, a restore) show.
+		if len(m.hits) > 0 {
+			byID := map[string]Session{}
+			for _, project := range m.projects {
+				for _, session := range project.Sessions {
+					byID[session.ID] = session
+				}
+			}
+			for i := range m.hits {
+				if session, ok := byID[m.hits[i].Session.ID]; ok {
+					m.hits[i].Session = session
+				}
+			}
+		}
 		m.rebuild()
 		return m, nil
 	case updateAvailableMsg:
@@ -411,14 +707,53 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scanning = true
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
+	case rescueAIMsg:
+		m.rescueBusy = false
+		m.rescueQuitArm = false
+		m.rescueAI = nil
+		if msg.err != nil {
+			// The notice is transient; the audit log answers "why did
+			// that fail an hour ago" after the screen has moved on.
+			audit.Append(m.cfg.BackupRoot, []audit.Entry{{
+				Time: time.Now(), Action: "rescue-failed", Target: "claude",
+				SessionID: msg.original.ID, Detail: "rebuild-ai: " + msg.err.Error(),
+			}})
+			m.notice, m.noticeErr = "ai rebuild failed: "+msg.err.Error(), true
+			return m, nil
+		}
+		m = m.offerRebuiltResume(msg.original, msg.newID, msg.path, msg.dir)
+		m.notice = "rebuilt with AI as " + msg.newID[:8] + "… — the original stays marked lost"
+		m.scanning = true
+		cfg := m.cfg
+		return m, func() tea.Msg {
+			_, _ = backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true})
+			return rescanMsg(ScanNamed(cfg))
+		}
 	case askMsg:
 		m.hitsBusy = false
+		m.showAsk = false
+		entry := askHistoryEntry{Query: msg.query, Model: msg.backend, At: time.Now()}
 		if msg.err != nil {
+			// Keep the query recallable even when the run failed.
+			if msg.query != "" {
+				appendAskHistory(m.cfg, entry)
+				m.askHistory = pushHistory(m.askHistory, entry)
+			}
 			m.notice, m.noticeErr = "ai find failed: "+msg.err.Error(), true
 			return m, nil
 		}
+		for _, hit := range msg.hits {
+			entry.Results = append(entry.Results, cachedResult{
+				ID: hit.Session.ID, Reason: hit.Snippet, Count: hit.Count,
+			})
+		}
+		if msg.query != "" {
+			appendAskHistory(m.cfg, entry)
+			m.askHistory = pushHistory(m.askHistory, entry)
+		}
 		m.hitsMode = "ask"
 		m.hitsNote = msg.backend
+		m.hitsCached = time.Time{}
 		m.hits = msg.hits
 		m.showHits = true
 		m.hCursor, m.hOffset = 0, 0
@@ -473,6 +808,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "o", "r":
+			session := *m.detail
+			m.detail = nil
+			m.detailTab, m.tailOffset = 0, 0
+			m.tailLines = nil
+			if msg.String() == "r" {
+				return m.pressRescue(session), nil
+			}
+			return m.pressOpen(session), nil
 		case "i", "esc", "q":
 			m.detail = nil
 			m.detailTab, m.tailOffset = 0, 0
@@ -548,6 +892,35 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.rebuildChoice != nil {
+		rebuilds := m.validRebuilds(*m.rebuildChoice)
+		buttons := len(rebuilds) + 1
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "right", "tab", "l", "down", "j":
+			m.confirmSel = (m.confirmSel + 1) % buttons
+		case "left", "h", "up", "k":
+			m.confirmSel = (m.confirmSel + buttons - 1) % buttons
+		case "esc", "n":
+			m.rebuildChoice = nil
+		case "enter":
+			if m.confirmSel >= len(rebuilds) {
+				m.rebuildChoice = nil
+				break
+			}
+			rebuilt := m.sessionByID(rebuilds[m.confirmSel])
+			m.rebuildChoice = nil
+			if rebuilt == nil {
+				break
+			}
+			copied := *rebuilt
+			m.confirmResume = &copied
+			m.resumeHeading = "Lost original — resume its rebuild " + copied.ID[:8] + "…?"
+			m.confirmSel = 2
+		}
+		return m, nil
+	}
 	if m.confirmResume != nil {
 		switch msg.String() {
 		case "ctrl+c":
@@ -558,12 +931,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmSel = (m.confirmSel + 2) % 3
 		case "esc", "n":
 			m.confirmResume = nil
+			m.resumeHeading = ""
 		case "y":
 			m.confirmSel = 0
 			fallthrough
 		case "enter":
 			session := *m.confirmResume
 			m.confirmResume = nil
+			m.resumeHeading = ""
 			project := session.ProjectPath
 			if project == "" {
 				project = m.root
@@ -585,6 +960,239 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case 1: // this terminal: leave sp and become the agent
 				m.execOnExit = []string{"/bin/sh", "-c", resumeCommand(session, project)}
 				return m, tea.Quit
+			}
+		}
+		return m, nil
+	}
+	if m.rescueAI != nil {
+		if m.rescueBusy {
+			// Quitting mid-synthesis abandons the rebuild with nothing
+			// written — require a deliberate second ctrl+c.
+			if msg.String() == "ctrl+c" {
+				if m.rescueQuitArm {
+					return m, tea.Quit
+				}
+				m.rescueQuitArm = true
+				return m, nil
+			}
+			return m, nil
+		}
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "left", "right", "tab", "h", "l":
+			m.confirmSel = (m.confirmSel + 1) % 2
+		case "up", "k":
+			if n := len(m.rescueModels); n > 0 {
+				m.rescueModel = (m.rescueModel + n - 1) % n
+			}
+		case "down", "j":
+			if n := len(m.rescueModels); n > 0 {
+				m.rescueModel = (m.rescueModel + 1) % n
+			}
+		case "esc", "n":
+			m.rescueAI = nil
+			m.notice, m.noticeErr = "ai rebuild cancelled — nothing was written (the session stays lost)", true
+		case "y":
+			m.confirmSel = 0
+			fallthrough
+		case "enter":
+			if m.confirmSel != 0 {
+				// Cancel is the default: a reflexive enter lands here, so
+				// say loudly that no rebuild happened.
+				m.rescueAI = nil
+				m.notice, m.noticeErr = "ai rebuild cancelled — nothing was written (the session stays lost)", true
+				break
+			}
+			if len(m.rescueModels) == 0 {
+				m.rescueAI = nil
+				break
+			}
+			m.rescueBusy = true
+			session := *m.rescueAI
+			cfg, option, dir := m.cfg, m.rescueModels[m.rescueModel], m.rescueDir
+			return m, tea.Batch(spin(), func() tea.Msg {
+				newID, path, err := rescueReconstructAI(cfg, option, session.ID, session.Title, dir)
+				return rescueAIMsg{original: session, path: path, dir: dir, newID: newID, err: err}
+			})
+		}
+		return m, nil
+	}
+	if m.rescueDest != nil {
+		if m.rescueNaming {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				m.rescueNaming, m.rescueName = false, ""
+			case "backspace":
+				if runes := []rune(m.rescueName); len(runes) > 0 {
+					m.rescueName = string(runes[:len(runes)-1])
+				}
+			case "enter":
+				if name := strings.TrimSpace(m.rescueName); name != "" {
+					m.rescueInput = tildePath(filepath.Join(expandTilde(m.rescueInput), name))
+					m.rescueCursor = 0
+				}
+				m.rescueNaming, m.rescueName = false, ""
+			default:
+				if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+					m.rescueName += msg.String()
+				}
+			}
+			return m, nil
+		}
+		subdirs := m.rescueSubdirs()
+		rows := len(subdirs) + 3 // use-this-dir, .., dirs…, new-folder
+		clearTyping := func() {
+			m.rescueMode, m.rescueFilter = "", ""
+		}
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			if m.rescueMode != "" {
+				clearTyping()
+				m.rescueCursor = 0
+				break
+			}
+			session := *m.rescueDest
+			m.rescueDest = nil
+			m.confirmRescue = &session
+			m.rescueHow = false
+			m.confirmSel = m.rescueDefaultSel(session)
+		case "up":
+			m.rescueCursor = (m.rescueCursor + rows - 1) % rows
+		case "down":
+			m.rescueCursor = (m.rescueCursor + 1) % rows
+		case "backspace":
+			// Backspace edits typed text, nothing else — it never
+			// navigates and never leaves the picker.
+			if m.rescueMode == "" {
+				break
+			}
+			if runes := []rune(m.rescueFilter); len(runes) > 0 {
+				m.rescueFilter = string(runes[:len(runes)-1])
+			} else {
+				clearTyping()
+			}
+		case "left":
+			if m.rescueMode != "" {
+				break // typing; left is not navigation mid-entry
+			}
+			m.rescueInput = pickerUp(m.rescueInput)
+			m.rescueCursor = 0
+		case "/":
+			if m.rescueMode == "" {
+				m.rescueMode, m.rescueFilter = "filter", ""
+				break
+			}
+			if m.rescueMode == "jump" {
+				m.rescueFilter += "/"
+			}
+		case "~":
+			if m.rescueMode == "" {
+				m.rescueMode, m.rescueFilter = "jump", "~"
+				break
+			}
+			m.rescueFilter += "~"
+		case "right", "enter":
+			if m.rescueMode == "jump" {
+				if msg.String() == "right" {
+					break
+				}
+				if text := strings.TrimSpace(m.rescueFilter); text != "" && text != "~" {
+					m.rescueInput = tildePath(filepath.Clean(expandTilde(text)))
+				}
+				clearTyping()
+				m.rescueCursor = 0
+				break
+			}
+			switch {
+			case m.rescueCursor == 1: // ..
+				m.rescueInput = pickerUp(m.rescueInput)
+				clearTyping()
+				m.rescueCursor = 0
+			case m.rescueCursor == rows-1: // + new folder…
+				m.rescueNaming, m.rescueName = true, ""
+			case m.rescueCursor > 1: // descend
+				m.rescueInput = tildePath(filepath.Join(expandTilde(m.rescueInput), subdirs[m.rescueCursor-2]))
+				clearTyping()
+				m.rescueCursor = 0
+			default: // ✓ use this directory — enter only; → must never run an action
+				if msg.String() == "right" {
+					break
+				}
+				dir := expandTilde(strings.TrimSpace(m.rescueInput))
+				if dir == "" {
+					break
+				}
+				session := *m.rescueDest
+				m.rescueDest = nil
+				return m.runRescue(session, dir)
+			}
+		default:
+			if m.rescueMode != "" && (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) {
+				m.rescueFilter += msg.String()
+				if m.rescueMode == "filter" {
+					if len(m.rescueSubdirs()) > 0 {
+						m.rescueCursor = 2 // first match
+					} else {
+						m.rescueCursor = 0
+					}
+				}
+			}
+		}
+		return m, nil
+	}
+	if m.confirmRescue != nil {
+		labels := m.rescueButtons(*m.confirmRescue)
+		if m.rescueHow {
+			labels = rescueHowButtons()
+		}
+		buttons := len(labels)
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "right", "tab", "l", "down", "j":
+			m.confirmSel = (m.confirmSel + 1) % buttons
+		case "left", "h", "up", "k":
+			m.confirmSel = (m.confirmSel + buttons - 1) % buttons
+		case "esc", "n":
+			if m.rescueHow {
+				m.rescueHow = false
+				m.confirmSel = m.rescueDefaultSel(*m.confirmRescue)
+				break
+			}
+			m.confirmRescue = nil
+		case "enter":
+			session := *m.confirmRescue
+			switch labels[m.confirmSel] {
+			case "Resume":
+				m.confirmRescue = nil
+				m = m.pressOpen(session)
+			case "Rebuild…":
+				m.rescueHow = true
+				m.confirmSel = len(rescueHowButtons()) - 1 // Back default
+			case "Rebuild with AI":
+				m.rescueModels = rescueAIModels(m.cfg.Assist)
+				if len(m.rescueModels) == 0 {
+					m.notice, m.noticeErr = "ai rebuild needs ollama running or the claude CLI on PATH", true
+					break
+				}
+				m.confirmRescue, m.rescueHow = nil, false
+				m = m.openRescuePicker(session, "rebuild-ai")
+			case "Rebuild":
+				m.confirmRescue, m.rescueHow = nil, false
+				m = m.openRescuePicker(session, "rebuild")
+			case "Export prompts":
+				m.confirmRescue = nil
+				m = m.openRescuePicker(session, "export")
+			case "Back":
+				m.rescueHow = false
+				m.confirmSel = m.rescueDefaultSel(session)
+			case "Cancel":
+				m.confirmRescue = nil
 			}
 		}
 		return m, nil
@@ -664,24 +1272,92 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.showAsk {
+		if m.hitsBusy {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				m.showAsk = false // background it; the search continues
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "left":
+			if n := len(m.askModels); n > 0 {
+				m.askModel = (m.askModel + n - 1) % n
+			}
+		case "right", "tab":
+			if n := len(m.askModels); n > 0 {
+				m.askModel = (m.askModel + 1) % n
+			}
+		case "down":
+			// The list sits under the input, so down walks into it.
+			if m.askHistSel+1 < len(m.askHistory) {
+				if m.askHistSel == -1 {
+					m.askDraft = m.askInput
+				}
+				m.askHistSel++
+				m.askInput = m.askHistory[m.askHistSel].Query
+			}
+		case "up":
+			if m.askHistSel > -1 {
+				m.askHistSel--
+				if m.askHistSel == -1 {
+					m.askInput = m.askDraft
+				} else {
+					m.askInput = m.askHistory[m.askHistSel].Query
+				}
+			}
 		case "esc", "ctrl+g":
 			m.showAsk = false
 		case "enter":
-			if strings.TrimSpace(m.askInput) != "" && !m.hitsBusy {
-				m.showAsk = false
-				return m.fireAsk()
+			if strings.TrimSpace(m.askInput) == "" || m.hitsBusy {
+				break
 			}
+			// A recalled search with saved results replays instantly —
+			// no model call. Typing a query fresh, or recalling an entry
+			// without results, runs the model.
+			if m.askHistSel >= 0 {
+				entry := m.askHistory[m.askHistSel]
+				if len(entry.Results) > 0 && strings.TrimSpace(m.askInput) == entry.Query {
+					if done, ok := m.replayAsk(entry); ok {
+						return done, nil
+					}
+				}
+			}
+			return m.fireAsk()
 		case "backspace":
+			m.askHistSel = -1
 			if runes := []rune(m.askInput); len(runes) > 0 {
 				m.askInput = string(runes[:len(runes)-1])
 			}
 		default:
 			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+				m.askHistSel = -1
 				m.askInput += msg.String()
 			}
+		}
+		return m, nil
+	}
+	if m.showFilter {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc", "f", "enter", "q":
+			m.showFilter = false
+			m.rebuild()
+		case "up", "k":
+			m.filterCursor--
+			m.filterCursorSkip(-1)
+		case "down", "j":
+			m.filterCursor++
+			m.filterCursorSkip(1)
+		case " ", "x":
+			(&m).toggleFilterItem()
+		case "c":
+			m.fStates, m.fAgents, m.fModels, m.fWindow = nil, nil, nil, 0
 		}
 		return m, nil
 	}
@@ -752,10 +1428,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		(&m).openDetail()
 	case "r":
-		if session := m.selectedSession(); session != nil && session.State == "MISSING_SOURCE" {
-			copied := *session
-			m.confirmRestore = &copied
-			m.confirmSel = 1
+		if session := m.selectedSession(); session != nil {
+			m = m.pressRescue(*session)
 		}
 	case "ctrl+r":
 		m.scanning = true
@@ -788,6 +1462,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+e":
 		m.expandAll = !m.expandAll
 		m.rebuild()
+	case "f":
+		(&m).buildFilterItems()
+		m.showFilter = true
 	case "/":
 		if m.showHits {
 			m.showHits = false
@@ -806,31 +1483,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session == nil {
 			break
 		}
-		switch {
-		case session.LiveStatus != "" && session.LivePID > 0:
-			// Open somewhere: jump to its window.
-			if err := focusSession(session.LivePID); err != nil {
-				m.noticeErr = true
-				if errors.Is(err, focus.ErrNotAuthorized) {
-					focus.OpenAutomationSettings()
-					m.notice = "macOS blocked the jump — in the Settings pane just opened, " +
-						"enable your terminal under Automation, then press o again"
-				} else {
-					m.notice = "jump failed: " + err.Error()
-				}
-			} else {
-				m.notice = "brought the session's window to the front"
-			}
-		case session.State == "LOST":
-			m.notice, m.noticeErr = "lost sessions have no transcript to resume", true
-		case session.SourcePath == "":
-			m.notice, m.noticeErr = "backup-only session — restore it first (r), then resume", true
-		default:
-			// Closed: confirm before spawning a window to resume it.
-			copied := *session
-			m.confirmResume = &copied
-			m.confirmSel = 2
-		}
+		m = m.pressOpen(*session)
 	case "t":
 		if m.showSessions || m.showAll || m.showHits {
 			session := m.selectedSession()
@@ -902,6 +1555,95 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.goUp()
 	}
 	return m, nil
+}
+
+// pressRescue opens the restore or rescue dialog for a session — the r key,
+// shared by the list and the inspector.
+func (m model) pressRescue(session Session) model {
+	switch session.State {
+	case "MISSING_SOURCE":
+		m.confirmRestore = &session
+		m.confirmSel = 1
+	case "LOST":
+		m.confirmRescue = &session
+		m.rescueHow = false
+		m.confirmSel = m.rescueDefaultSel(session)
+	}
+	return m
+}
+
+// pressOpen jumps to a live session or offers to resume a closed one — the
+// o key, shared by the list and the inspector.
+func (m model) pressOpen(session Session) model {
+	switch {
+	case session.LiveStatus != "" && session.LivePID > 0:
+		// Open somewhere: jump to its window.
+		if err := focusSession(session.LivePID); err != nil {
+			m.noticeErr = true
+			if errors.Is(err, focus.ErrNotAuthorized) {
+				focus.OpenAutomationSettings()
+				m.notice = "macOS blocked the jump — in the Settings pane just opened, " +
+					"enable your terminal under Automation, then press o again"
+			} else {
+				m.notice = "jump failed: " + err.Error()
+			}
+		} else {
+			m.notice = "brought the session's window to the front"
+		}
+	case session.State == "LOST":
+		// The original is never resumable — but its rebuilds are, so o
+		// routes there instead of dead-ending: straight to the resume
+		// dialog for a single rebuild, a chooser when there are several.
+		switch rebuilds := m.validRebuilds(session); len(rebuilds) {
+		case 0:
+			m.notice, m.noticeErr = "lost sessions have no transcript to resume", true
+		case 1:
+			copied := *m.sessionByID(rebuilds[0])
+			m.confirmResume = &copied
+			m.resumeHeading = "Lost original — resume its rebuild " + copied.ID[:8] + "…?"
+			m.confirmSel = 2
+		default:
+			copied := session
+			m.rebuildChoice = &copied
+			m.confirmSel = len(rebuilds) // Cancel default
+		}
+	case session.SourcePath == "":
+		m.notice, m.noticeErr = "backup-only session — restore it first (r), then resume", true
+	default:
+		// Closed: confirm before spawning a window to resume it.
+		m.confirmResume = &session
+		m.confirmSel = 2
+	}
+	return m
+}
+
+// validRebuilds returns the reconstructions of an original that still
+// exist in the scan, newest first.
+func (m model) validRebuilds(session Session) []string {
+	var out []string
+	for _, id := range session.RebuiltAs {
+		if m.sessionByID(id) != nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// spinGlyph is the current busy-spinner frame.
+func (m model) spinGlyph() string {
+	return spinFrames[m.spinFrame%len(spinFrames)]
+}
+
+// sessionByID finds a session anywhere in the scan.
+func (m model) sessionByID(id string) *Session {
+	for _, project := range m.projects {
+		for i := range project.Sessions {
+			if project.Sessions[i].ID == id {
+				return &project.Sessions[i]
+			}
+		}
+	}
+	return nil
 }
 
 func (m model) selectedSession() *Session {
@@ -1050,6 +1792,30 @@ func (m model) View() string {
 		}
 		return m.dialog("Update to "+m.updateOffer+"?", body, "Update", "Later")
 	}
+	if m.rebuildChoice != nil {
+		original := *m.rebuildChoice
+		title := original.Title
+		if title == "" {
+			title = original.ID
+		}
+		rebuilds := m.validRebuilds(original)
+		body := []string{
+			styleDim.Render("✕ ") + truncate(title, 68),
+			styleDim.Render("this lost original has several reconstructions — resume which?"),
+			"",
+		}
+		labels := make([]string, 0, len(rebuilds)+1)
+		for _, id := range rebuilds {
+			line := "  ⟳ " + id[:8] + "…"
+			if rebuilt := m.sessionByID(id); rebuilt != nil {
+				line += styleDim.Render("  " + ago(rebuilt.Modified) + "  " + truncate(tildePath(rebuilt.ProjectPath), 48))
+			}
+			body = append(body, line)
+			labels = append(labels, id[:8]+"…")
+		}
+		labels = append(labels, "Cancel")
+		return m.dialog("Resume which rebuild?", body, labels...)
+	}
 	if m.confirmResume != nil {
 		session := *m.confirmResume
 		title := session.CustomName
@@ -1063,12 +1829,186 @@ func (m model) View() string {
 		if project == "" {
 			project = m.root
 		}
-		return m.dialog("Open session?",
+		heading, last := "Open session?", "Cancel"
+		if m.resumeHeading != "" {
+			heading, last = m.resumeHeading, "Later"
+		}
+		return m.dialog(heading,
 			[]string{
 				truncate(title, 70),
 				styleDim.Render("in    ") + truncate(tildePath(project), 64),
 				styleDim.Render("runs  ") + truncate(resumeCommand(session, project), 64),
-			}, "New window", "This terminal", "Cancel")
+			}, "New window", "This terminal", last)
+	}
+	if m.rescueAI != nil {
+		session := *m.rescueAI
+		title := session.Title
+		if title == "" {
+			title = session.ID
+		}
+		model := "—"
+		if len(m.rescueModels) > 0 {
+			model = m.rescueModels[m.rescueModel].Label()
+		}
+		body := []string{
+			styleDim.Render("✕ ") + truncate(title, 68),
+			"",
+			" model  " + styleDim.Render("‹ ") + styleBold.Render(model) + styleDim.Render(" ›") +
+				styleDim.Render("   ↑/↓ change"),
+			"",
+			styleDim.Render("The model reads your surviving prompts and writes a reconstruction"),
+			styleDim.Render("brief — clearly marked AI-inferred — as the session's final message."),
+			styleDim.Render("Original responses are NOT recovered or invented."),
+		}
+		if m.rescueBusy {
+			busy := m.spinGlyph() + " synthesizing with " + model + " … usually well under a minute"
+			body = append(body, "", styleStale.Render(busy),
+				styleDim.Render("quitting now abandons the rebuild — nothing would be written"))
+			if m.rescueQuitArm {
+				body = append(body, styleStale.Render("ctrl+c again to abandon the rebuild and quit"))
+			}
+		}
+		return m.dialog("Rebuild with AI?", body, "Rebuild", "Cancel")
+	}
+	if m.rescueDest != nil {
+		session := *m.rescueDest
+		title := session.Title
+		if title == "" {
+			title = session.ID
+		}
+		heading := map[string]string{
+			"export":     "Export prompts — where?",
+			"rebuild":    "Rebuild — into which project directory?",
+			"rebuild-ai": "Rebuild with AI — into which project directory?",
+		}[m.rescueAction]
+		expanded := expandTilde(strings.TrimSpace(m.rescueInput))
+		note := styleDim.Render("directory exists")
+		if !dirIsPresent(expanded) {
+			note = styleStale.Render("will be created on confirm")
+		}
+		detail := "the rebuilt session resumes here; default is the original project dir"
+		if m.rescueAction == "export" {
+			detail = "writes " + session.ID + ".md; default is the project dir (or the backup root)"
+		}
+		body := []string{
+			styleDim.Render("✕ ") + truncate(title, 68),
+			"",
+			styleActive.Render(truncate(m.rescueInput, 72)) + "  " + note,
+			"",
+		}
+		switch m.rescueMode {
+		case "filter":
+			body = append(body, "  /"+m.rescueFilter+"▌", "")
+		case "jump":
+			body = append(body, "  go to: "+m.rescueFilter+"▌"+styleDim.Render("  (enter jumps there)"), "")
+		}
+		if m.rescueNaming {
+			body = append(body,
+				"  new folder: "+m.rescueName+"▌",
+				"",
+				styleDim.Render(truncate(detail, 74)))
+			return m.inputDialog(heading, body, "type name · enter add · esc cancel")
+		}
+		subdirs := m.rescueSubdirs()
+		row := func(index int, label string, style lipgloss.Style) string {
+			if index == m.rescueCursor {
+				return styleCursor.Render("❯ " + label)
+			}
+			return "  " + style.Render(label)
+		}
+		rows := []string{
+			row(0, "✓ use this directory", styleBold),
+			row(1, "..", styleDim),
+		}
+		const window = 8
+		first, last := 0, len(subdirs)
+		if len(subdirs) > window {
+			first = max(0, min(m.rescueCursor-2-window/2, len(subdirs)-window))
+			last = first + window
+		}
+		if first > 0 {
+			rows = append(rows, styleDim.Render(fmt.Sprintf("    … %d above", first)))
+		}
+		for i := first; i < last; i++ {
+			rows = append(rows, row(i+2, subdirs[i]+"/", lipgloss.NewStyle()))
+		}
+		if last < len(subdirs) {
+			rows = append(rows, styleDim.Render(fmt.Sprintf("    … %d more", len(subdirs)-last)))
+		}
+		rows = append(rows, row(len(subdirs)+2, "+ new folder…", styleDim))
+		body = append(body, rows...)
+		body = append(body, "", styleDim.Render(truncate(detail, 74)))
+		return m.inputDialog(heading, body, "↑/↓ choose · enter confirm · → open · ← up · / filter · ~ jump to path")
+	}
+	if m.confirmRescue != nil {
+		session := *m.confirmRescue
+		title := session.Title
+		if title == "" {
+			title = session.ID
+		}
+		// The description follows the highlighted button; both lines are
+		// always present so the dialog never changes height.
+		describe := map[string][2]string{
+			"Resume": {
+				"opens the resume dialog for the existing reconstruction —",
+				"the resumable descendant of this lost original",
+			},
+			"Rebuild…": {
+				"reconstruction options: a mechanical replay of your prompts, or",
+				"one with an AI-written brief of where the work stood (next page)",
+			},
+			"Rebuild": {
+				"creates a NEW resumable session from your prompts; lost responses",
+				"appear as [response lost] — the original stays marked lost",
+			},
+			"Rebuild with AI": {
+				"rebuilds the session AND adds a model-written brief of where the",
+				"work stood — you pick the model; the original stays marked lost",
+			},
+			"Export prompts": {
+				"writes the surviving prompts to a markdown file you can keep",
+				"anywhere — re-runnable; the original stays marked lost",
+			},
+			"Back": {
+				"returns to the previous page",
+				"",
+			},
+			"Cancel": {
+				"closes this dialog without touching anything",
+				"",
+			},
+		}
+		labels := m.rescueButtons(session)
+		heading := "Rescue lost session?"
+		if m.rescueHow {
+			labels = rescueHowButtons()
+			heading = "Rebuild how?"
+		}
+		desc := describe[labels[min(m.confirmSel, len(labels)-1)]]
+		body := []string{
+			styleDim.Render("✕ ") + truncate(title, 68),
+			styleDim.Render(fmt.Sprintf("%d prompt(s) survive in the agent's history; the transcript is gone", session.Prompts)),
+		}
+		if len(session.RebuiltAs) > 0 {
+			body = append(body, "", styleRecover.Render("already rebuilt — resumable now:"))
+			for i, id := range session.RebuiltAs {
+				if i == 2 && len(session.RebuiltAs) > 3 {
+					body = append(body, styleDim.Render(fmt.Sprintf("  … and %d more", len(session.RebuiltAs)-i)))
+					break
+				}
+				line := "  ⟳ " + id[:8] + "…"
+				if rebuilt := m.sessionByID(id); rebuilt != nil {
+					line += styleDim.Render("  " + ago(rebuilt.Modified) + "  " + truncate(tildePath(rebuilt.ProjectPath), 44))
+				}
+				body = append(body, line)
+			}
+			body = append(body, styleDim.Render("  rebuilding again creates ANOTHER session mapped to this original"))
+		}
+		body = append(body, "",
+			styleDim.Render(desc[0]),
+			styleDim.Render(desc[1]),
+			styleDim.Render("(each action then asks where to write)"))
+		return m.dialog(heading, body, labels...)
 	}
 	if m.confirmRestore != nil {
 		session := *m.confirmRestore
@@ -1098,6 +2038,9 @@ func (m model) View() string {
 	}
 	if m.showAsk {
 		return m.askView()
+	}
+	if m.showFilter {
+		return m.filterView()
 	}
 	if m.showHits {
 		return m.hitsView()
@@ -1171,10 +2114,13 @@ func (m model) View() string {
 	} else if m.query != "" {
 		help = "/" + m.query + "   enter open · ctrl+s transcripts · ctrl+g ai find · esc clear"
 	}
+	if summary := m.filterSummary(); summary != "" && !m.searching {
+		help = "f:" + summary + "   " + help
+	}
 	if m.hitsBusy {
-		help = "searching transcripts for /" + m.hitsQuery + " … (first run builds the text index)"
+		help = m.spinGlyph() + " searching transcripts for /" + m.hitsQuery + " … (first run builds the text index)"
 		if m.hitsMode == "ask" {
-			help = "asking the local model about \"" + m.hitsQuery + "\" …"
+			help = m.spinGlyph() + " asking the local model about \"" + m.hitsQuery + "\" …"
 		}
 	}
 
@@ -1188,7 +2134,7 @@ func (m model) fireContentSearch() (tea.Model, tea.Cmd) {
 	m.hitsQuery = m.query
 	cfg, query := m.cfg, m.query
 	scope := AllUnder(m.projects, m.root)
-	return m, func() tea.Msg { return hitsMsg(ContentSearch(cfg, scope, query)) }
+	return m, tea.Batch(spin(), func() tea.Msg { return hitsMsg(ContentSearch(cfg, scope, query)) })
 }
 
 func (m model) transplantOptions() transplant.Options {
@@ -1223,39 +2169,44 @@ func (m model) fireTransplant() (tea.Model, tea.Cmd) {
 // filter query when the prompt is empty. The backend is probed once here,
 // never per frame.
 func (m model) openAsk() (tea.Model, tea.Cmd) {
-	backend := assist.Detect(m.cfg.Assist)
-	if backend == nil {
+	m.askModels = assistModels(m.cfg.Assist)
+	if len(m.askModels) == 0 {
 		m.notice = "ai find needs ollama running or the claude CLI on PATH (assist.backend in config)"
 		m.noticeErr = true
 		return m, nil
 	}
-	m.askBackend = backend.Name()
+	if m.askModel >= len(m.askModels) {
+		m.askModel = 0
+	}
 	if m.askInput == "" {
 		m.askInput = m.query
 	}
+	m.askHistory = loadAskHistory(m.cfg)
+	m.askHistSel = -1
 	m.showAsk = true
 	return m, nil
 }
 
-// fireAsk asks the configured local model which sessions match the
+// fireAsk asks the chosen local model which sessions match the
 // description, grounded on keyword-scored candidates with excerpts.
 func (m model) fireAsk() (tea.Model, tea.Cmd) {
-	backend := assist.Detect(m.cfg.Assist)
-	if backend == nil {
-		m.notice = "ai find needs ollama running or the claude CLI on PATH (assist.backend in config)"
-		m.noticeErr = true
+	if len(m.askModels) == 0 {
 		return m, nil
 	}
+	m.askHistSel = -1
+	option := m.askModels[m.askModel]
 	m.hitsBusy = true
 	m.hitsMode = "ask"
 	m.hitsQuery = m.askInput
-	cfg, query := m.cfg, m.askInput
+	// The page stays open while the model works — closing it instantly
+	// made a 10s ranking read as "enter did nothing".
+	cfg, query := m.cfg, strings.TrimSpace(m.askInput)
 	scope := AllUnder(m.projects, m.root)
-	return m, func() tea.Msg {
-		candidates := BuildCandidates(cfg, scope, query)
-		matches, err := backend.Rank(query, candidates)
+	return m, tea.Batch(spin(), func() tea.Msg {
+		candidates, rawHits := BuildCandidates(cfg, scope, query)
+		matches, err := assistRank(cfg.Assist, option, query, candidates)
 		if err != nil {
-			return askMsg{backend: backend.Name(), err: err}
+			return askMsg{query: query, backend: option.Label(), err: err}
 		}
 		byID := map[string]Session{}
 		for _, session := range scope {
@@ -1264,11 +2215,40 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 		var hits []Hit
 		for _, match := range matches {
 			if session, ok := byID[match.ID]; ok {
-				hits = append(hits, Hit{Session: session, Snippet: match.Reason})
+				hits = append(hits, Hit{Session: session, Snippet: match.Reason, Count: rawHits[match.ID]})
 			}
 		}
-		return askMsg{hits: hits, backend: backend.Name()}
+		return askMsg{query: query, hits: hits, backend: option.Label()}
+	})
+}
+
+// replayAsk shows a saved search's results without a model call,
+// rehydrating each result against the current scan so states, badges,
+// and titles are current. Returns ok=false when none of the saved
+// sessions exist anymore — the caller then runs the model live.
+func (m model) replayAsk(entry askHistoryEntry) (model, bool) {
+	byID := map[string]Session{}
+	for _, session := range AllUnder(m.projects, m.root) {
+		byID[session.ID] = session
 	}
+	var hits []Hit
+	for _, saved := range entry.Results {
+		if session, ok := byID[saved.ID]; ok {
+			hits = append(hits, Hit{Session: session, Snippet: saved.Reason, Count: saved.Count})
+		}
+	}
+	if len(hits) == 0 {
+		return m, false
+	}
+	m.showAsk = false
+	m.hitsMode = "ask"
+	m.hitsQuery = entry.Query
+	m.hitsNote = entry.Model
+	m.hitsCached = entry.At
+	m.hits = hits
+	m.showHits = true
+	m.hCursor, m.hOffset = 0, 0
+	return m, true
 }
 
 // resumeCommand is the shell line a spawned window runs to pick the
@@ -1489,8 +2469,7 @@ func (m model) transplantView() string {
 // asks the configured backend.
 func (m model) askView() string {
 	var b strings.Builder
-	b.WriteString(styleHeader.Render("Session Explorer ▸ ai find") +
-		styleDim.Render("  backend: "+m.askBackend+" ") + "\n")
+	b.WriteString(styleHeader.Render("Session Explorer ▸ ai find") + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n\n")
 
 	b.WriteString(styleDim.Render(" describe the session you're looking for — project names, topics,"+
@@ -1500,9 +2479,79 @@ func (m model) askView() string {
 	prompt := m.askInput + "▌"
 	b.WriteString(detailBox(width).Render(styleActive.Render("❯ ")+
 		strings.Join(wrapPreserve(prompt, inner, 8), "\n  ")) + "\n")
+	if len(m.askModels) > 0 {
+		selector := " model  " + styleDim.Render("‹ ") +
+			styleBold.Render(m.askModels[m.askModel].Label()) + styleDim.Render(" ›")
+		if len(m.askModels) > 1 {
+			selector += styleDim.Render(fmt.Sprintf("   ←/→ change (%d available)", len(m.askModels)))
+		}
+		b.WriteString(selector + "\n")
+	}
 	b.WriteString(styleDim.Render(" matches are grounded in your transcripts and ranked with a short"+
 		" reason each") + "\n")
-	return m.pinBottomBare(b.String(), "enter ask · esc close")
+	if m.hitsBusy {
+		b.WriteString("\n " + styleStale.Render(m.spinGlyph()+" asking "+
+			m.askModels[m.askModel].Label()+" about \""+truncate(strings.TrimSpace(m.askInput), 48)+"\" …") + "\n")
+		return m.pinBottomBare(b.String(), "working — results open when ready · esc hides this page")
+	}
+	if len(m.askHistory) > 0 {
+		b.WriteString("\n" + styleDim.Render(" recent searches") + "\n")
+		shown := min(len(m.askHistory), 6)
+		for i := 0; i < shown; i++ {
+			entry := m.askHistory[i]
+			line := truncate(entry.Query, inner-16)
+			saved := ""
+			if len(entry.Results) > 0 {
+				saved = fmt.Sprintf("  · %d saved", len(entry.Results))
+			}
+			if i == m.askHistSel {
+				b.WriteString(styleCursor.Render(" ❯ "+line) + styleDim.Render(saved) + "\n")
+			} else {
+				b.WriteString(styleDim.Render("   "+line+saved) + "\n")
+			}
+		}
+		if len(m.askHistory) > shown {
+			b.WriteString(styleDim.Render(fmt.Sprintf("   … %d more (↑ to reach)", len(m.askHistory)-shown)) + "\n")
+		}
+	}
+	help := "enter ask · ↓ recent searches · ←/→ model · esc close"
+	if m.askHistSel >= 0 && len(m.askHistory[m.askHistSel].Results) > 0 {
+		help = "enter saved results (instant) · ↑ back to your text · esc close"
+	}
+	return m.pinBottomBare(b.String(), help)
+}
+
+// filterView is the f facet page: grouped checkboxes over what exists
+// under the current root.
+func (m model) filterView() string {
+	var b strings.Builder
+	summary := m.filterSummary()
+	if summary != "" {
+		summary = "  " + styleActive.Render(summary) + " "
+	}
+	b.WriteString(styleHeader.Render("Session Explorer ▸ filters") + styleDim.Render(summary) + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
+
+	for i, item := range m.filterItems {
+		if item.kind == "header" {
+			b.WriteString("\n" + styleDim.Render("  "+item.label) + "\n")
+			continue
+		}
+		mark := "[ ]"
+		if m.filterItemChecked(item) {
+			mark = "[x]"
+		}
+		line := fmt.Sprintf("  %s %s", mark, item.label)
+		if i == m.filterCursor {
+			b.WriteString(styleCursor.Render(fmt.Sprintf("%-*s", min(m.width, 60), line)) + "\n")
+		} else if m.filterItemChecked(item) {
+			b.WriteString(styleActive.Render(line) + "\n")
+		} else {
+			b.WriteString(line + "\n")
+		}
+	}
+	b.WriteString("\n" + styleDim.Render("  empty categories don't constrain; MODIFIED is single-choice") + "\n")
+	return m.pinBottomBare(b.String(), "↑/↓ move · space toggle · c clear · f/esc apply")
 }
 
 // hitsView lists content-search results ranked by hit count; the
@@ -1514,6 +2563,9 @@ func (m model) hitsView() string {
 	if m.hitsMode == "ask" {
 		heading = "Session Explorer ▸ ai find"
 		note = fmt.Sprintf("  \"%s\" · %d match(es) via %s ", m.hitsQuery, len(m.hits), m.hitsNote)
+		if !m.hitsCached.IsZero() {
+			note += styleStale.Render(fmt.Sprintf("· saved %s ago ", ago(m.hitsCached)))
+		}
 	}
 	b.WriteString(styleHeader.Render(heading) + styleDim.Render(note) + "\n")
 	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
@@ -1527,12 +2579,13 @@ func (m model) hitsView() string {
 		return m.pinBottomBare(b.String(), "esc back · / new search · ctrl+c quit")
 	}
 
-	countHeader := "HITS"
 	if m.hitsMode == "ask" {
-		countHeader = "RANK"
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %4s %6s  %-11s %-*s %-7s %-9s %s",
+			"RANK", "HITS", "STATE", m.titleWidth(), "TITLE", "AGENT", "MODIFIED", "IN")) + "\n")
+	} else {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-11s %-*s %-7s %-9s %s",
+			"HITS", "STATE", m.titleWidth(), "TITLE", "AGENT", "MODIFIED", "IN")) + "\n")
 	}
-	b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-*s %-7s %s",
-		countHeader, m.titleWidth(), "TITLE", "AGENT", "IN")) + "\n")
 	end := min(len(m.hits), m.hOffset+m.pageSize())
 	for i := m.hOffset; i < end; i++ {
 		b.WriteString(m.hitRow(m.hits[i], i, i == m.hCursor) + "\n")
@@ -1546,7 +2599,11 @@ func (m model) hitsView() string {
 			b.WriteString("\n " + styleDim.Render(prefix+truncate(snippet, m.width-4-len(prefix))) + "\n")
 		}
 	}
-	return m.pinBottomBare(b.String(), "↑/↓ move · enter open · esc back · / new search")
+	help := "↑/↓ move · enter open · esc back · / new search"
+	if m.hitsMode == "ask" && !m.hitsCached.IsZero() {
+		help = "↑/↓ move · enter open · ctrl+g re-ask the model · esc back"
+	}
+	return m.pinBottomBare(b.String(), help)
 }
 
 func (m model) hitRow(hit Hit, index int, active bool) string {
@@ -1557,15 +2614,22 @@ func (m model) hitRow(hit Hit, index int, active bool) string {
 	if title == "" {
 		title = hit.Session.ID
 	}
-	count := hit.Count
-	if m.hitsMode == "ask" {
-		count = index + 1
-	}
 	in := tildePath(hit.Session.ProjectPath)
-	row := fmt.Sprintf("  %6d  %-*s %-7s %s",
-		count, m.titleWidth(), truncate(title, m.titleWidth()),
+	stateLabel, stateStyle := sessionStateFor(hit.Session)
+	lead := fmt.Sprintf("%6d", hit.Count)
+	if m.hitsMode == "ask" {
+		hitsCell := "-"
+		if hit.Count > 0 {
+			hitsCell = fmt.Sprintf("%d", hit.Count)
+		}
+		lead = fmt.Sprintf("%4d %6s", index+1, hitsCell)
+	}
+	row := fmt.Sprintf("  %s  %s %-*s %-7s %-9s %s",
+		lead, styleUnless(active, stateStyle, stateLabel),
+		m.titleWidth(), truncate(title, m.titleWidth()),
 		hit.Session.Target,
-		styleUnless(active, styleDim, truncate(in, max(10, m.width-m.titleWidth()-22))))
+		ago(hit.Session.Modified),
+		styleUnless(active, styleDim, truncate(in, max(10, m.width-m.titleWidth()-44))))
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}
@@ -1620,13 +2684,14 @@ func (m model) keysBody(b *strings.Builder) {
 	key("ctrl+a", "all sessions beneath this folder")
 	key("ctrl+e", "expand / collapse the whole folder tree in place")
 	key("/", "filter the current pane — folder tree or session list")
+	key("f", "facet filters: state · agent · model · modified window")
 	key("ctrl+s", "search transcripts for the query, ranked by hit count")
 	key("ctrl+g", "ai find page: describe a session, enter asks a local model")
 	key("g · G", "jump to top / bottom")
 	section("SESSIONS")
 	key("i", "session details (overview · usage · transcript)")
 	key("o", "open: jump to an ▶ open session; resume a closed one here or in a new window")
-	key("r", "restore a ✝ recover session, with confirmation")
+	key("r", "restore a ✝ recover session · rescue a ✕ lost one (rebuild/export)")
 	key("t", "transplant: move/copy a session or project to another dir")
 	key("x", "show or hide ✕ lost sessions")
 	section("GLOBAL")
@@ -1655,6 +2720,16 @@ func (m model) pinBottomBare(content string, help string) string {
 	footer := []string{
 		styleFooter.Render(strings.Repeat("─", max(m.width, 10))),
 		styleFooter.Render(" " + help),
+	}
+	if m.notice != "" {
+		// Failure and cancellation notices must be visible on every
+		// page — swallowing them here made rescue errors read as the
+		// tool silently doing nothing.
+		style := styleOK
+		if m.noticeErr {
+			style = styleUnbacked
+		}
+		footer = append([]string{style.Render(" " + truncate(m.notice, max(m.width-2, 20)))}, footer...)
 	}
 	used := strings.Count(content, "\n")
 	if pad := m.height - used - len(footer); pad > 0 {
@@ -1710,7 +2785,7 @@ func (m model) tabBar() string {
 // allSessionRow is a session row whose trailing column shows where the
 // session lives relative to the current root.
 func (m model) allSessionRow(session Session, active bool) string {
-	state, style := sessionState(session.State)
+	state, style := sessionStateFor(session)
 	gold := session.LiveStatus != "" && !active
 	plain := active || gold
 	live := " "
@@ -1748,8 +2823,12 @@ func (m model) detailView() string {
 		}
 		return styleDim.Render(" " + label + " ")
 	}
+	middle := "Usage"
+	if session.State == "LOST" {
+		middle = "Recovery"
+	}
 	left := styleHeader.Render("▸ " + name)
-	right := tab("Overview", 0) + tab("Usage", 1) + tab("Transcript", 2)
+	right := tab("Overview", 0) + tab(middle, 1) + tab("Transcript", 2)
 	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
 		left += strings.Repeat(" ", pad)
 	}
@@ -1760,14 +2839,18 @@ func (m model) detailView() string {
 
 	switch m.detailTab {
 	case 1:
+		if session.State == "LOST" {
+			m.recoveryTab(&b, session)
+			return m.pinBottomBare(b.String(), "o resume rebuild · r rescue · tab switch · i/esc close")
+		}
 		m.usageTab(&b)
-		return m.pinBottomBare(b.String(), "tab switch · i/esc close · ctrl+c quit")
+		return m.pinBottomBare(b.String(), "o open · r rescue · tab switch · i/esc close")
 	case 2:
 		m.renderTail(&b, max(4, m.height-6))
-		return m.pinBottomBare(b.String(), "↑/↓/wheel scroll · tab switch · i/esc close")
+		return m.pinBottomBare(b.String(), "↑/↓ scroll · o open · r rescue · tab switch · i/esc close")
 	}
 	m.overviewTab(&b, session)
-	return m.pinBottomBare(b.String(), "tab switch · i/esc close · ctrl+c quit")
+	return m.pinBottomBare(b.String(), "o open · r rescue · tab switch · i/esc close")
 }
 
 func (m model) overviewTab(b *strings.Builder, session Session) {
@@ -1775,7 +2858,7 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	width := max(min(m.width-2, 110), 40)
 	inner := width - 4
 
-	state, style := sessionState(session.State)
+	state, style := sessionStateFor(session)
 	liveNote := ""
 	if session.LiveStatus != "" {
 		liveNote = styleActive.Render("  ▶ open now (" + session.LiveStatus + ")")
@@ -1786,11 +2869,22 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	kv("state", strings.TrimSpace(style.Render(state))+liveNote)
 	kv("agent", session.Target)
 	kv("session", session.ID)
+	if session.RebuiltFrom != "" {
+		kv("rebuilt", "from "+styleRecover.Render("✕ "+session.RebuiltFrom[:8]+"…")+
+			styleDim.Render("  — a reconstruction; the original stays marked lost"))
+	}
+	if len(session.RebuiltAs) > 0 {
+		kv("rebuilds", fmt.Sprintf("%d resumable reconstruction(s) — see the Recovery tab", len(session.RebuiltAs)))
+	}
 	project := session.ProjectPath
 	if project == "" {
 		project = m.root
 	}
-	kv("project", tildePath(project))
+	projectNote := ""
+	if _, statErr := os.Stat(project); statErr != nil && filepath.IsAbs(project) {
+		projectNote = styleStale.Render("  ⌂! directory missing — t transplants it elsewhere")
+	}
+	kv("project", tildePath(project)+projectNote)
 	stamp := human.Bytes(session.Size)
 	if !data.Created.IsZero() {
 		stamp += styleDim.Render("  ·  started ") + ago(data.Created)
@@ -1823,6 +2917,9 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	if !session.RestoredAt.IsZero() {
 		kv("restored", styleRecover.Render("✚ ")+session.RestoredAt.Format("2006-01-02 15:04")+
 			styleDim.Render("  ·  from backup ("+ago(session.RestoredAt)+")"))
+	}
+	if session.RebuiltFrom != "" {
+		kv("rebuilt", styleRecover.Render("⟳ ")+styleDim.Render("reconstructed from lost session ")+session.RebuiltFrom)
 	}
 	kvPath := func(key string, path string) {
 		if path == "" {
@@ -1900,6 +2997,103 @@ func (m model) usageTab(b *strings.Builder) {
 	}
 }
 
+// recoveryTab is the lost-session dossier: what survives, every
+// reconstruction built from it, the export artifact, and the audit
+// trail — the map from a dead transcript to its living descendants.
+func (m model) recoveryTab(b *strings.Builder, session Session) {
+	kv := func(key string, value string) {
+		b.WriteString(styleDim.Render(fmt.Sprintf(" %-10s", key)) + value + "\n")
+	}
+	b.WriteString(styleDim.Render(" the transcript is gone from live and backup; this record is permanent —") + "\n")
+	b.WriteString(styleDim.Render(" only the prompts survive (Transcript tab). Rescue actions: r") + "\n\n")
+
+	if len(session.RebuiltAs) == 0 {
+		kv("rebuilds", styleDim.Render("none yet — r offers Rebuild, Rebuild with AI, and Export"))
+	}
+	for i, id := range session.RebuiltAs {
+		label := "rebuilds"
+		if i > 0 {
+			label = ""
+		}
+		line := styleRecover.Render("⟳ "+id[:8]+"…") + styleDim.Render("  gone from scan")
+		if rebuilt := m.sessionByID(id); rebuilt != nil {
+			stateLabel, stateStyle := sessionStateFor(*rebuilt)
+			line = styleRecover.Render("⟳ "+id[:8]+"…") + "  " + stateStyle.Render(strings.TrimSpace(stateLabel)) +
+				styleDim.Render("  "+ago(rebuilt.Modified)+"  "+truncate(tildePath(rebuilt.ProjectPath), 48))
+		}
+		kv(label, line)
+	}
+
+	exportPath := filepath.Join(m.cfg.BackupRoot, "exports", session.ID+".md")
+	if info, err := os.Stat(exportPath); err == nil {
+		kv("export", tildePath(exportPath)+styleDim.Render("  ("+ago(info.ModTime())+" ago)"))
+	} else {
+		kv("export", styleDim.Render("no prompt export yet — r → Export prompts"))
+	}
+
+	var trail []audit.Entry
+	for _, entry := range audit.Read(m.cfg.BackupRoot) {
+		if entry.SessionID == session.ID || entry.From == session.ID {
+			trail = append(trail, entry)
+		}
+	}
+	if len(trail) > 0 {
+		b.WriteString("\n" + styleDim.Render(" history") + "\n")
+		if len(trail) > 6 {
+			trail = trail[len(trail)-6:]
+		}
+		for _, entry := range trail {
+			line := fmt.Sprintf("   %s  %-14s %s", entry.Time.Format("2006-01-02 15:04"), entry.Action, entry.SessionID[:8]+"…")
+			if entry.Detail != "" {
+				line += styleDim.Render("  " + entry.Detail)
+			}
+			b.WriteString(line + "\n")
+		}
+	}
+}
+
+// rescueButtons lists the actions available for a lost session: claude
+// sessions can be rebuilt into a resumable transcript; codex history can
+// currently only be exported.
+func (m model) rescueButtons(session Session) []string {
+	if session.Target != "claude" {
+		return []string{"Export prompts", "Cancel"}
+	}
+	if len(m.validRebuilds(session)) > 0 {
+		return []string{"Resume", "Rebuild…", "Export prompts", "Cancel"}
+	}
+	return []string{"Rebuild…", "Export prompts", "Cancel"}
+}
+
+// rescueDefaultSel: Resume is the default when a reconstruction already
+// exists — it only opens the resume dialog, so a reflexive enter is
+// safe. Otherwise the usual Cancel default.
+func (m model) rescueDefaultSel(session Session) int {
+	buttons := m.rescueButtons(session)
+	if buttons[0] == "Resume" {
+		return 0
+	}
+	return len(buttons) - 1
+}
+
+// rescueHowButtons is the dialog's second page.
+func rescueHowButtons() []string {
+	return []string{"Rebuild", "Rebuild with AI", "Back"}
+}
+
+// rescueAIModels lists model choices for intelligent rebuilds, opus
+// first — synthesis deserves a capable model.
+func rescueAIModels(cfg config.Assist) []assist.ModelOption {
+	options := assistModels(cfg)
+	for i, option := range options {
+		if option.Backend == "claude" && option.Model == "opus" {
+			head := append([]assist.ModelOption{option}, options[:i]...)
+			return append(head, options[i+1:]...)
+		}
+	}
+	return options
+}
+
 // dialog renders a centered modal: title, body, and a button row driven
 // by arrow keys, defaulting to the last (safe) button.
 func (m model) dialog(title string, body []string, labels ...string) string {
@@ -1930,6 +3124,165 @@ func (m model) dialog(title string, body []string, labels ...string) string {
 		Width(min(inner+4, m.width-2)).
 		Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(max(m.width, 20), max(m.height, 10), lipgloss.Center, lipgloss.Center, box)
+}
+
+// inputDialog is the dialog frame around a free-text stage: no buttons,
+// custom key help.
+func (m model) inputDialog(title string, body []string, help string) string {
+	inner := 76
+	var lines []string
+	lines = append(lines, lipgloss.PlaceHorizontal(inner, lipgloss.Center, styleBold.Render(title)), "")
+	lines = append(lines, body...)
+	lines = append(lines, "", lipgloss.PlaceHorizontal(inner, lipgloss.Center, styleDim.Render(help)))
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.AdaptiveColor{Light: "#5A56E0", Dark: "#7D79F6"}).
+		Padding(1, 2).
+		Width(min(inner+4, m.width-2)).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(max(m.width, 20), max(m.height, 10), lipgloss.Center, lipgloss.Center, box)
+}
+
+// openRescuePicker enters the destination stage for a chosen rescue action.
+func (m model) openRescuePicker(session Session, action string) model {
+	m.rescueDest, m.rescueAction = &session, action
+	m.rescueInput = rescueDefaultDir(m.cfg, session, action)
+	m.rescueCursor = 0
+	m.rescueNaming, m.rescueName = false, ""
+	m.rescueMode, m.rescueFilter = "", ""
+	return m
+}
+
+// rescueSubdirs lists the picker's directory rows, narrowed by the
+// active / filter.
+func (m model) rescueSubdirs() []string {
+	subdirs := subdirsOf(expandTilde(m.rescueInput))
+	if m.rescueMode != "filter" || m.rescueFilter == "" {
+		return subdirs
+	}
+	needle := strings.ToLower(m.rescueFilter)
+	var out []string
+	for _, name := range subdirs {
+		if strings.Contains(strings.ToLower(name), needle) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// runRescue executes the chosen rescue action into dir (created if needed).
+func (m model) runRescue(session Session, dir string) (model, tea.Cmd) {
+	switch m.rescueAction {
+	case "export":
+		path, err := rescueExport(m.cfg, session.Target, session.ID, session.Title, dir)
+		if err != nil {
+			audit.Append(m.cfg.BackupRoot, []audit.Entry{{
+				Time: time.Now(), Action: "rescue-failed", Target: session.Target,
+				SessionID: session.ID, Detail: "export: " + err.Error(),
+			}})
+			m.notice, m.noticeErr = "export failed: "+err.Error(), true
+			break
+		}
+		m.notice = "prompt history exported → " + tildePath(path)
+	case "rebuild":
+		newID, path, err := rescueReconstruct(m.cfg, session.ID, session.Title, dir)
+		if err != nil {
+			audit.Append(m.cfg.BackupRoot, []audit.Entry{{
+				Time: time.Now(), Action: "rescue-failed", Target: "claude",
+				SessionID: session.ID, Detail: "rebuild: " + err.Error(),
+			}})
+			m.notice, m.noticeErr = "rebuild failed: "+err.Error(), true
+			break
+		}
+		m = m.offerRebuiltResume(session, newID, path, dir)
+		m.scanning = true
+		cfg := m.cfg
+		return m, func() tea.Msg {
+			_, _ = backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true})
+			return rescanMsg(ScanNamed(cfg))
+		}
+	case "rebuild-ai":
+		m.rescueAI = &session
+		m.rescueDir = dir
+		m.rescueModel = 0
+		m.confirmSel = 1 // Cancel default in the AI stage too
+	}
+	return m, nil
+}
+
+// offerRebuiltResume opens the resume dialog for a freshly rebuilt
+// session — same choices as the o key, with a rebuild-complete heading.
+func (m model) offerRebuiltResume(original Session, newID string, path string, dir string) model {
+	rebuilt := Session{
+		Target:      "claude",
+		ID:          newID,
+		Title:       original.Title,
+		State:       "REBUILT",
+		ProjectPath: dir,
+		SourcePath:  path,
+		RebuiltFrom: original.ID,
+	}
+	m.confirmResume = &rebuilt
+	m.resumeHeading = "Rebuilt as " + newID[:8] + "… — resume it?"
+	m.confirmSel = 2 // Later is the reflex-safe default
+	m.notice = "rebuilt as " + newID[:8] + "… — the original stays marked lost"
+	m.noticeErr = false
+	return m
+}
+
+// subdirsOf lists the visible subdirectories of path, sorted; empty when
+// the path does not exist yet.
+func subdirsOf(path string) []string {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, entry := range entries {
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+			out = append(out, entry.Name())
+		}
+	}
+	return out
+}
+
+// pickerUp steps the picker up one level, stopping at the filesystem root.
+func pickerUp(display string) string {
+	expanded := expandTilde(strings.TrimSpace(display))
+	parent := filepath.Dir(expanded)
+	if parent == expanded || parent == "" {
+		return display
+	}
+	return tildePath(parent)
+}
+
+// rescueDefaultDir proposes where a rescue action writes: exports prefer
+// the session's project directory when it still exists (falling back to
+// exports/ under the backup root); rebuilds propose the original project
+// directory, existing or not — it is recreated on confirm.
+func rescueDefaultDir(cfg config.Config, session Session, action string) string {
+	if action == "export" {
+		if session.ProjectPath != "" && dirIsPresent(session.ProjectPath) {
+			return tildePath(session.ProjectPath)
+		}
+		return tildePath(filepath.Join(cfg.BackupRoot, "exports"))
+	}
+	return tildePath(session.ProjectPath)
+}
+
+// expandTilde resolves a leading ~ to the home directory.
+func expandTilde(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(path, "~"))
+		}
+	}
+	return path
+}
+
+func dirIsPresent(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // detailBox is the rounded frame used by the inspector's sections.
@@ -2166,6 +3519,9 @@ func (m model) folderRow(folder Folder, active bool) string {
 	if health == "" {
 		health = styleUnless(active, styleOK, " ok")
 	}
+	if folder.HomeGone {
+		health += styleUnless(active, styleStale, " ⌂!")
+	}
 
 	row := fmt.Sprintf(" %s %-*s  %8d  %8s  %-9s%s",
 		styleUnless(plain, glyphStyle, glyph), m.nameWidth(), name, folder.Sessions, human.Bytes(folder.SizeBytes), ago(folder.Latest), health)
@@ -2179,7 +3535,7 @@ func (m model) folderRow(folder Folder, active bool) string {
 }
 
 func (m model) sessionRow(session Session, active bool) string {
-	state, style := sessionState(session.State)
+	state, style := sessionStateFor(session)
 	// Open sessions render the entire row in gold so live work stands
 	// out; the cursor highlight still takes precedence when selected.
 	gold := session.LiveStatus != "" && !active
@@ -2217,6 +3573,15 @@ func sessionTitle(session Session, width int, active bool) string {
 	}
 }
 
+// sessionStateFor renders a session's state cell, marking lost sessions
+// that already have a reconstruction as rescued.
+func sessionStateFor(session Session) (string, lipgloss.Style) {
+	if session.State == "LOST" && len(session.RebuiltAs) > 0 {
+		return "✕ rescued  ", styleRecover
+	}
+	return sessionState(session.State)
+}
+
 func sessionState(state string) (string, lipgloss.Style) {
 	switch state {
 	case "OK":
@@ -2231,6 +3596,8 @@ func sessionState(state string) (string, lipgloss.Style) {
 		return "! unbacked ", styleUnbacked
 	case "RESTORED":
 		return "✚ restored ", styleRecover
+	case "REBUILT":
+		return "⟳ rebuilt  ", styleRecover
 	case "LOST":
 		return "✕ lost     ", styleDim
 	default:

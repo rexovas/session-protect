@@ -233,10 +233,6 @@ func confirm(stdin io.Reader, stdout io.Writer, count int) bool {
 }
 
 func copyFile(src string, dest string) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
 	}
@@ -253,10 +249,11 @@ func copyFile(src string, dest string) error {
 		out.Close()
 		return err
 	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	return os.Chtimes(dest, info.ModTime(), info.ModTime())
+	// Deliberately fresh mtime: the agent's retention cleanup deletes by
+	// file mtime, so restoring with the original timestamp would mark the
+	// session for immediate re-deletion on the next cleanup pass. The
+	// backup copy keeps the true history; the live file must look alive.
+	return out.Close()
 }
 
 // logRestore records each restored file in the audit log.

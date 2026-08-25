@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/config"
@@ -195,5 +196,35 @@ func TestRunCLI(t *testing.T) {
 	}
 	if _, err := os.Stat(codexPath); err != nil {
 		t.Fatal("restore did not bring the file back")
+	}
+}
+
+func TestRestoreGivesFreshMtime(t *testing.T) {
+	home, projectPath, cfg := setupEnv(t)
+	codexPath := filepath.Join(home, ".codex", "sessions", "2026", "sess-2.jsonl")
+	// Backdate the backup copy, delete the live file, restore.
+	old := time.Now().Add(-45 * 24 * time.Hour)
+	repo := filepath.Join(cfg.BackupRoot, "all", "codex", "sessions", "2026", "sess-2.jsonl")
+	if err := os.Chtimes(repo, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(codexPath); err != nil {
+		t.Fatal(err)
+	}
+	items, err := Plan(Options{Project: projectPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(cfg, items); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A restored file must look ALIVE — the agent's cleanup deletes by
+	// mtime, so preserving the old stamp would re-delete it immediately.
+	if time.Since(info.ModTime()) > time.Minute {
+		t.Fatalf("restored file has stale mtime %v — cleanup bait", info.ModTime())
 	}
 }

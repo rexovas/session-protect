@@ -26,11 +26,13 @@ type Session struct {
 	CustomName     string    // user-assigned name, from custom-title events
 	LiveStatus     string    // non-empty when open in a running agent process
 	LivePID        int       // process holding the session open, for jumping to it
-	ProjectPath    string    // set on aggregated (AllUnder) sessions for display
+	ProjectPath    string    // the session's working directory (resume cd target)
 	Prompts        int       // for LOST sessions: prompt count from history
 	LastModel      string    // most recent model seen in the transcript
 	State          string    // OK | STALE_BACKUP | MISSING_BACKUP | MISSING_SOURCE | LOST (+ synthesized ACTIVE | OPEN | RESTORED)
 	RestoredAt     time.Time // last restore recorded in the audit log, badge or not
+	RebuiltFrom    string    // lost session this one was reconstructed from
+	RebuiltAs      []string  // for LOST sessions: its reconstructions, newest first
 	Modified       time.Time
 	BackupModified time.Time
 	Size           int64
@@ -70,9 +72,16 @@ func Scan(cfg config.Config) []*Project {
 	// and backup — surface as permanent LOST entries. The history file is
 	// never modified; reconstruction (if ever) creates a new session.
 	seen := map[string]bool{}
+	stubSessions := map[string]bool{}
 	for _, project := range byPath {
 		for _, session := range project.Sessions {
 			seen[session.ID] = true
+			// A failed `claude --resume` of a missing session leaves a
+			// stub transcript (one mode line, ~100 bytes). Those must
+			// never count as living reconstructions.
+			if session.Size > 0 && session.Size < 256 {
+				stubSessions[session.ID] = true
+			}
 		}
 	}
 	for id, ghost := range claudeHistorySessions() {
@@ -85,12 +94,13 @@ func Scan(cfg config.Config) []*Project {
 			byPath[ghost.Project] = project
 		}
 		project.Sessions = append(project.Sessions, Session{
-			Target:   "claude",
-			ID:       id,
-			Title:    ghost.Title,
-			State:    "LOST",
-			Modified: ghost.Last,
-			Prompts:  ghost.Count,
+			Target:      "claude",
+			ID:          id,
+			Title:       ghost.Title,
+			State:       "LOST",
+			Modified:    ghost.Last,
+			Prompts:     ghost.Count,
+			ProjectPath: ghost.Project,
 		})
 	}
 	// Codex history records no project path, so its lost sessions
@@ -137,9 +147,18 @@ func Scan(cfg config.Config) []*Project {
 		}
 	}
 	restoredAt := map[string]time.Time{}
+	rebuiltFrom := map[string]string{}
+	rebuiltInto := map[string][]string{}
 	for _, entry := range audit.Read(cfg.BackupRoot) {
 		if entry.Action == "restore" && entry.SessionID != "" && entry.Time.After(restoredAt[entry.SessionID]) {
 			restoredAt[entry.SessionID] = entry.Time
+		}
+		if (entry.Action == "reconstruct" || entry.Action == "reconstruct-ai") && entry.SessionID != "" {
+			rebuiltFrom[entry.SessionID] = entry.From
+			if entry.From != "" {
+				// Audit order is chronological; prepend for newest first.
+				rebuiltInto[entry.From] = append([]string{entry.SessionID}, rebuiltInto[entry.From]...)
+			}
 		}
 	}
 	projects := make([]*Project, 0, len(byPath))
@@ -147,6 +166,13 @@ func Scan(cfg config.Config) []*Project {
 		for i := range project.Sessions {
 			session := &project.Sessions[i]
 			session.Title = titles[session.ID]
+			// Every session knows its project. Resume, the inspector, and
+			// rescue destinations all read this; leaving it to the
+			// aggregated view meant folder-view sessions fell back to the
+			// browse root and resumed in the wrong directory.
+			if session.ProjectPath == "" && filepath.IsAbs(project.Path) {
+				session.ProjectPath = project.Path
+			}
 			if info, ok := open[session.ID]; ok {
 				session.LiveStatus = info.Status
 				session.LivePID = info.PID
@@ -182,6 +208,32 @@ func Scan(cfg config.Config) []*Project {
 					session.State = "RESTORED"
 				}
 			}
+			// Reconstructed sessions carry their identity permanently:
+			// the badge shows whenever the session is otherwise quiet.
+			if from, ok := rebuiltFrom[session.ID]; ok {
+				session.RebuiltFrom = from
+				if session.State == "OK" || session.State == "MISSING_BACKUP" {
+					session.State = "REBUILT"
+				}
+				// A reconstruction never appears in the agent's prompt
+				// history, so it has no title of its own — inherit the
+				// original's, which opens with the same first prompt.
+				if session.Title == "" {
+					session.Title = titles[from]
+				}
+			}
+			// The original stays lost forever, but its row should say its
+			// reconstructions exist — rescued, not silently still-dead.
+			// The audit log alone is not enough: a deleted rebuild must
+			// not leave a rescued label pointing at nothing, so each
+			// target has to still be present in live or backup.
+			if session.State == "LOST" {
+				for _, into := range rebuiltInto[session.ID] {
+					if seen[into] && !stubSessions[into] {
+						session.RebuiltAs = append(session.RebuiltAs, into)
+					}
+				}
+			}
 		}
 		sort.Slice(project.Sessions, func(i, j int) bool {
 			return newest(project.Sessions[i]).After(newest(project.Sessions[j]))
@@ -192,7 +244,7 @@ func Scan(cfg config.Config) []*Project {
 			}
 			project.SizeBytes += session.Size
 			switch session.State {
-			case "OK", "ACTIVE", "OPEN", "RESTORED": // all protected states
+			case "OK", "ACTIVE", "OPEN", "RESTORED", "REBUILT": // protected states
 				project.OK++
 				if session.State == "ACTIVE" {
 					project.Active++
@@ -244,7 +296,7 @@ func scanClaude(cfg config.Config, byPath map[string]*Project) {
 		if len(sessions) == 0 {
 			continue
 		}
-		path := claudeProjectPath(sessions)
+		path := claudeProjectPath(sessions, slug)
 		if path == "" {
 			path = slug
 		}
@@ -1104,6 +1156,7 @@ type Folder struct {
 	Name        string
 	Path        string
 	Pseudo      bool // unresolved project key, not a real filesystem path
+	HomeGone    bool // the directory itself no longer exists on disk
 	Depth       int  // indent level when shown expanded under a parent
 	Sessions    int
 	SizeBytes   int64
@@ -1150,6 +1203,13 @@ func ChildrenOf(projects []*Project, root string, start string) []Folder {
 	folders := make([]Folder, 0, len(byPath))
 	for _, folder := range byPath {
 		folders = append(folders, *folder)
+	}
+	for i := range folders {
+		if !folders[i].Pseudo {
+			if _, err := os.Stat(folders[i].Path); err != nil {
+				folders[i].HomeGone = true
+			}
+		}
 	}
 	sort.Slice(folders, func(i, j int) bool { return folders[i].Latest.After(folders[j].Latest) })
 	return folders
@@ -1303,44 +1363,135 @@ func scanFileMeta(path string) (name string, model string) {
 	return name, model
 }
 
-// claudeProjectPath recovers the real project path by reading the cwd field
-// from the newest session file's first lines; slugs are not reversible.
-func claudeProjectPath(sessions []Session) string {
-	best := ""
-	var bestTime time.Time
+// claudeProjectPath recovers the real project path by reading cwd fields
+// from the session files; slugs are not reversible. A transcript can
+// carry cwds from OTHER directories — claude records the process cwd per
+// line, and a session that started elsewhere before cd'ing into the
+// project opens with foreign paths — so a cwd only wins outright when
+// claude's own slug of it matches the directory the file lives under.
+// With no slug-consistent cwd anywhere, the newest first-seen cwd is
+// still better than nothing.
+func claudeProjectPath(sessions []Session, slug string) string {
+	best, fallback := "", ""
+	var bestTime, fallbackTime time.Time
 	for _, session := range sessions {
 		path := session.SourcePath
 		if path == "" {
 			path = session.BackupPath
 		}
-		if path == "" || newest(session).Before(bestTime) {
+		if path == "" {
 			continue
 		}
-		if cwd := claudeCwd(path); cwd != "" {
-			best = cwd
+		matched, first := claudeCwd(path, slug)
+		if matched != "" && !newest(session).Before(bestTime) {
+			best = matched
 			bestTime = newest(session)
 		}
+		if first != "" && !newest(session).Before(fallbackTime) {
+			fallback = first
+			fallbackTime = newest(session)
+		}
 	}
-	return best
+	if best != "" {
+		return best
+	}
+	// No transcript line agrees with the slug — a manual copy that was
+	// never resumed here has only foreign cwds. Decoding the slug
+	// against the real filesystem beats trusting a foreign path.
+	if decoded := decodeClaudeSlug(slug); decoded != "" {
+		return decoded
+	}
+	return fallback
 }
 
-func claudeCwd(path string) string {
-	file, err := os.Open(path)
+// decodeClaudeSlug reverses a claude project slug by walking the
+// filesystem: every non-alphanumeric character slugs to '-', so the
+// mapping is lossy, but only one chain of real directories usually
+// slug-matches. Returns "" when no existing path decodes.
+func decodeClaudeSlug(slug string) string {
+	if !strings.HasPrefix(slug, "-") {
+		return ""
+	}
+	budget := 400 // ReadDir calls; ambiguity is rare, runaway walks are not free
+	return decodeSlugStep(string(os.PathSeparator), slug[1:], 0, &budget)
+}
+
+func decodeSlugStep(dir string, rest string, depth int, budget *int) string {
+	if rest == "" {
+		return dir
+	}
+	if depth > 24 || *budget <= 0 {
+		return ""
+	}
+	*budget--
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
+	}
+	for _, entry := range entries {
+		isDir := entry.IsDir()
+		if !isDir && entry.Type()&os.ModeSymlink != 0 {
+			// Symlinked directories (like macOS's /var) count.
+			if info, err := os.Stat(filepath.Join(dir, entry.Name())); err == nil && info.IsDir() {
+				isDir = true
+			}
+		}
+		if !isDir {
+			continue
+		}
+		es := nameSlug(entry.Name())
+		if es == rest {
+			return filepath.Join(dir, entry.Name())
+		}
+		if strings.HasPrefix(rest, es+"-") {
+			if found := decodeSlugStep(filepath.Join(dir, entry.Name()), rest[len(es)+1:], depth+1, budget); found != "" {
+				return found
+			}
+		}
+	}
+	return ""
+}
+
+// nameSlug applies claude's slug mapping to a single path segment.
+func nameSlug(name string) string {
+	out := []byte(name)
+	for i, c := range out {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		default:
+			out[i] = '-'
+		}
+	}
+	return string(out)
+}
+
+// claudeCwd scans a transcript for cwd fields: matched is the first one
+// whose claude slug equals the wanted slug, first is the first cwd of
+// any kind. The scan is capped — enough to get past a long foreign
+// prefix without reading multi-MB transcripts end to end.
+func claudeCwd(path string, slug string) (matched string, first string) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", ""
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-	for i := 0; i < 20 && scanner.Scan(); i++ {
+	for i := 0; i < 4000 && scanner.Scan(); i++ {
 		var event struct {
 			Cwd string `json:"cwd"`
 		}
-		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Cwd != "" {
-			return event.Cwd
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Cwd == "" {
+			continue
+		}
+		if first == "" {
+			first = event.Cwd
+		}
+		if targets.ClaudeSlug(event.Cwd) == slug {
+			return event.Cwd, first
 		}
 	}
-	return ""
+	return "", first
 }
 
 func newest(session Session) time.Time {

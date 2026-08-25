@@ -21,6 +21,7 @@ type Entry struct {
 	To         string    `json:"to,omitempty"`
 	Overwrote  bool      `json:"overwrote,omitempty"`
 	SafetyCopy string    `json:"safety_copy,omitempty"`
+	Detail     string    `json:"detail,omitempty"` // e.g. the model behind an AI rebuild
 }
 
 func logPath(root string) string { return filepath.Join(root, "audit.log") }

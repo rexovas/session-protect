@@ -2,9 +2,11 @@ package assist
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -75,12 +77,14 @@ func TestDetectNone(t *testing.T) {
 
 func TestClaudeBackendViaStub(t *testing.T) {
 	dir := t.TempDir()
+	argsFile := dir + "/args"
 	stub := dir + "/claude"
-	script := "#!/bin/sh\necho 'Sure!'\necho '{\"matches\":[{\"id\":\"bbb\",\"reason\":\"stubbed\"}]}'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\npwd >> " + argsFile + "\necho 'Sure!'\necho '{\"matches\":[{\"id\":\"bbb\",\"reason\":\"stubbed\"}]}'\n"
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
+	t.Setenv("HOME", t.TempDir()) // scratch-slug cleanup targets this home
 
 	backend := Detect(config.Assist{Backend: "claude"})
 	if backend == nil || backend.Name() != "claude" {
@@ -92,6 +96,36 @@ func TestClaudeBackendViaStub(t *testing.T) {
 	}
 	if len(matches) != 1 || matches[0].ID != "bbb" || matches[0].Reason != "stubbed" {
 		t.Fatalf("matches = %+v", matches)
+	}
+
+	// The helper run must pin a cheap model, cap turns, and execute in a
+	// throwaway directory — never the caller's project.
+	recorded, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := string(recorded)
+	if !strings.Contains(args, "--model\nsonnet") {
+		t.Fatalf("model not pinned: %q", args)
+	}
+	if !strings.Contains(args, "--max-turns\n1") {
+		t.Fatalf("turns not capped: %q", args)
+	}
+	cwd, _ := os.Getwd()
+	lines := strings.Split(strings.TrimSpace(args), "\n")
+	ranIn := lines[len(lines)-1]
+	if ranIn == cwd || !strings.Contains(ranIn, "sp-assist-") {
+		t.Fatalf("ran in %q, want a scratch dir", ranIn)
+	}
+
+	// A configured claude_model overrides the default.
+	custom := Detect(config.Assist{Backend: "claude", ClaudeModel: "haiku"})
+	if _, err := custom.Rank("find it", testCandidates); err != nil {
+		t.Fatal(err)
+	}
+	recorded, _ = os.ReadFile(argsFile)
+	if !strings.Contains(string(recorded), "--model\nhaiku") {
+		t.Fatalf("claude_model not honored: %q", recorded)
 	}
 
 	// auto with no ollama reachable falls through to the CLI.
@@ -108,5 +142,59 @@ func TestDetectAbsentEverything(t *testing.T) {
 	}
 	if Detect(config.Assist{Backend: "auto", URL: "http://127.0.0.1:1"}) != nil {
 		t.Fatal("auto with nothing available must be nil")
+	}
+}
+
+func TestAvailableModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"models":[{"name":"qwen3:8b"},{"name":"llama3.2:3b"}]}`)
+	}))
+	defer server.Close()
+
+	// Claude present via stub: sonnet leads, then aliases, then ollama.
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/claude", []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	options := AvailableModels(config.Assist{Backend: "auto", URL: server.URL})
+	if len(options) != 5 {
+		t.Fatalf("options = %v", options)
+	}
+	if options[0].Label() != "sonnet · claude" {
+		t.Fatalf("default head = %s", options[0].Label())
+	}
+	if options[3].Backend != "ollama" || options[3].Model != "qwen3:8b" {
+		t.Fatalf("ollama models missing: %v", options)
+	}
+
+	// claude_model changes the head.
+	options = AvailableModels(config.Assist{Backend: "claude", ClaudeModel: "haiku"})
+	if options[0].Label() != "haiku · claude" || len(options) != 3 {
+		t.Fatalf("custom head: %v", options)
+	}
+
+	// none disables everything.
+	if got := AvailableModels(config.Assist{Backend: "none"}); got != nil {
+		t.Fatalf("backend none should yield nothing: %v", got)
+	}
+}
+
+func TestCodexConfiguredModel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	// No config file: honest fallback.
+	if got := codexConfiguredModel(); got != "default" {
+		t.Fatalf("no config: %q", got)
+	}
+	// The label is a live read of codex's own config — the same file
+	// codex resolves at run time, so it cannot go stale.
+	if err := os.WriteFile(filepath.Join(home, "config.toml"),
+		[]byte("approval_policy = \"never\"\nmodel = \"gpt-9-turbo\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := codexConfiguredModel(); got != "gpt-9-turbo" {
+		t.Fatalf("configured: %q", got)
 	}
 }

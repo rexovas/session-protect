@@ -142,3 +142,49 @@ func TestCodexDetailAndExtract(t *testing.T) {
 		t.Fatal("tool call leaked into extract")
 	}
 }
+
+func TestContentSearchFindsLostSessions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	cfg := config.Config{BackupRoot: filepath.Join(home, "backup")}
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	history := `{"display":"prototype the ZEPHYR billing pipeline","sessionId":"lost-1","project":"/w/app","timestamp":1750000000000}
+{"display":"more zephyr edge cases please","sessionId":"lost-1","project":"/w/app","timestamp":1750000100000}
+{"display":"unrelated other session","sessionId":"alive-1","project":"/w/app","timestamp":1750000200000}
+`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "history.jsonl"), []byte(history), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sessions := []Session{
+		{Target: "claude", ID: "lost-1", State: "LOST"},
+		{Target: "claude", ID: "alive-1", State: "MISSING_BACKUP"},
+	}
+	hits := ContentSearch(cfg, sessions, "zephyr")
+	if len(hits) != 1 || hits[0].Session.ID != "lost-1" || hits[0].Count != 2 {
+		t.Fatalf("lost session not found by content: %+v", hits)
+	}
+	if !strings.Contains(hits[0].Snippet, "ZEPHYR") && !strings.Contains(hits[0].Snippet, "zephyr") {
+		t.Fatalf("snippet = %q", hits[0].Snippet)
+	}
+
+	// And it reaches AI candidates, clearly marked.
+	candidates, rawHits := BuildCandidates(cfg, sessions, "the zephyr billing one")
+	if rawHits["lost-1"] != 3 { // zephyr x2 + billing x1
+		t.Fatalf("rawHits = %v", rawHits)
+	}
+	found := false
+	for _, candidate := range candidates {
+		if candidate.ID == "lost-1" {
+			found = true
+			if !strings.Contains(candidate.Title, "LOST") {
+				t.Fatalf("lost candidate unmarked: %q", candidate.Title)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("lost session missing from AI candidates")
+	}
+}
