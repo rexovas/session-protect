@@ -840,7 +840,8 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := `{"type":"user","cwd":"` + found.ProjectPath + `","sessionId":"` + rebuilt + `","message":{"role":"user","content":"the lost one"}}`
-	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+	reply := `{"type":"assistant","cwd":"` + found.ProjectPath + `","sessionId":"` + rebuilt + `","message":{"role":"assistant","model":"reconstructed","content":[{"type":"text","text":"a real rebuild is kilobytes; stubs are one line"}]}}`
+	if err := os.WriteFile(path, []byte(line+"\n"+reply+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	projects := Scan(m.cfg)
@@ -910,7 +911,7 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 		SessionID: second, From: lost,
 	}})
 	secondPath := filepath.Join(filepath.Dir(path), second+".jsonl")
-	if err := os.WriteFile(secondPath, []byte(strings.ReplaceAll(line, rebuilt, second)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(secondPath, []byte(strings.ReplaceAll(line+"\n"+reply, rebuilt, second)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	projects = Scan(m.cfg)
@@ -950,6 +951,17 @@ func TestLostSessionShowsRescuedAfterRebuild(t *testing.T) {
 		}
 	}
 	m.detail = nil
+
+	// A failed `claude --resume` stub must not resurrect the linkage:
+	// replace the second rebuild with an 83-byte mode-line stub.
+	if err := os.WriteFile(secondPath, []byte(`{"type":"mode","mode":"normal","sessionId":"`+second+`"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projects = Scan(m.cfg)
+	rescued = *find(projects, lost)
+	if len(rescued.RebuiltAs) != 1 || rescued.RebuiltAs[0] != rebuilt {
+		t.Fatalf("stub counted as a rebuild: %v", rescued.RebuiltAs)
+	}
 
 	// A rebuilt session's overview names its original.
 	rebuiltSession = find(projects, rebuilt)

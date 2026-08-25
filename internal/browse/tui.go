@@ -2715,6 +2715,16 @@ func (m model) pinBottomBare(content string, help string) string {
 		styleFooter.Render(strings.Repeat("─", max(m.width, 10))),
 		styleFooter.Render(" " + help),
 	}
+	if m.notice != "" {
+		// Failure and cancellation notices must be visible on every
+		// page — swallowing them here made rescue errors read as the
+		// tool silently doing nothing.
+		style := styleOK
+		if m.noticeErr {
+			style = styleUnbacked
+		}
+		footer = append([]string{style.Render(" " + truncate(m.notice, max(m.width-2, 20)))}, footer...)
+	}
 	used := strings.Count(content, "\n")
 	if pad := m.height - used - len(footer); pad > 0 {
 		content += strings.Repeat("\n", pad)

@@ -72,9 +72,16 @@ func Scan(cfg config.Config) []*Project {
 	// and backup — surface as permanent LOST entries. The history file is
 	// never modified; reconstruction (if ever) creates a new session.
 	seen := map[string]bool{}
+	stubSessions := map[string]bool{}
 	for _, project := range byPath {
 		for _, session := range project.Sessions {
 			seen[session.ID] = true
+			// A failed `claude --resume` of a missing session leaves a
+			// stub transcript (one mode line, ~100 bytes). Those must
+			// never count as living reconstructions.
+			if session.Size > 0 && session.Size < 256 {
+				stubSessions[session.ID] = true
+			}
 		}
 	}
 	for id, ghost := range claudeHistorySessions() {
@@ -222,7 +229,7 @@ func Scan(cfg config.Config) []*Project {
 			// target has to still be present in live or backup.
 			if session.State == "LOST" {
 				for _, into := range rebuiltInto[session.ID] {
-					if seen[into] {
+					if seen[into] && !stubSessions[into] {
 						session.RebuiltAs = append(session.RebuiltAs, into)
 					}
 				}
