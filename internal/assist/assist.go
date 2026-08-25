@@ -175,7 +175,10 @@ func codexConfiguredModel() string {
 }
 
 // codexModelsCache keeps picker reopens snappy; the list changes only
-// when the CLI updates.
+// when the CLI updates. Failures cache too — the RPC is experimental,
+// and a broken or hanging app-server must degrade to the passthrough
+// entry once per interval, not stall every picker open for the probe
+// timeout.
 var codexModelsCache struct {
 	at   time.Time
 	list []string
@@ -185,9 +188,15 @@ var codexModelsCache struct {
 // app-server model/list RPC. Returns nil when the CLI predates the RPC
 // or anything times out — callers fall back to config passthrough.
 func codexListModels() []string {
-	if time.Since(codexModelsCache.at) < 2*time.Minute {
+	if !codexModelsCache.at.IsZero() && time.Since(codexModelsCache.at) < 2*time.Minute {
 		return codexModelsCache.list
 	}
+	models := codexProbeModels()
+	codexModelsCache.at, codexModelsCache.list = time.Now(), models
+	return models
+}
+
+func codexProbeModels() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "codex", "app-server")
@@ -217,9 +226,7 @@ func codexListModels() []string {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		models, ok := parseCodexModelList(scanner.Bytes())
-		if ok {
-			codexModelsCache.at, codexModelsCache.list = time.Now(), models
+		if models, ok := parseCodexModelList(scanner.Bytes()); ok {
 			return models
 		}
 	}
