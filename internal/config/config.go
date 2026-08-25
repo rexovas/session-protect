@@ -29,7 +29,7 @@ type Config struct {
 // or bundled: auto probes a local ollama server first, then a claude CLI
 // on PATH, and the feature hides entirely when neither exists.
 type Assist struct {
-	Backend string `toml:"backend" json:"backend"` // auto | ollama | claude | none
+	Backend string `toml:"backend" json:"backend"` // auto | ollama | claude | codex | none
 	// Model is the ollama model to use; empty picks the first installed.
 	Model string `toml:"model" json:"model,omitempty"`
 	// ClaudeModel is passed to the claude CLI backend; empty means a
@@ -178,9 +178,9 @@ func (c Config) validate() error {
 		return err
 	}
 	switch c.Assist.Backend {
-	case "auto", "ollama", "claude", "none", "":
+	case "auto", "ollama", "claude", "codex", "none", "":
 	default:
-		return fmt.Errorf("invalid assist.backend %q (want auto, ollama, claude, or none)", c.Assist.Backend)
+		return fmt.Errorf("invalid assist.backend %q (want auto, ollama, claude, codex, or none)", c.Assist.Backend)
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -177,5 +178,23 @@ func TestAvailableModels(t *testing.T) {
 	// none disables everything.
 	if got := AvailableModels(config.Assist{Backend: "none"}); got != nil {
 		t.Fatalf("backend none should yield nothing: %v", got)
+	}
+}
+
+func TestCodexConfiguredModel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	// No config file: honest fallback.
+	if got := codexConfiguredModel(); got != "default" {
+		t.Fatalf("no config: %q", got)
+	}
+	// The label is a live read of codex's own config — the same file
+	// codex resolves at run time, so it cannot go stale.
+	if err := os.WriteFile(filepath.Join(home, "config.toml"),
+		[]byte("approval_policy = \"never\"\nmodel = \"gpt-9-turbo\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := codexConfiguredModel(); got != "gpt-9-turbo" {
+		t.Fatalf("configured: %q", got)
 	}
 }

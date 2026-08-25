@@ -81,7 +81,16 @@ func AvailableModels(cfg config.Assist) []ModelOption {
 			}
 		}
 	}
-	if cfg.Backend != "none" && cfg.Backend != "claude" {
+	if cfg.Backend == "auto" || cfg.Backend == "" || cfg.Backend == "codex" {
+		if _, err := exec.LookPath("codex"); err == nil {
+			// One passthrough entry, no model enumeration: execution never
+			// passes a model flag, so codex's own config decides — the
+			// same indirection that keeps claude's aliases from going
+			// stale. The label is a live read of that config.
+			options = append(options, ModelOption{Backend: "codex", Model: codexConfiguredModel()})
+		}
+	}
+	if cfg.Backend != "none" && cfg.Backend != "claude" && cfg.Backend != "codex" {
 		for _, model := range listOllamaModels(url) {
 			options = append(options, ModelOption{Backend: "ollama", Model: model})
 		}
@@ -110,8 +119,63 @@ func RankWith(cfg config.Assist, option ModelOption, query string, candidates []
 	case "claude":
 		backend := &claudeBackend{model: option.Model}
 		return backend.Rank(query, candidates)
+	case "codex":
+		out, err := codexComplete(buildPrompt(query, candidates), 120*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		return parseMatches(out, candidates)
 	}
 	return nil, fmt.Errorf("unknown backend %q", option.Backend)
+}
+
+// codexConfiguredModel reads the model codex itself would use — display
+// only; execution deliberately omits the model flag so the value can
+// never drift from what actually runs.
+func codexConfiguredModel() string {
+	data, err := os.ReadFile(filepath.Join(targets.DetectCodex().Source, "config.toml"))
+	if err != nil {
+		return "default"
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if value, ok := strings.CutPrefix(trimmed, "model"); ok {
+			value = strings.TrimSpace(value)
+			if value, ok := strings.CutPrefix(value, "="); ok {
+				return strings.Trim(strings.TrimSpace(value), `"`)
+			}
+		}
+	}
+	return "default"
+}
+
+// codexComplete runs a single-turn prompt through the codex CLI.
+// --ephemeral keeps it traceless (no session files written — verified
+// against codex-cli 0.147.0); the prompt goes via stdin to dodge arg
+// limits; the answer comes back through --output-last-message.
+func codexComplete(prompt string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	scratch, err := os.MkdirTemp("", "sp-assist-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(scratch)
+	outFile := filepath.Join(scratch, "answer.txt")
+
+	cmd := exec.CommandContext(ctx, "codex", "exec",
+		"--ephemeral", "--skip-git-repo-check", "--output-last-message", outFile, "-")
+	cmd.Dir = scratch
+	cmd.Stdin = strings.NewReader(prompt)
+	if _, err := cmd.Output(); err != nil {
+		return "", fmt.Errorf("codex CLI: %w", err)
+	}
+	out, err := os.ReadFile(outFile)
+	if err != nil {
+		return "", fmt.Errorf("codex CLI wrote no answer: %w", err)
+	}
+	return string(out), nil
 }
 
 // listOllamaModels returns the installed model names, or nothing when
@@ -349,6 +413,8 @@ func Complete(cfg config.Assist, option ModelOption, prompt string) (string, err
 	switch option.Backend {
 	case "claude":
 		return claudeComplete(option.Model, prompt, 300*time.Second)
+	case "codex":
+		return codexComplete(prompt, 300*time.Second)
 	case "ollama":
 		url := cfg.URL
 		if url == "" {
