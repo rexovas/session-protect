@@ -1316,3 +1316,51 @@ func TestAskHistoryReplay(t *testing.T) {
 		t.Fatalf("reorder: %+v", m.askHistory)
 	}
 }
+
+func TestAskPageStaysOpenWhileWorking(t *testing.T) {
+	m := buildEnv(t)
+	assistModels = func(config.Assist) []assist.ModelOption {
+		return []assist.ModelOption{{Backend: "claude", Model: "sonnet"}}
+	}
+	assistRank = func(_ config.Assist, _ assist.ModelOption, _ string, _ []assist.Candidate) ([]assist.Match, error) {
+		return []assist.Match{{ID: "aaaa1111-0000-0000-0000-000000000001", Reason: "match"}}, nil
+	}
+	defer func() { assistModels = assist.AvailableModels; assistRank = nil }()
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = next.(model)
+	m.askInput = ""
+	m = press(t, m, "find it")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	// The page stays open, visibly working, and ignores stray enters.
+	if !m.showAsk || !m.hitsBusy {
+		t.Fatalf("page closed during work: showAsk=%v busy=%v", m.showAsk, m.hitsBusy)
+	}
+	if view := m.View(); !strings.Contains(view, "asking sonnet") {
+		t.Fatal("working line missing")
+	}
+	m = press(t, m, tea.KeyEnter, "zz")
+	if m.askInput != "find it" {
+		t.Fatal("edits must be ignored while working")
+	}
+	// Results arriving close the page and open the pane.
+	m = deliver(t, m, cmd)
+	if m.showAsk || !m.showHits || len(m.hits) != 1 {
+		t.Fatalf("delivery: showAsk=%v showHits=%v hits=%d", m.showAsk, m.showHits, len(m.hits))
+	}
+
+	// Esc while working backgrounds the page; results still arrive.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = next.(model)
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	m = press(t, m, tea.KeyEsc)
+	if m.showAsk {
+		t.Fatal("esc did not background the working page")
+	}
+	m = deliver(t, m, cmd)
+	if !m.showHits {
+		t.Fatal("backgrounded search did not deliver")
+	}
+}

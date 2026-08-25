@@ -725,6 +725,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case askMsg:
 		m.hitsBusy = false
+		m.showAsk = false
 		entry := askHistoryEntry{Query: msg.query, Model: msg.backend, At: time.Now()}
 		if msg.err != nil {
 			// Keep the query recallable even when the run failed.
@@ -1265,6 +1266,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.showAsk {
+		if m.hitsBusy {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				m.showAsk = false // background it; the search continues
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -1311,7 +1321,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			m.showAsk = false
 			return m.fireAsk()
 		case "backspace":
 			m.askHistSel = -1
@@ -2183,7 +2192,8 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 	m.hitsBusy = true
 	m.hitsMode = "ask"
 	m.hitsQuery = m.askInput
-	m.showAsk = false
+	// The page stays open while the model works — closing it instantly
+	// made a 10s ranking read as "enter did nothing".
 	cfg, query := m.cfg, strings.TrimSpace(m.askInput)
 	scope := AllUnder(m.projects, m.root)
 	return m, tea.Batch(spin(), func() tea.Msg {
@@ -2473,6 +2483,11 @@ func (m model) askView() string {
 	}
 	b.WriteString(styleDim.Render(" matches are grounded in your transcripts and ranked with a short"+
 		" reason each") + "\n")
+	if m.hitsBusy {
+		b.WriteString("\n " + styleStale.Render(m.spinGlyph()+" asking "+
+			m.askModels[m.askModel].Label()+" about \""+truncate(strings.TrimSpace(m.askInput), 48)+"\" …") + "\n")
+		return m.pinBottomBare(b.String(), "working — results open when ready · esc hides this page")
+	}
 	if len(m.askHistory) > 0 {
 		b.WriteString("\n" + styleDim.Render(" recent searches") + "\n")
 		shown := min(len(m.askHistory), 6)
@@ -2495,7 +2510,7 @@ func (m model) askView() string {
 	}
 	help := "enter ask · ↓ recent searches · ←/→ model · esc close"
 	if m.askHistSel >= 0 && len(m.askHistory[m.askHistSel].Results) > 0 {
-		help = "enter show saved results · edit text to re-ask the model · esc close"
+		help = "enter saved results (instant) · ↑ back to your text · esc close"
 	}
 	return m.pinBottomBare(b.String(), help)
 }
