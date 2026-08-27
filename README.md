@@ -120,6 +120,13 @@ shows the essentials; the complete reference lives under `m` → Keys.
 | `x` | show/hide lost sessions |
 | `m` | menu: stats · activity log · key reference |
 
+Folder rows show a **HEALTH** summary of everything beneath them:
+`ok`, `~N` stale, `!N` unbacked, `✝N` recoverable-from-backup, `✕N`
+lost (no transcript anywhere), and `⌂!` when the project's own
+directory is gone from disk (its sessions survive — `t` transplants
+them somewhere that exists). Session rows use the long form in the
+STATE column.
+
 ## CLI reference
 
 ```text

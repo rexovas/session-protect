@@ -2307,6 +2307,15 @@ func (m model) View() string {
 			help = m.spinGlyph() + " asking the local model about \"" + m.hitsQuery + "\" …"
 		}
 	}
+	// Explain the health markers on the highlighted row rather than
+	// leaving cryptic glyphs unlabeled.
+	if !m.searching && m.query == "" && !m.hitsBusy && m.filterSummary() == "" && m.fCursor < len(m.folders) {
+		if f := m.folders[m.fCursor]; f.HomeGone {
+			help = "⌂! this project's directory is gone — t transplants its sessions somewhere that exists"
+		} else if f.Lost > 0 {
+			help = "✕N lost sessions (no transcript anywhere) — r here bulk-rescues them · enter to browse"
+		}
+	}
 
 	return m.pinBottom(b.String(), help)
 }
