@@ -1325,6 +1325,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					if done, ok := m.replayAsk(entry); ok {
 						return done, nil
 					}
+					// Never silently swap a replay for a model run.
+					m.notice = "none of that search's saved results exist anymore — asking the model again"
+					m.noticeErr = false
 				}
 			}
 			return m.fireAsk()
@@ -2227,9 +2230,14 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 // and titles are current. Returns ok=false when none of the saved
 // sessions exist anymore — the caller then runs the model live.
 func (m model) replayAsk(entry askHistoryEntry) (model, bool) {
+	// Rehydrate against every project, not the current browse root — a
+	// saved search's results are what they are, wherever you happen to
+	// be standing when you replay them.
 	byID := map[string]Session{}
-	for _, session := range AllUnder(m.projects, m.root) {
-		byID[session.ID] = session
+	for _, project := range m.projects {
+		for _, session := range project.Sessions {
+			byID[session.ID] = session
+		}
 	}
 	var hits []Hit
 	for _, saved := range entry.Results {
@@ -2499,15 +2507,15 @@ func (m model) askView() string {
 		shown := min(len(m.askHistory), 6)
 		for i := 0; i < shown; i++ {
 			entry := m.askHistory[i]
-			line := truncate(entry.Query, inner-16)
-			saved := ""
+			line := truncate(entry.Query, inner-24)
+			meta := "  · " + ago(entry.At)
 			if len(entry.Results) > 0 {
-				saved = fmt.Sprintf("  · %d saved", len(entry.Results))
+				meta += fmt.Sprintf(" · %d saved", len(entry.Results))
 			}
 			if i == m.askHistSel {
-				b.WriteString(styleCursor.Render(" ❯ "+line) + styleDim.Render(saved) + "\n")
+				b.WriteString(styleCursor.Render(" ❯ "+line) + styleDim.Render(meta) + "\n")
 			} else {
-				b.WriteString(styleDim.Render("   "+line+saved) + "\n")
+				b.WriteString(styleDim.Render("   "+line+meta) + "\n")
 			}
 		}
 		if len(m.askHistory) > shown {
