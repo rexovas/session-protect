@@ -186,7 +186,7 @@ func TestProjectPathPrefersSlugConsistentCwd(t *testing.T) {
 	// A session that started in ~/work before cd'ing into the real
 	// project: early lines carry the foreign cwd, later lines the real
 	// one. The file lives under the real project's slug.
-	project := filepath.Join(home, "legal", "tello-case")
+	project := filepath.Join(home, "cases", "orbit-case")
 	slug := targets.ClaudeSlug(project)
 	dir := filepath.Join(home, ".claude", "projects", slug)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -225,7 +225,7 @@ func TestProjectPathDecodesSlugForManualCopies(t *testing.T) {
 	// A manually copied transcript: it lives under the slug of a real
 	// directory (dashes and a dot in the name — both slug to '-'), but
 	// every cwd inside is foreign; it was never resumed here.
-	project := filepath.Join(home, "legal", "tello-case.v2")
+	project := filepath.Join(home, "cases", "orbit-case.v2")
 	if err := os.MkdirAll(project, 0o755); err != nil {
 		t.Fatal(err)
 	}
