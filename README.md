@@ -115,7 +115,7 @@ shows the essentials; the complete reference lives under `m` → Keys.
 | `f` | facet filter: states, agents, models, modified window |
 | `i` or `enter` | inspect: overview · usage/cost · full transcript |
 | `o` | open: jump to a running session, or resume a closed one (new window or in place) |
-| `r` | restore from backup, or rescue a lost session (export · rebuild) |
+| `r` | restore/rescue a session; on a folder row, bulk-rescue its lost sessions |
 | `t` | transplant a session or project to another directory |
 | `x` | show/hide lost sessions |
 | `m` | menu: stats · activity log · key reference |
