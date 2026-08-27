@@ -290,6 +290,14 @@ func scanClaude(cfg config.Config, byPath map[string]*Project) {
 	}
 
 	for slug := range slugs {
+		// ctrl+g helper sessions run in sp-assist-* scratch dirs and are
+		// cleaned by the searcher — unless sp exited (or exec'd into a
+		// resume) mid-search. Leaks are ours: sweep the live copy, and
+		// never surface either copy as a session.
+		if strings.Contains(slug, "-sp-assist-") {
+			_ = os.RemoveAll(filepath.Join(sourceRoot, slug))
+			continue
+		}
 		source := listJSONL(filepath.Join(sourceRoot, slug))
 		backup := listJSONL(filepath.Join(backupRoot, slug))
 		sessions := merge("claude", source, backup)
@@ -1056,7 +1064,7 @@ func claudeHistorySessions() map[string]lostInfo {
 		if info.Project == "" {
 			info.Project = entry.Project
 		}
-		if info.Title == "" {
+		if info.Title == "" || isSlashCommand(info.Title) && !isSlashCommand(entry.Display) {
 			info.Title = strings.Join(strings.Fields(entry.Display), " ")
 		}
 		at := time.UnixMilli(entry.Timestamp)
@@ -1110,6 +1118,27 @@ func LoadLostDetail(id string) Detail {
 // historyTitles maps session ids to the first prompt recorded for them in the
 // agents' history files — a cheap title source that avoids opening every
 // session file.
+// isSlashCommand reports whether a prompt is an agent slash command
+// ("/model sonnet", "/clear") rather than content.
+func isSlashCommand(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "/") {
+		return false
+	}
+	head, _, _ := strings.Cut(trimmed[1:], " ")
+	if head == "" {
+		return false
+	}
+	for _, r := range head {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == ':':
+		default:
+			return false // paths and prose, not a command
+		}
+	}
+	return true
+}
+
 func historyTitles() map[string]string {
 	titles := map[string]string{}
 	claude := targets.DetectClaude()
@@ -1141,7 +1170,9 @@ func historyTitles() map[string]string {
 			if id == "" || text == "" {
 				continue
 			}
-			if _, seen := titles[id]; !seen {
+			// A slash command ("/model", "/clear") is a title only when
+			// nothing substantive ever follows it.
+			if current, seen := titles[id]; !seen || isSlashCommand(current) && !isSlashCommand(text) {
 				titles[id] = strings.Join(strings.Fields(text), " ")
 			}
 		}

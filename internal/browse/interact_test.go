@@ -1407,3 +1407,42 @@ func TestAskPageStaysOpenWhileWorking(t *testing.T) {
 		t.Fatal("backgrounded search did not deliver")
 	}
 }
+
+func TestReplayIgnoresBrowseRootAndAnnouncesFallback(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter) // descend into app: root is now a subtree
+	assistModels = func(config.Assist) []assist.ModelOption {
+		return []assist.ModelOption{{Backend: "claude", Model: "sonnet"}}
+	}
+	calls := 0
+	assistRank = func(_ config.Assist, _ assist.ModelOption, _ string, _ []assist.Candidate) ([]assist.Match, error) {
+		calls++
+		return nil, nil
+	}
+	defer func() { assistModels = assist.AvailableModels; assistRank = nil }()
+
+	// The saved result lives OUTSIDE the current root (bbbb2222 is in
+	// app/sub while we could be anywhere) — replay must still find it.
+	entry := askHistoryEntry{Query: "q1", Results: []cachedResult{{ID: "bbbb2222-0000-0000-0000-000000000002", Reason: "saved"}}}
+	next, ok := m.replayAsk(entry)
+	if !ok || len(next.hits) != 1 || next.hits[0].Session.ID != entry.Results[0].ID {
+		t.Fatalf("global rehydration failed: ok=%v hits=%+v", ok, next.hits)
+	}
+
+	// All saved results gone: fallback runs the model AND says so.
+	m.askHistory = []askHistoryEntry{{Query: "q2", Results: []cachedResult{{ID: "dead0000-0000-4000-8000-000000000000"}}}}
+	next2, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = next2.(model)
+	m.askInput = "q2"
+	m.askHistory = []askHistoryEntry{{Query: "q2", Results: []cachedResult{{ID: "dead0000-0000-4000-8000-000000000000"}}}}
+	m.askHistSel = 0
+	next2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next2.(model)
+	if !strings.Contains(m.notice, "saved results exist anymore") {
+		t.Fatalf("fallback silent: notice=%q", m.notice)
+	}
+	m = deliver(t, m, cmd)
+	if calls != 1 {
+		t.Fatalf("fallback did not run the model: calls=%d", calls)
+	}
+}

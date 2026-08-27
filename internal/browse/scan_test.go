@@ -254,3 +254,57 @@ func TestProjectPathDecodesSlugForManualCopies(t *testing.T) {
 		t.Fatalf("path = %q, want the decoded slug path %q", found.Path, project)
 	}
 }
+
+func TestTitlesSkipSlashCommands(t *testing.T) {
+	if !isSlashCommand("/model") || !isSlashCommand("/model sonnet") || !isSlashCommand("/compact") {
+		t.Fatal("commands not detected")
+	}
+	if isSlashCommand("/Users/x/notes.md") || isSlashCommand("plain text") || isSlashCommand("/ starts odd") {
+		t.Fatal("non-commands misdetected")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	history := `{"display":"/model","sessionId":"s1","project":"/p","timestamp":1}
+{"display":"fix the login flow","sessionId":"s1","project":"/p","timestamp":2}
+{"display":"/model","sessionId":"s2","project":"/p","timestamp":3}
+`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "history.jsonl"), []byte(history), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	titles := historyTitles()
+	if titles["s1"] != "fix the login flow" {
+		t.Fatalf("s1 title = %q, want the substantive prompt", titles["s1"])
+	}
+	// A session that only ever ran a command keeps it — better than blank.
+	if titles["s2"] != "/model" {
+		t.Fatalf("s2 title = %q", titles["s2"])
+	}
+}
+
+func TestScanSweepsAssistScratchSlugs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	leak := filepath.Join(home, ".claude", "projects", "-private-var-folders-xx-T-sp-assist-1234")
+	if err := os.MkdirAll(leak, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leak, "aaaa0000-0000-4000-8000-000000000000.jsonl"),
+		[]byte(`{"type":"user","cwd":"/tmp/sp-assist-1234","sessionId":"aaaa0000-0000-4000-8000-000000000000","message":{"role":"user","content":"helper"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{BackupRoot: filepath.Join(home, "root"), Topology: "combined"}
+	for _, p := range Scan(cfg) {
+		if strings.Contains(p.Slug, "sp-assist") || strings.Contains(p.Path, "sp-assist") {
+			t.Fatalf("assist scratch surfaced as project: %+v", p)
+		}
+	}
+	if _, err := os.Stat(leak); !os.IsNotExist(err) {
+		t.Fatal("leaked scratch slug not swept")
+	}
+}
