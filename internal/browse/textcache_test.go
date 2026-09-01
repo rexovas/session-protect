@@ -171,7 +171,7 @@ func TestContentSearchFindsLostSessions(t *testing.T) {
 	}
 
 	// And it reaches AI candidates, clearly marked.
-	candidates, rawHits := BuildCandidates(cfg, sessions, "the zephyr billing one")
+	candidates, rawHits := BuildCandidates(cfg, sessions, "the zephyr billing one", "")
 	if rawHits["lost-1"] != 3 { // zephyr x2 + billing x1
 		t.Fatalf("rawHits = %v", rawHits)
 	}
@@ -188,3 +188,49 @@ func TestContentSearchFindsLostSessions(t *testing.T) {
 		t.Fatal("lost session missing from AI candidates")
 	}
 }
+
+func TestHybridRetrievalSurfacesSemanticOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Config{
+		BackupRoot: filepath.Join(home, "backup"),
+		Assist:     config.Assist{Backend: "ollama", EmbedModel: "fake-embed"},
+	}
+	dir := filepath.Join(cfg.BackupRoot, textCacheDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Two sessions. The target's transcript never contains a query word;
+	// only semantics can surface it. The decoy shares a keyword.
+	sessions := []Session{
+		{ID: "target", Title: "migrate the datastore", SourcePath: filepath.Join(home, "t.jsonl"), Modified: mustTime("2026-08-01")},
+		{ID: "decoy", Title: "unrelated notes", SourcePath: filepath.Join(home, "d.jsonl"), Modified: mustTime("2026-08-02")},
+	}
+	writeFile(t, sessions[0].SourcePath, `{"type":"user","message":{"role":"user","content":"move the postgres tables to the new cluster"}}`+"\n")
+	writeFile(t, sessions[1].SourcePath, `{"type":"user","message":{"role":"user","content":"the query about widgets and gadgets"}}`+"\n")
+
+	// Fake embedder: query and target align (cosine 1), decoy is
+	// orthogonal (cosine 0) — semantics alone must lift the target.
+	embedFn = func(_ config.Assist, _ string, inputs []string) ([][]float32, error) {
+		out := make([][]float32, len(inputs))
+		for i, in := range inputs {
+			if strings.Contains(in, "widgets") {
+				out[i] = []float32{0, 1} // decoy direction
+			} else {
+				out[i] = []float32{1, 0} // target + query direction
+			}
+		}
+		return out, nil
+	}
+	defer func() { embedFn = assistEmbed }()
+
+	// The query shares no word with the target's transcript.
+	cands, _ := BuildCandidates(cfg, sessions, "database cluster relocation", "fake-embed")
+	if len(cands) == 0 || cands[0].ID != "target" {
+		t.Fatalf("semantic-only target not surfaced first: %+v", cands)
+	}
+}
+
+func mustTime(d string) time.Time { t, _ := time.Parse("2006-01-02", d); return t }
+
+var assistEmbed = embedFn

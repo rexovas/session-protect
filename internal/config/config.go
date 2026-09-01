@@ -37,6 +37,10 @@ type Assist struct {
 	ClaudeModel string `toml:"claude_model" json:"claude_model,omitempty"`
 	// URL is the ollama server address.
 	URL string `toml:"url" json:"url,omitempty"`
+	// EmbedModel is the ollama embedding model for semantic AI find;
+	// empty auto-detects an installed embedder (nomic-embed-text, etc.).
+	// When none is available, AI find falls back to keyword grounding.
+	EmbedModel string `toml:"embed_model" json:"embed_model,omitempty"`
 }
 
 // Update controls the launch-time new-version check. It is the one

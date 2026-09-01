@@ -102,14 +102,15 @@ type model struct {
 	// session under the current root and shows them as their own pane.
 	// AI find results reuse the pane with hitsMode "ask": ranked
 	// matches whose snippet line is the model's reasoning.
-	showHits  bool
-	hitsBusy  bool
-	hitsMode  string // "hits" | "ask"
-	hitsNote  string // backend name for ask results
-	hitsQuery string
-	hits      []Hit
-	hCursor   int
-	hOffset   int
+	showHits      bool
+	hitsBusy      bool
+	hitsMode      string // "hits" | "ask"
+	hitsNote      string // backend (ranker) name for ask results
+	hitsRetrieval string // embedder name when semantic retrieval was used
+	hitsQuery     string
+	hits          []Hit
+	hCursor       int
+	hOffset       int
 
 	// showLost reveals sessions known only from prompt history. Hidden by
 	// default so losses don't crowd the living sessions.
@@ -268,7 +269,8 @@ type bulkDoneMsg struct {
 }
 
 type askMsg struct {
-	query string
+	query     string
+	retrieval string
 
 	hits    []Hit
 	backend string
@@ -794,6 +796,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.hitsMode = "ask"
 		m.hitsNote = msg.backend
+		m.hitsRetrieval = msg.retrieval
 		m.hitsCached = time.Time{}
 		m.hits = msg.hits
 		m.showHits = true
@@ -1722,6 +1725,14 @@ func (m model) spinGlyph() string {
 	return spinFrames[m.spinFrame%len(spinFrames)]
 }
 
+// shortModel trims an ollama tag suffix for display (nomic-embed-text:latest → nomic-embed-text).
+func shortModel(name string) string {
+	if i := strings.IndexByte(name, ':'); i > 0 && name[i:] == ":latest" {
+		return name[:i]
+	}
+	return name
+}
+
 // sessionByID finds a session anywhere in the scan.
 func (m model) sessionByID(id string) *Session {
 	for _, project := range m.projects {
@@ -2394,9 +2405,10 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 	// The page stays open while the model works — closing it instantly
 	// made a 10s ranking read as "enter did nothing".
 	cfg, query := m.cfg, strings.TrimSpace(m.askInput)
+	embedModel := assist.EmbedModel(cfg.Assist)
 	scope := AllUnder(m.projects, m.root)
 	return m, tea.Batch(spin(), func() tea.Msg {
-		candidates, rawHits := BuildCandidates(cfg, scope, query)
+		candidates, rawHits := BuildCandidates(cfg, scope, query, embedModel)
 		matches, err := assistRank(cfg.Assist, option, query, candidates)
 		if err != nil {
 			return askMsg{query: query, backend: option.Label(), err: err}
@@ -2411,7 +2423,7 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 				hits = append(hits, Hit{Session: session, Snippet: match.Reason, Count: rawHits[match.ID]})
 			}
 		}
-		return askMsg{query: query, hits: hits, backend: option.Label()}
+		return askMsg{query: query, retrieval: shortModel(embedModel), hits: hits, backend: option.Label()}
 	})
 }
 
@@ -2442,6 +2454,7 @@ func (m model) replayAsk(entry askHistoryEntry) (model, bool) {
 	m.hitsMode = "ask"
 	m.hitsQuery = entry.Query
 	m.hitsNote = entry.Model
+	m.hitsRetrieval = ""
 	m.hitsCached = entry.At
 	m.hits = hits
 	m.showHits = true
@@ -2761,6 +2774,9 @@ func (m model) hitsView() string {
 	if m.hitsMode == "ask" {
 		heading = "Session Explorer ▸ ai find"
 		note = fmt.Sprintf("  \"%s\" · %d match(es) via %s ", m.hitsQuery, len(m.hits), m.hitsNote)
+		if m.hitsRetrieval != "" {
+			note += styleDim.Render("· semantic (" + m.hitsRetrieval + ") ")
+		}
 		if !m.hitsCached.IsZero() {
 			note += styleStale.Render(fmt.Sprintf("· saved %s ago ", ago(m.hitsCached)))
 		}

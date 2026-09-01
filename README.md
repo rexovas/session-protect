@@ -42,8 +42,11 @@ The only network call is an optional once-daily release check
   ranked by hit count (`ctrl+s`), and AI find — describe the session you
   half-remember and a model of your choice identifies it (`ctrl+g`;
   claude, codex, or fully local via ollama — enumerated live,
-  auto-detected, optional). Past searches replay instantly from saved
-  results, no repeat model calls
+  auto-detected, optional). With a local embedding model installed
+  (e.g. `ollama pull nomic-embed-text`), retrieval is **semantic** —
+  it finds sessions by meaning, not just shared words, so a paraphrase
+  still lands. Past searches replay instantly from saved results, no
+  repeat model calls
 - Lost-session detection: sessions recorded in agent history but missing
   from disk are surfaced permanently, so nothing disappears silently —
   and can be rescued: export their surviving prompts, or rebuild them
@@ -166,6 +169,9 @@ backend = "auto"         # auto | ollama | claude | codex | none
 model = ""               # ollama model; empty = first installed
 claude_model = "sonnet"  # claude backend model; helper runs are
                          # throwaway and never appear in your sessions
+embed_model = ""         # ollama embedding model for semantic retrieval;
+                         # empty auto-detects an installed embedder
+                         # (nomic-embed-text, etc.); absent = keyword only
 
 [update]
 check = true             # daily new-release check + explorer prompt
