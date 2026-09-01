@@ -41,6 +41,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return hook.Run(args[1:], stdout, stderr)
 	case "browse", "ui":
 		return browse.Run(args[1:], stdout, stderr)
+	case "index":
+		return browse.RunIndex(args[1:], stdout, stderr)
 	case "guard":
 		return guard.Run(os.Stdin, stdout, stderr)
 	case "version":

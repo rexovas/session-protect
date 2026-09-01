@@ -171,7 +171,7 @@ func TestContentSearchFindsLostSessions(t *testing.T) {
 	}
 
 	// And it reaches AI candidates, clearly marked.
-	candidates, rawHits := BuildCandidates(cfg, sessions, "the zephyr billing one", "")
+	candidates, rawHits, _ := BuildCandidates(cfg, sessions, "the zephyr billing one")
 	if rawHits["lost-1"] != 3 { // zephyr x2 + billing x1
 		t.Fatalf("rawHits = %v", rawHits)
 	}
@@ -224,8 +224,15 @@ func TestHybridRetrievalSurfacesSemanticOnly(t *testing.T) {
 	}
 	defer func() { embedFn = assistEmbed }()
 
+	// Build the index first — the search path never embeds sessions.
+	if _, err := BuildVecIndex(cfg, sessions, "fake-embed", nil); err != nil {
+		t.Fatal(err)
+	}
 	// The query shares no word with the target's transcript.
-	cands, _ := BuildCandidates(cfg, sessions, "database cluster relocation", "fake-embed")
+	cands, _, retrieval := BuildCandidates(cfg, sessions, "database cluster relocation")
+	if retrieval != "fake-embed" {
+		t.Fatalf("semantic retrieval not reported: %q", retrieval)
+	}
 	if len(cands) == 0 || cands[0].ID != "target" {
 		t.Fatalf("semantic-only target not surfaced first: %+v", cands)
 	}

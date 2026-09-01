@@ -44,7 +44,7 @@ func headExcerpt(text string) string {
 // the most recent sessions go instead, metadata only — the model then works
 // from titles and projects alone. The returned counts (raw keyword hits
 // per session) are display-only: they never reach the model.
-func BuildCandidates(cfg config.Config, sessions []Session, query string, embedModel string) ([]assist.Candidate, map[string]int) {
+func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]assist.Candidate, map[string]int, string) {
 	refreshTextCache(cfg, sessions)
 	dir := filepath.Join(cfg.BackupRoot, textCacheDir)
 
@@ -100,7 +100,7 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string, embedM
 	// precision engine — an exact name or file path outweighs vague
 	// vocabulary. When an embedder is available the two blend; without
 	// one, this is pure keyword grounding exactly as before.
-	sem := semanticScores(cfg, sessions, query, embedModel)
+	sem, retrieval := semanticScores(cfg, query)
 
 	type scored struct {
 		session Session
@@ -193,5 +193,5 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string, embedM
 			Excerpt:  truncate(entry.excerpt, 200),
 		})
 	}
-	return out, rawHits
+	return out, rawHits, retrieval
 }

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -155,6 +156,12 @@ type model struct {
 	bulkTargets []Session   // the direct lost sessions being bulk-rescued (nil = single mode)
 	bulkFolder  string      // folder display name, for headings
 	bulkBusy    bool        // parallel rescue in flight
+	// Semantic index (opt-in): built on request with live progress.
+	confirmIndex  bool
+	indexBusy     bool
+	indexProg     *indexProgress
+	semanticCount int    // sessions in the built index (0 = off), read when the ask page opens
+	semanticModel string // embedder of the built index
 	// The AI-rebuild stage: model choice (opus-first) before synthesis.
 	rescueAI      *Session
 	rescueModels  []assist.ModelOption
@@ -218,8 +225,9 @@ var (
 
 // Assist plumbing, seam-injected for tests.
 var (
-	assistModels = assist.AvailableModels
-	assistRank   = assist.RankWith
+	assistModels     = assist.AvailableModels
+	assistRank       = assist.RankWith
+	assistEmbedModel = assist.EmbedModel
 )
 
 type rescanMsg []*Project
@@ -258,6 +266,19 @@ type bulkRescue struct {
 	lost   []Session
 	nested int
 	claude int // how many of lost are claude (rebuild-eligible)
+}
+
+// indexProgress is shared between the build goroutine and the render:
+// the goroutine stores counts, the overlay reads them each frame.
+type indexProgress struct {
+	done  atomic.Int64
+	total atomic.Int64
+}
+
+// indexDoneMsg reports a finished semantic index build.
+type indexDoneMsg struct {
+	count int
+	err   error
 }
 
 // bulkDoneMsg reports a finished parallel rescue.
@@ -662,10 +683,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case spinMsg:
-		if m.hitsBusy || m.rescueBusy || m.bulkBusy {
+		if m.hitsBusy || m.rescueBusy || m.bulkBusy || m.indexBusy {
 			m.spinFrame++
 			return m, spin()
 		}
+		return m, nil
+	case indexDoneMsg:
+		m.indexBusy = false
+		m.indexProg = nil
+		if msg.err != nil {
+			m.notice, m.noticeErr = "index build stopped: "+msg.err.Error()+" (re-run to finish)", true
+			return m, nil
+		}
+		m.notice = fmt.Sprintf("semantic index ready: %d sessions — ctrl+g now searches by meaning", msg.count)
 		return m, nil
 	case bulkDoneMsg:
 		m.bulkBusy = false
@@ -1281,6 +1311,23 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.confirmIndex {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
+			m.confirmSel = (m.confirmSel + 1) % 2
+		case "esc", "n":
+			m.confirmIndex = false
+		case "enter":
+			if m.confirmSel != 0 {
+				m.confirmIndex = false
+				break
+			}
+			return m.fireIndexBuild()
+		}
+		return m, nil
+	}
 	if m.confirmRestore != nil {
 		switch msg.String() {
 		case "ctrl+c":
@@ -1396,6 +1443,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "esc", "ctrl+g":
 			m.showAsk = false
+		case "ctrl+b":
+			return m.pressBuildIndex()
 		case "enter":
 			if strings.TrimSpace(m.askInput) == "" || m.hitsBusy {
 				break
@@ -1569,6 +1618,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "ctrl+g":
 		return m.openAsk()
+	case "ctrl+b":
+		return m.pressBuildIndex()
 	case "o":
 		session := m.selectedSession()
 		if session == nil {
@@ -2102,6 +2153,42 @@ func (m model) View() string {
 		body = append(body, "", styleDim.Render(truncate(detail, 74)))
 		return m.inputDialog(heading, body, "↑/↓ choose · enter confirm · → open · ← up · / filter · ~ jump to path")
 	}
+	if m.indexBusy {
+		done, total := int64(0), int64(0)
+		if m.indexProg != nil {
+			done, total = m.indexProg.done.Load(), m.indexProg.total.Load()
+		}
+		line := m.spinGlyph() + " building semantic index …"
+		if total > 0 {
+			line = fmt.Sprintf("%s embedding %d/%d  (%d%%)", m.spinGlyph(), done, total, done*100/total)
+		} else if total == 0 && done == 0 {
+			line = m.spinGlyph() + " scanning sessions …"
+		}
+		body := []string{
+			styleStale.Render(line),
+			"",
+			styleDim.Render("one-time, local; incremental after this. ctrl+g will search by meaning"),
+		}
+		return m.inputDialog("Semantic index", body, "please wait · ctrl+c quits sp")
+	}
+	if m.confirmIndex {
+		count, model := m.semanticCount, m.semanticModel
+		total := 0
+		for _, p := range m.projects {
+			total += len(p.Sessions)
+		}
+		lead := fmt.Sprintf("embed %d sessions locally for meaning-based search", total)
+		if count > 0 {
+			lead = fmt.Sprintf("refresh the index (%d already embedded via %s)", count, shortModel(model))
+		}
+		body := []string{
+			styleBold.Render(lead),
+			"",
+			styleDim.Render("runs your local embedder once; the search path then only reads it"),
+			styleDim.Render("nothing leaves your machine · re-run anytime to pick up new sessions"),
+		}
+		return m.dialog("Build semantic search index?", body, "Build", "Cancel")
+	}
 	if m.bulkBusy {
 		body := []string{
 			styleStale.Render(m.spinGlyph() + " rescuing sessions in parallel …"),
@@ -2387,8 +2474,41 @@ func (m model) openAsk() (tea.Model, tea.Cmd) {
 	}
 	m.askHistory = loadAskHistory(m.cfg)
 	m.askHistSel = -1
+	m.semanticCount, m.semanticModel = VecIndexStats(m.cfg)
 	m.showAsk = true
 	return m, nil
+}
+
+// pressBuildIndex opens the opt-in confirm for building the semantic
+// index, or explains what is missing.
+func (m model) pressBuildIndex() (tea.Model, tea.Cmd) {
+	if m.indexBusy {
+		return m, nil
+	}
+	if assistEmbedModel(m.cfg.Assist) == "" {
+		m.notice, m.noticeErr = "semantic search needs a local embedder — run: ollama pull nomic-embed-text", true
+		return m, nil
+	}
+	m.confirmIndex = true
+	m.confirmSel = 0 // Build is the reasonable default here — it is opt-in already
+	return m, nil
+}
+
+// fireIndexBuild starts the background embedding build with live progress.
+func (m model) fireIndexBuild() (model, tea.Cmd) {
+	prog := &indexProgress{}
+	m.indexProg = prog
+	m.indexBusy = true
+	m.confirmIndex = false
+	cfg := m.cfg
+	model := assistEmbedModel(cfg.Assist)
+	return m, tea.Batch(spin(), func() tea.Msg {
+		count, err := BuildVecIndex(cfg, AllSessions(cfg), model, func(done, total int) {
+			prog.done.Store(int64(done))
+			prog.total.Store(int64(total))
+		})
+		return indexDoneMsg{count: count, err: err}
+	})
 }
 
 // fireAsk asks the chosen local model which sessions match the
@@ -2405,10 +2525,9 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 	// The page stays open while the model works — closing it instantly
 	// made a 10s ranking read as "enter did nothing".
 	cfg, query := m.cfg, strings.TrimSpace(m.askInput)
-	embedModel := assist.EmbedModel(cfg.Assist)
 	scope := AllUnder(m.projects, m.root)
 	return m, tea.Batch(spin(), func() tea.Msg {
-		candidates, rawHits := BuildCandidates(cfg, scope, query, embedModel)
+		candidates, rawHits, retrieval := BuildCandidates(cfg, scope, query)
 		matches, err := assistRank(cfg.Assist, option, query, candidates)
 		if err != nil {
 			return askMsg{query: query, backend: option.Label(), err: err}
@@ -2423,7 +2542,7 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 				hits = append(hits, Hit{Session: session, Snippet: match.Reason, Count: rawHits[match.ID]})
 			}
 		}
-		return askMsg{query: query, retrieval: shortModel(embedModel), hits: hits, backend: option.Label()}
+		return askMsg{query: query, retrieval: shortModel(retrieval), hits: hits, backend: option.Label()}
 	})
 }
 
@@ -2700,6 +2819,12 @@ func (m model) askView() string {
 	}
 	b.WriteString(styleDim.Render(" matches are grounded in your transcripts and ranked with a short"+
 		" reason each") + "\n")
+	if m.semanticCount > 0 {
+		b.WriteString(styleOK.Render(fmt.Sprintf(" ◆ semantic search on — %d sessions via %s (ctrl+b refreshes)",
+			m.semanticCount, shortModel(m.semanticModel))) + "\n")
+	} else {
+		b.WriteString(styleDim.Render(" ◇ semantic search off — ctrl+b builds a local index to search by meaning") + "\n")
+	}
 	if m.hitsBusy {
 		b.WriteString("\n " + styleStale.Render(m.spinGlyph()+" asking "+
 			m.askModels[m.askModel].Label()+" about \""+truncate(strings.TrimSpace(m.askInput), 48)+"\" …") + "\n")

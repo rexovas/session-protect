@@ -42,9 +42,10 @@ The only network call is an optional once-daily release check
   ranked by hit count (`ctrl+s`), and AI find — describe the session you
   half-remember and a model of your choice identifies it (`ctrl+g`;
   claude, codex, or fully local via ollama — enumerated live,
-  auto-detected, optional). With a local embedding model installed
-  (e.g. `ollama pull nomic-embed-text`), retrieval is **semantic** —
-  it finds sessions by meaning, not just shared words, so a paraphrase
+  auto-detected, optional). Opt in to **semantic search** with
+  `sp index` (or `ctrl+b` in the browser) and a local embedder
+  (`ollama pull nomic-embed-text`): sessions are embedded once, then
+  AI find retrieves by meaning, not just shared words, so a paraphrase
   still lands. Past searches replay instantly from saved results, no
   repeat model calls
 - Lost-session detection: sessions recorded in agent history but missing
@@ -115,6 +116,7 @@ shows the essentials; the complete reference lives under `m` → Keys.
 | `/` | filter the current pane as you type |
 | `ctrl+s` | search transcripts for the query, ranked by hits |
 | `ctrl+g` | AI find: describe a session, your chosen model ranks matches |
+| `ctrl+b` | build/refresh the semantic-search index (opt-in) |
 | `f` | facet filter: states, agents, models, modified window |
 | `i` or `enter` | inspect: overview · usage/cost · full transcript |
 | `o` | open: jump to a running session, or resume a closed one (new window or in place) |
@@ -139,6 +141,7 @@ sp restore [--session ID]     bring deleted sessions back from backup
 sp transplant --session ID --to DIR [--copy]
                               relocate sessions + memory (also --project)
 sp browse                     the session explorer (alias: ui)
+sp index [--clear]            build the semantic-search index (opt-in)
 sp hook install               realtime sync + session guard hooks
 sp schedule install           daily backup (macOS launchd)
 sp status | project status    machine-wide / per-project protection state

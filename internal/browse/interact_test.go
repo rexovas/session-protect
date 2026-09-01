@@ -1537,3 +1537,101 @@ func TestBulkRescueFolderFlow(t *testing.T) {
 		t.Fatalf("notice = %q", m.notice)
 	}
 }
+
+func TestIndexBuildAndClear(t *testing.T) {
+	home := t.TempDir()
+	cfg := config.Config{BackupRoot: filepath.Join(home, "backup"),
+		Assist: config.Assist{Backend: "ollama", EmbedModel: "fake-embed"}}
+	dir := filepath.Join(cfg.BackupRoot, textCacheDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessions := []Session{
+		{ID: "a", Title: "one", SourcePath: filepath.Join(home, "a.jsonl")},
+		{ID: "b", Title: "two", SourcePath: filepath.Join(home, "b.jsonl")},
+	}
+	writeFile(t, sessions[0].SourcePath, `{"type":"user","message":{"role":"user","content":"alpha"}}`+"\n")
+	writeFile(t, sessions[1].SourcePath, `{"type":"user","message":{"role":"user","content":"beta"}}`+"\n")
+	embedFn = func(_ config.Assist, _ string, in []string) ([][]float32, error) {
+		out := make([][]float32, len(in))
+		for i := range in {
+			out[i] = []float32{1, 0}
+		}
+		return out, nil
+	}
+	defer func() { embedFn = assistEmbed }()
+
+	var lastDone, lastTotal int
+	n, err := BuildVecIndex(cfg, sessions, "fake-embed", func(done, total int) { lastDone, lastTotal = done, total })
+	if err != nil || n != 2 {
+		t.Fatalf("build: n=%d err=%v", n, err)
+	}
+	if lastDone != 2 || lastTotal != 2 {
+		t.Fatalf("progress ended at %d/%d", lastDone, lastTotal)
+	}
+	count, model := VecIndexStats(cfg)
+	if count != 2 || model != "fake-embed" {
+		t.Fatalf("stats = %d %q", count, model)
+	}
+	// Re-run is incremental: nothing changed, no re-embed.
+	calls := 0
+	embedFn = func(_ config.Assist, _ string, in []string) ([][]float32, error) {
+		calls++
+		out := make([][]float32, len(in))
+		for i := range in {
+			out[i] = []float32{1, 0}
+		}
+		return out, nil
+	}
+	if _, err := BuildVecIndex(cfg, sessions, "fake-embed", nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("incremental re-run re-embedded %d batches", calls)
+	}
+	if err := ClearVecIndex(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if count, _ := VecIndexStats(cfg); count != 0 {
+		t.Fatal("index not cleared")
+	}
+}
+
+func TestTUIIndexBuildFlow(t *testing.T) {
+	m := buildEnv(t)
+	assistEmbedModel = func(config.Assist) string { return "fake-embed" }
+	embedFn = func(_ config.Assist, _ string, in []string) ([][]float32, error) {
+		out := make([][]float32, len(in))
+		for i := range in {
+			out[i] = []float32{1, 0}
+		}
+		return out, nil
+	}
+	defer func() { assistEmbedModel = assist.EmbedModel; embedFn = assistEmbed }()
+
+	// ctrl+b opens the opt-in confirm.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = next.(model)
+	if !m.confirmIndex {
+		t.Fatal("ctrl+b did not open the build confirm")
+	}
+	if view := m.View(); !strings.Contains(view, "Build semantic search index?") {
+		t.Fatal("confirm dialog not rendered")
+	}
+	// Build → background build fires with progress state.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if !m.indexBusy || m.indexProg == nil || cmd == nil {
+		t.Fatal("build did not start")
+	}
+	if view := m.View(); !strings.Contains(view, "Semantic index") {
+		t.Fatal("progress overlay not shown")
+	}
+	m = deliver(t, m, cmd)
+	if m.indexBusy {
+		t.Fatal("build did not finish")
+	}
+	if !strings.Contains(m.notice, "semantic index ready") {
+		t.Fatalf("notice = %q", m.notice)
+	}
+}
