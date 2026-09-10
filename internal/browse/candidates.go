@@ -25,13 +25,26 @@ var stopwords = map[string]bool{
 
 const candidateLimit = 30
 
+// Blend weights for hybrid retrieval: semantic leads for recall,
+// keyword grounds for exact-name precision.
+const (
+	semanticWeight = 0.6
+	keywordWeight  = 0.4
+)
+
+// headExcerpt returns a compact opening snippet of a transcript for
+// candidates that matched semantically but share no query keyword.
+func headExcerpt(text string) string {
+	return truncate(strings.Join(strings.Fields(text), " "), 200)
+}
+
 // BuildCandidates grounds an AI find: the description's significant words
 // are counted against the text cache, and the best-scoring sessions go to
 // the model with metadata and a matching excerpt. With no word hits at all
 // the most recent sessions go instead, metadata only — the model then works
 // from titles and projects alone. The returned counts (raw keyword hits
 // per session) are display-only: they never reach the model.
-func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]assist.Candidate, map[string]int) {
+func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]assist.Candidate, map[string]int, string) {
 	refreshTextCache(cfg, sessions)
 	dir := filepath.Join(cfg.BackupRoot, textCacheDir)
 
@@ -81,20 +94,31 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]ass
 		idf[i] = math.Log(1 + float64(len(all))/float64(1+df[i]))
 	}
 
+	// Semantic scores (cosine similarity of query vs each session's
+	// embedding) are the recall engine — they find sessions described in
+	// words that never appear in the transcript. Keyword IDF stays the
+	// precision engine — an exact name or file path outweighs vague
+	// vocabulary. When an embedder is available the two blend; without
+	// one, this is pure keyword grounding exactly as before.
+	sem, retrieval := semanticScores(cfg, query)
+
 	type scored struct {
 		session Session
-		score   float64
+		kw      float64
 		excerpt string
+		text    string
+		lower   string
 	}
-	var ranked []scored
+	var items []scored
+	maxKw := 0.0
 	for _, entry := range all {
-		item := scored{session: entry.session}
+		item := scored{session: entry.session, text: entry.text, lower: entry.lower}
 		bestIDF := 0.0
 		for i := range words {
 			if entry.counts[i] == 0 {
 				continue
 			}
-			item.score += float64(entry.counts[i]) * idf[i]
+			item.kw += float64(entry.counts[i]) * idf[i]
 			// The excerpt comes from the rarest matched word — the one
 			// that most likely names what the user remembers.
 			if idf[i] > bestIDF {
@@ -102,7 +126,34 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]ass
 				item.excerpt = snippetAround(entry.text, entry.lower, words[i])
 			}
 		}
-		ranked = append(ranked, item)
+		if item.kw > maxKw {
+			maxKw = item.kw
+		}
+		items = append(items, item)
+	}
+
+	type finalScore struct {
+		session Session
+		score   float64
+		excerpt string
+	}
+	var ranked []finalScore
+	for _, item := range items {
+		score := item.kw
+		excerpt := item.excerpt
+		if sem != nil {
+			kwNorm := 0.0
+			if maxKw > 0 {
+				kwNorm = item.kw / maxKw
+			}
+			score = semanticWeight*sem[item.session.ID] + keywordWeight*kwNorm
+			// A session matched only semantically has no keyword excerpt;
+			// give the model the head of the conversation instead.
+			if excerpt == "" && item.text != "" {
+				excerpt = headExcerpt(item.text)
+			}
+		}
+		ranked = append(ranked, finalScore{session: item.session, score: score, excerpt: excerpt})
 	}
 	sort.Slice(ranked, func(i, j int) bool {
 		if ranked[i].score != ranked[j].score {
@@ -142,5 +193,5 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]ass
 			Excerpt:  truncate(entry.excerpt, 200),
 		})
 	}
-	return out, rawHits
+	return out, rawHits, retrieval
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1444,5 +1445,193 @@ func TestReplayIgnoresBrowseRootAndAnnouncesFallback(t *testing.T) {
 	m = deliver(t, m, cmd)
 	if calls != 1 {
 		t.Fatalf("fallback did not run the model: calls=%d", calls)
+	}
+}
+
+func TestBulkRescueParallelRunner(t *testing.T) {
+	cfg := config.Config{BackupRoot: t.TempDir()}
+	var mu sync.Mutex
+	var seen []string
+	rescueReconstruct = func(_ config.Config, id string, _ string, dir string) (string, string, error) {
+		mu.Lock()
+		seen = append(seen, id+"@"+dir)
+		mu.Unlock()
+		if id == "boom" {
+			return "", "", fmt.Errorf("nope")
+		}
+		return "new-" + id, "/x.jsonl", nil
+	}
+	defer func() { rescueReconstruct = nil }()
+
+	targets := []Session{
+		{Target: "claude", ID: "a", Title: "A"},
+		{Target: "claude", ID: "b", Title: "B"},
+		{Target: "claude", ID: "boom", Title: "C"},
+		{Target: "codex", ID: "d", Title: "D"}, // rebuild is claude-only → skipped
+	}
+	res := runBulkParallel(cfg, targets, "rebuild", assist.ModelOption{}, "/dest")
+	if res.ok != 2 || res.failed != 1 || res.skipped != 1 {
+		t.Fatalf("counts = %+v", res)
+	}
+	if len(seen) != 3 { // a, b, boom — not the codex one
+		t.Fatalf("ran %d, want 3 claude: %v", len(seen), seen)
+	}
+	for _, s := range seen {
+		if !strings.HasSuffix(s, "@/dest") {
+			t.Fatalf("wrong destination: %s", s)
+		}
+	}
+}
+
+func TestBulkRescueFolderFlow(t *testing.T) {
+	m := buildEnv(t)
+	// Land on the folder row that holds the lost session (app has one).
+	if m.showSessions || m.showAll || m.showHits {
+		t.Fatal("expected folder view at root")
+	}
+	for i, f := range m.folders {
+		if f.Lost > 0 {
+			m.fCursor = i
+		}
+	}
+	var dirs []string
+	var mu sync.Mutex
+	rescueExport = func(_ config.Config, _ string, id string, _ string, dir string) (string, error) {
+		mu.Lock()
+		dirs = append(dirs, id+"@"+dir)
+		mu.Unlock()
+		return "/x.md", nil
+	}
+	defer func() { rescueExport = nil }()
+
+	m = press(t, m, "r")
+	if m.confirmBulk == nil {
+		t.Fatal("r on a folder did not open the bulk dialog")
+	}
+	if view := m.View(); !strings.Contains(view, "this folder only") {
+		t.Fatal("non-recursive scope not stated")
+	}
+	// Export all → destination picker (bulk), confirm the default dir.
+	labels := m.bulkButtons(*m.confirmBulk)
+	m.confirmSel = 0
+	for labels[m.confirmSel] != "Export all" {
+		m.confirmSel++
+	}
+	m = press(t, m, tea.KeyEnter)
+	if len(m.bulkTargets) == 0 || m.rescueDest == nil {
+		t.Fatalf("bulk picker did not open: targets=%d", len(m.bulkTargets))
+	}
+	if view := m.View(); !strings.Contains(view, "→ one directory") {
+		t.Fatal("picker not bulk-aware")
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // "use this directory"
+	m = next.(model)
+	if !m.bulkBusy || cmd == nil {
+		t.Fatal("confirm did not fire the parallel bulk")
+	}
+	m = deliver(t, m, cmd)
+	if len(dirs) == 0 {
+		t.Fatal("no exports ran")
+	}
+	if !strings.Contains(m.notice, "exported") {
+		t.Fatalf("notice = %q", m.notice)
+	}
+}
+
+func TestIndexBuildAndClear(t *testing.T) {
+	home := t.TempDir()
+	cfg := config.Config{BackupRoot: filepath.Join(home, "backup"),
+		Assist: config.Assist{Backend: "ollama", EmbedModel: "fake-embed"}}
+	dir := filepath.Join(cfg.BackupRoot, textCacheDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessions := []Session{
+		{ID: "a", Title: "one", SourcePath: filepath.Join(home, "a.jsonl")},
+		{ID: "b", Title: "two", SourcePath: filepath.Join(home, "b.jsonl")},
+	}
+	writeFile(t, sessions[0].SourcePath, `{"type":"user","message":{"role":"user","content":"alpha"}}`+"\n")
+	writeFile(t, sessions[1].SourcePath, `{"type":"user","message":{"role":"user","content":"beta"}}`+"\n")
+	embedFn = func(_ config.Assist, _ string, in []string) ([][]float32, error) {
+		out := make([][]float32, len(in))
+		for i := range in {
+			out[i] = []float32{1, 0}
+		}
+		return out, nil
+	}
+	defer func() { embedFn = assistEmbed }()
+
+	var lastDone, lastTotal int
+	n, err := BuildVecIndex(cfg, sessions, "fake-embed", func(done, total int) { lastDone, lastTotal = done, total })
+	if err != nil || n != 2 {
+		t.Fatalf("build: n=%d err=%v", n, err)
+	}
+	if lastDone != 2 || lastTotal != 2 {
+		t.Fatalf("progress ended at %d/%d", lastDone, lastTotal)
+	}
+	count, model := VecIndexStats(cfg)
+	if count != 2 || model != "fake-embed" {
+		t.Fatalf("stats = %d %q", count, model)
+	}
+	// Re-run is incremental: nothing changed, no re-embed.
+	calls := 0
+	embedFn = func(_ config.Assist, _ string, in []string) ([][]float32, error) {
+		calls++
+		out := make([][]float32, len(in))
+		for i := range in {
+			out[i] = []float32{1, 0}
+		}
+		return out, nil
+	}
+	if _, err := BuildVecIndex(cfg, sessions, "fake-embed", nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("incremental re-run re-embedded %d batches", calls)
+	}
+	if err := ClearVecIndex(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if count, _ := VecIndexStats(cfg); count != 0 {
+		t.Fatal("index not cleared")
+	}
+}
+
+func TestTUIIndexBuildFlow(t *testing.T) {
+	m := buildEnv(t)
+	assistEmbedModel = func(config.Assist) string { return "fake-embed" }
+	embedFn = func(_ config.Assist, _ string, in []string) ([][]float32, error) {
+		out := make([][]float32, len(in))
+		for i := range in {
+			out[i] = []float32{1, 0}
+		}
+		return out, nil
+	}
+	defer func() { assistEmbedModel = assist.EmbedModel; embedFn = assistEmbed }()
+
+	// ctrl+b opens the opt-in confirm.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = next.(model)
+	if !m.confirmIndex {
+		t.Fatal("ctrl+b did not open the build confirm")
+	}
+	if view := m.View(); !strings.Contains(view, "Build semantic search index?") {
+		t.Fatal("confirm dialog not rendered")
+	}
+	// Build → background build fires with progress state.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if !m.indexBusy || m.indexProg == nil || cmd == nil {
+		t.Fatal("build did not start")
+	}
+	if view := m.View(); !strings.Contains(view, "Semantic index") {
+		t.Fatal("progress overlay not shown")
+	}
+	m = deliver(t, m, cmd)
+	if m.indexBusy {
+		t.Fatal("build did not finish")
+	}
+	if !strings.Contains(m.notice, "semantic index ready") {
+		t.Fatalf("notice = %q", m.notice)
 	}
 }

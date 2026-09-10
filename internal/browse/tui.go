@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -101,14 +103,15 @@ type model struct {
 	// session under the current root and shows them as their own pane.
 	// AI find results reuse the pane with hitsMode "ask": ranked
 	// matches whose snippet line is the model's reasoning.
-	showHits  bool
-	hitsBusy  bool
-	hitsMode  string // "hits" | "ask"
-	hitsNote  string // backend name for ask results
-	hitsQuery string
-	hits      []Hit
-	hCursor   int
-	hOffset   int
+	showHits      bool
+	hitsBusy      bool
+	hitsMode      string // "hits" | "ask"
+	hitsNote      string // backend (ranker) name for ask results
+	hitsRetrieval string // embedder name when semantic retrieval was used
+	hitsQuery     string
+	hits          []Hit
+	hCursor       int
+	hOffset       int
 
 	// showLost reveals sessions known only from prompt history. Hidden by
 	// default so losses don't crowd the living sessions.
@@ -146,6 +149,19 @@ type model struct {
 	rebuildChoice  *Session // rescued original with several rebuilds: pick which to resume
 	rescueHow      bool     // rescue dialog page 2: mechanical rebuild vs rebuild with AI
 	resumeHeading  string   // overrides the resume dialog title (rebuild-complete flow)
+	// Folder-level bulk rescue: r on a folder row rescues that folder's
+	// DIRECT lost sessions (never nested — the subtree is off limits) in
+	// parallel, all into one chosen destination.
+	confirmBulk *bulkRescue // the bulk dialog is open
+	bulkTargets []Session   // the direct lost sessions being bulk-rescued (nil = single mode)
+	bulkFolder  string      // folder display name, for headings
+	bulkBusy    bool        // parallel rescue in flight
+	// Semantic index (opt-in): built on request with live progress.
+	confirmIndex  bool
+	indexBusy     bool
+	indexProg     *indexProgress
+	semanticCount int    // sessions in the built index (0 = off), read when the ask page opens
+	semanticModel string // embedder of the built index
 	// The AI-rebuild stage: model choice (opus-first) before synthesis.
 	rescueAI      *Session
 	rescueModels  []assist.ModelOption
@@ -209,8 +225,9 @@ var (
 
 // Assist plumbing, seam-injected for tests.
 var (
-	assistModels = assist.AvailableModels
-	assistRank   = assist.RankWith
+	assistModels     = assist.AvailableModels
+	assistRank       = assist.RankWith
+	assistEmbedModel = assist.EmbedModel
 )
 
 type rescanMsg []*Project
@@ -240,8 +257,41 @@ type rescueAIMsg struct {
 	err   error
 }
 
+// bulkRescue holds a folder-level rescue offer: its direct lost sessions
+// and how many more sit in subfolders (excluded, but named so the
+// non-recursive boundary is visible).
+type bulkRescue struct {
+	folder string
+	path   string
+	lost   []Session
+	nested int
+	claude int // how many of lost are claude (rebuild-eligible)
+}
+
+// indexProgress is shared between the build goroutine and the render:
+// the goroutine stores counts, the overlay reads them each frame.
+type indexProgress struct {
+	done  atomic.Int64
+	total atomic.Int64
+}
+
+// indexDoneMsg reports a finished semantic index build.
+type indexDoneMsg struct {
+	count int
+	err   error
+}
+
+// bulkDoneMsg reports a finished parallel rescue.
+type bulkDoneMsg struct {
+	action  string
+	ok      int
+	failed  int
+	skipped int
+}
+
 type askMsg struct {
-	query string
+	query     string
+	retrieval string
 
 	hits    []Hit
 	backend string
@@ -633,11 +683,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case spinMsg:
-		if m.hitsBusy || m.rescueBusy {
+		if m.hitsBusy || m.rescueBusy || m.bulkBusy || m.indexBusy {
 			m.spinFrame++
 			return m, spin()
 		}
 		return m, nil
+	case indexDoneMsg:
+		m.indexBusy = false
+		m.indexProg = nil
+		if msg.err != nil {
+			m.notice, m.noticeErr = "index build stopped: "+msg.err.Error()+" (re-run to finish)", true
+			return m, nil
+		}
+		m.notice = fmt.Sprintf("semantic index ready: %d sessions — ctrl+g now searches by meaning", msg.count)
+		return m, nil
+	case bulkDoneMsg:
+		m.bulkBusy = false
+		verb := map[string]string{"export": "exported", "rebuild": "rebuilt", "rebuild-ai": "rebuilt with AI"}[msg.action]
+		parts := fmt.Sprintf("%s %d session(s)", verb, msg.ok)
+		if msg.failed > 0 {
+			parts += fmt.Sprintf(", %d failed (see audit)", msg.failed)
+		}
+		if msg.skipped > 0 {
+			parts += fmt.Sprintf(", %d codex skipped (rebuild is claude-only)", msg.skipped)
+		}
+		m.notice, m.noticeErr = parts, msg.failed > 0
+		m.scanning = true
+		cfg := m.cfg
+		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
 	case tickMsg:
 		if m.scanning {
 			return m, tick()
@@ -753,6 +826,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.hitsMode = "ask"
 		m.hitsNote = msg.backend
+		m.hitsRetrieval = msg.retrieval
 		m.hitsCached = time.Time{}
 		m.hits = msg.hits
 		m.showHits = true
@@ -1008,6 +1082,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.rescueAI = nil
 				break
 			}
+			if len(m.bulkTargets) > 0 {
+				m.rescueAI = nil
+				return m.fireBulk(m.rescueModels[m.rescueModel], m.rescueDir)
+			}
 			m.rescueBusy = true
 			session := *m.rescueAI
 			cfg, option, dir := m.cfg, m.rescueModels[m.rescueModel], m.rescueDir
@@ -1127,6 +1205,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if dir == "" {
 					break
 				}
+				if len(m.bulkTargets) > 0 {
+					m.rescueDest = nil
+					return m.runBulkRescue(dir)
+				}
 				session := *m.rescueDest
 				m.rescueDest = nil
 				return m.runRescue(session, dir)
@@ -1141,6 +1223,38 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						m.rescueCursor = 0
 					}
 				}
+			}
+		}
+		return m, nil
+	}
+	if m.confirmBulk != nil {
+		bulk := *m.confirmBulk
+		labels := m.bulkButtons(bulk)
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "right", "tab", "l", "down", "j":
+			m.confirmSel = (m.confirmSel + 1) % len(labels)
+		case "left", "h", "up", "k":
+			m.confirmSel = (m.confirmSel + len(labels) - 1) % len(labels)
+		case "esc", "n":
+			m.confirmBulk = nil
+		case "enter":
+			switch labels[m.confirmSel] {
+			case "Rebuild all":
+				m = m.openBulkPicker(bulk, "rebuild")
+			case "Rebuild with AI all":
+				m.rescueModels = rescueAIModels(m.cfg.Assist)
+				if len(m.rescueModels) == 0 {
+					m.notice, m.noticeErr = "ai rebuild needs ollama running or the claude/codex CLI on PATH", true
+					m.confirmBulk = nil
+					break
+				}
+				m = m.openBulkPicker(bulk, "rebuild-ai")
+			case "Export all":
+				m = m.openBulkPicker(bulk, "export")
+			case "Cancel":
+				m.confirmBulk = nil
 			}
 		}
 		return m, nil
@@ -1194,6 +1308,23 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case "Cancel":
 				m.confirmRescue = nil
 			}
+		}
+		return m, nil
+	}
+	if m.confirmIndex {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
+			m.confirmSel = (m.confirmSel + 1) % 2
+		case "esc", "n":
+			m.confirmIndex = false
+		case "enter":
+			if m.confirmSel != 0 {
+				m.confirmIndex = false
+				break
+			}
+			return m.fireIndexBuild()
 		}
 		return m, nil
 	}
@@ -1312,6 +1443,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "esc", "ctrl+g":
 			m.showAsk = false
+		case "ctrl+b":
+			return m.pressBuildIndex()
 		case "enter":
 			if strings.TrimSpace(m.askInput) == "" || m.hitsBusy {
 				break
@@ -1431,8 +1564,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		(&m).openDetail()
 	case "r":
-		if session := m.selectedSession(); session != nil {
-			m = m.pressRescue(*session)
+		if m.showSessions || m.showAll || m.showHits {
+			if session := m.selectedSession(); session != nil {
+				m = m.pressRescue(*session)
+			}
+		} else {
+			m = m.pressBulkRescue()
 		}
 	case "ctrl+r":
 		m.scanning = true
@@ -1481,6 +1618,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "ctrl+g":
 		return m.openAsk()
+	case "ctrl+b":
+		return m.pressBuildIndex()
 	case "o":
 		session := m.selectedSession()
 		if session == nil {
@@ -1637,6 +1776,14 @@ func (m model) spinGlyph() string {
 	return spinFrames[m.spinFrame%len(spinFrames)]
 }
 
+// shortModel trims an ollama tag suffix for display (nomic-embed-text:latest → nomic-embed-text).
+func shortModel(name string) string {
+	if i := strings.IndexByte(name, ':'); i > 0 && name[i:] == ":latest" {
+		return name[:i]
+	}
+	return name
+}
+
 // sessionByID finds a session anywhere in the scan.
 func (m model) sessionByID(id string) *Session {
 	for _, project := range m.projects {
@@ -1647,6 +1794,57 @@ func (m model) sessionByID(id string) *Session {
 		}
 	}
 	return nil
+}
+
+// pressBulkRescue opens the folder-level rescue dialog for the folder
+// under the cursor. Only the folder's DIRECT lost sessions (the project
+// at exactly this path) are eligible — nested ones are counted and
+// named, never acted on.
+func (m model) pressBulkRescue() model {
+	if m.fCursor >= len(m.folders) || m.folders[m.fCursor].Pseudo {
+		return m
+	}
+	folder := m.folders[m.fCursor]
+	var lost []Session
+	claude := 0
+	for _, project := range m.projects {
+		if project.Path != folder.Path {
+			continue
+		}
+		for _, session := range project.Sessions {
+			if session.State == "LOST" {
+				session.ProjectPath = project.Path
+				lost = append(lost, session)
+				if session.Target == "claude" {
+					claude++
+				}
+			}
+		}
+	}
+	nested := folder.Lost - len(lost)
+	if nested < 0 {
+		nested = 0
+	}
+	if len(lost) == 0 {
+		if nested > 0 {
+			m.notice, m.noticeErr = fmt.Sprintf("no lost sessions directly in %s — %d are in subfolders, open one to rescue them", folder.Name, nested), true
+		} else {
+			m.notice, m.noticeErr = "no lost sessions in "+folder.Name, true
+		}
+		return m
+	}
+	m.confirmBulk = &bulkRescue{folder: folder.Name, path: folder.Path, lost: lost, nested: nested, claude: claude}
+	m.bulkFolder = folder.Name
+	m.confirmSel = len(m.bulkButtons(*m.confirmBulk)) - 1 // Cancel default
+	return m
+}
+
+// bulkButtons: rebuild is claude-only, export covers both agents.
+func (m model) bulkButtons(b bulkRescue) []string {
+	if b.claude > 0 {
+		return []string{"Rebuild all", "Rebuild with AI all", "Export all", "Cancel"}
+	}
+	return []string{"Export all", "Cancel"}
 }
 
 func (m model) selectedSession() *Session {
@@ -1853,8 +2051,12 @@ func (m model) View() string {
 		if len(m.rescueModels) > 0 {
 			model = m.rescueModels[m.rescueModel].Label()
 		}
+		lead := styleDim.Render("✕ ") + truncate(title, 68)
+		if len(m.bulkTargets) > 0 {
+			lead = styleBold.Render(fmt.Sprintf("%d sessions · %d model calls (bounded)", len(m.bulkTargets), len(m.bulkTargets)))
+		}
 		body := []string{
-			styleDim.Render("✕ ") + truncate(title, 68),
+			lead,
 			"",
 			" model  " + styleDim.Render("‹ ") + styleBold.Render(model) + styleDim.Render(" ›") +
 				styleDim.Render("   ↑/↓ change"),
@@ -1871,7 +2073,11 @@ func (m model) View() string {
 				body = append(body, styleStale.Render("ctrl+c again to abandon the rebuild and quit"))
 			}
 		}
-		return m.dialog("Rebuild with AI?", body, "Rebuild", "Cancel")
+		heading := "Rebuild with AI?"
+		if len(m.bulkTargets) > 0 {
+			heading = "Rebuild all with AI?"
+		}
+		return m.dialog(heading, body, "Rebuild", "Cancel")
 	}
 	if m.rescueDest != nil {
 		session := *m.rescueDest
@@ -1893,8 +2099,12 @@ func (m model) View() string {
 		if m.rescueAction == "export" {
 			detail = "writes " + session.ID + ".md; default is the project dir (or the backup root)"
 		}
+		leadLine := styleDim.Render("✕ ") + truncate(title, 68)
+		if len(m.bulkTargets) > 0 {
+			leadLine = styleBold.Render(fmt.Sprintf("%d sessions → one directory", len(m.bulkTargets)))
+		}
 		body := []string{
-			styleDim.Render("✕ ") + truncate(title, 68),
+			leadLine,
 			"",
 			styleActive.Render(truncate(m.rescueInput, 72)) + "  " + note,
 			"",
@@ -1942,6 +2152,75 @@ func (m model) View() string {
 		body = append(body, rows...)
 		body = append(body, "", styleDim.Render(truncate(detail, 74)))
 		return m.inputDialog(heading, body, "↑/↓ choose · enter confirm · → open · ← up · / filter · ~ jump to path")
+	}
+	if m.indexBusy {
+		done, total := int64(0), int64(0)
+		if m.indexProg != nil {
+			done, total = m.indexProg.done.Load(), m.indexProg.total.Load()
+		}
+		line := m.spinGlyph() + " building semantic index …"
+		if total > 0 {
+			line = fmt.Sprintf("%s embedding %d/%d  (%d%%)", m.spinGlyph(), done, total, done*100/total)
+		} else if total == 0 && done == 0 {
+			line = m.spinGlyph() + " scanning sessions …"
+		}
+		body := []string{
+			styleStale.Render(line),
+			"",
+			styleDim.Render("one-time, local; incremental after this. ctrl+g will search by meaning"),
+		}
+		return m.inputDialog("Semantic index", body, "please wait · ctrl+c quits sp")
+	}
+	if m.confirmIndex {
+		count, model := m.semanticCount, m.semanticModel
+		total := 0
+		for _, p := range m.projects {
+			total += len(p.Sessions)
+		}
+		lead := fmt.Sprintf("embed %d sessions locally for meaning-based search", total)
+		if count > 0 {
+			lead = fmt.Sprintf("refresh the index (%d already embedded via %s)", count, shortModel(model))
+		}
+		body := []string{
+			styleBold.Render(lead),
+			"",
+			styleDim.Render("runs your local embedder once; the search path then only reads it"),
+			styleDim.Render("nothing leaves your machine · re-run anytime to pick up new sessions"),
+		}
+		return m.dialog("Build semantic search index?", body, "Build", "Cancel")
+	}
+	if m.bulkBusy {
+		body := []string{
+			styleStale.Render(m.spinGlyph() + " rescuing sessions in parallel …"),
+			"",
+			styleDim.Render("each writes as it finishes; anything done is kept if you quit"),
+		}
+		return m.inputDialog("Working", body, "please wait · ctrl+c quits sp")
+	}
+	if m.confirmBulk != nil {
+		bulk := *m.confirmBulk
+		labels := m.bulkButtons(bulk)
+		describe := map[string][2]string{
+			"Rebuild all":         {"rebuild every lost session here into one chosen directory,", "each a new resumable session; the originals stay marked lost"},
+			"Rebuild with AI all": {"the same, plus an AI brief per session — you pick the model;", "runs several model calls at once (bounded), can take a minute"},
+			"Export all":          {"write every lost session's surviving prompts to markdown", "files in one chosen directory"},
+			"Cancel":              {"closes this dialog without touching anything", ""},
+		}
+		desc := describe[labels[min(m.confirmSel, len(labels)-1)]]
+		scope := fmt.Sprintf("%d lost session(s) directly in %s", len(bulk.lost), bulk.folder)
+		body := []string{
+			styleBold.Render(scope),
+			styleDim.Render("this folder only — nested subfolders are never included"),
+		}
+		if bulk.nested > 0 {
+			body = append(body, styleStale.Render(fmt.Sprintf("(%d more lost sessions live in subfolders — open one to rescue those)", bulk.nested)))
+		}
+		if bulk.claude > 0 && bulk.claude < len(bulk.lost) {
+			body = append(body, styleDim.Render(fmt.Sprintf("%d claude · %d codex — rebuild acts on claude only, export on both", bulk.claude, len(bulk.lost)-bulk.claude)))
+		}
+		body = append(body, "", styleDim.Render(desc[0]), styleDim.Render(desc[1]),
+			styleDim.Render("all rescue into ONE destination you pick next"))
+		return m.dialog("Rescue all lost sessions in this folder?", body, labels...)
 	}
 	if m.confirmRescue != nil {
 		session := *m.confirmRescue
@@ -2126,6 +2405,15 @@ func (m model) View() string {
 			help = m.spinGlyph() + " asking the local model about \"" + m.hitsQuery + "\" …"
 		}
 	}
+	// Explain the health markers on the highlighted row rather than
+	// leaving cryptic glyphs unlabeled.
+	if !m.searching && m.query == "" && !m.hitsBusy && m.filterSummary() == "" && m.fCursor < len(m.folders) {
+		if f := m.folders[m.fCursor]; f.HomeGone {
+			help = "⌂! this project's directory is gone — t transplants its sessions somewhere that exists"
+		} else if f.Lost > 0 {
+			help = "✕N lost sessions (no transcript anywhere) — r here bulk-rescues them · enter to browse"
+		}
+	}
 
 	return m.pinBottom(b.String(), help)
 }
@@ -2186,8 +2474,41 @@ func (m model) openAsk() (tea.Model, tea.Cmd) {
 	}
 	m.askHistory = loadAskHistory(m.cfg)
 	m.askHistSel = -1
+	m.semanticCount, m.semanticModel = VecIndexStats(m.cfg)
 	m.showAsk = true
 	return m, nil
+}
+
+// pressBuildIndex opens the opt-in confirm for building the semantic
+// index, or explains what is missing.
+func (m model) pressBuildIndex() (tea.Model, tea.Cmd) {
+	if m.indexBusy {
+		return m, nil
+	}
+	if assistEmbedModel(m.cfg.Assist) == "" {
+		m.notice, m.noticeErr = "semantic search needs a local embedder — run: ollama pull nomic-embed-text", true
+		return m, nil
+	}
+	m.confirmIndex = true
+	m.confirmSel = 0 // Build is the reasonable default here — it is opt-in already
+	return m, nil
+}
+
+// fireIndexBuild starts the background embedding build with live progress.
+func (m model) fireIndexBuild() (model, tea.Cmd) {
+	prog := &indexProgress{}
+	m.indexProg = prog
+	m.indexBusy = true
+	m.confirmIndex = false
+	cfg := m.cfg
+	model := assistEmbedModel(cfg.Assist)
+	return m, tea.Batch(spin(), func() tea.Msg {
+		count, err := BuildVecIndex(cfg, AllSessions(cfg), model, func(done, total int) {
+			prog.done.Store(int64(done))
+			prog.total.Store(int64(total))
+		})
+		return indexDoneMsg{count: count, err: err}
+	})
 }
 
 // fireAsk asks the chosen local model which sessions match the
@@ -2206,7 +2527,7 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 	cfg, query := m.cfg, strings.TrimSpace(m.askInput)
 	scope := AllUnder(m.projects, m.root)
 	return m, tea.Batch(spin(), func() tea.Msg {
-		candidates, rawHits := BuildCandidates(cfg, scope, query)
+		candidates, rawHits, retrieval := BuildCandidates(cfg, scope, query)
 		matches, err := assistRank(cfg.Assist, option, query, candidates)
 		if err != nil {
 			return askMsg{query: query, backend: option.Label(), err: err}
@@ -2221,7 +2542,7 @@ func (m model) fireAsk() (tea.Model, tea.Cmd) {
 				hits = append(hits, Hit{Session: session, Snippet: match.Reason, Count: rawHits[match.ID]})
 			}
 		}
-		return askMsg{query: query, hits: hits, backend: option.Label()}
+		return askMsg{query: query, retrieval: shortModel(retrieval), hits: hits, backend: option.Label()}
 	})
 }
 
@@ -2252,6 +2573,7 @@ func (m model) replayAsk(entry askHistoryEntry) (model, bool) {
 	m.hitsMode = "ask"
 	m.hitsQuery = entry.Query
 	m.hitsNote = entry.Model
+	m.hitsRetrieval = ""
 	m.hitsCached = entry.At
 	m.hits = hits
 	m.showHits = true
@@ -2497,6 +2819,12 @@ func (m model) askView() string {
 	}
 	b.WriteString(styleDim.Render(" matches are grounded in your transcripts and ranked with a short"+
 		" reason each") + "\n")
+	if m.semanticCount > 0 {
+		b.WriteString(styleOK.Render(fmt.Sprintf(" ◆ semantic search on — %d sessions via %s (ctrl+b refreshes)",
+			m.semanticCount, shortModel(m.semanticModel))) + "\n")
+	} else {
+		b.WriteString(styleDim.Render(" ◇ semantic search off — ctrl+b builds a local index to search by meaning") + "\n")
+	}
 	if m.hitsBusy {
 		b.WriteString("\n " + styleStale.Render(m.spinGlyph()+" asking "+
 			m.askModels[m.askModel].Label()+" about \""+truncate(strings.TrimSpace(m.askInput), 48)+"\" …") + "\n")
@@ -2571,6 +2899,9 @@ func (m model) hitsView() string {
 	if m.hitsMode == "ask" {
 		heading = "Session Explorer ▸ ai find"
 		note = fmt.Sprintf("  \"%s\" · %d match(es) via %s ", m.hitsQuery, len(m.hits), m.hitsNote)
+		if m.hitsRetrieval != "" {
+			note += styleDim.Render("· semantic (" + m.hitsRetrieval + ") ")
+		}
 		if !m.hitsCached.IsZero() {
 			note += styleStale.Render(fmt.Sprintf("· saved %s ago ", ago(m.hitsCached)))
 		}
@@ -3159,6 +3490,93 @@ func (m model) openRescuePicker(session Session, action string) model {
 	m.rescueNaming, m.rescueName = false, ""
 	m.rescueMode, m.rescueFilter = "", ""
 	return m
+}
+
+// openBulkPicker enters the shared destination picker for a bulk rescue:
+// one directory, chosen once, that every session rebuilds into. The
+// picker is driven by a representative session (for the default dir and
+// title) while bulkTargets marks it as bulk.
+func (m model) openBulkPicker(bulk bulkRescue, action string) model {
+	m.confirmBulk = nil
+	m.bulkTargets = bulk.lost
+	rep := bulk.lost[0]
+	m.rescueDest, m.rescueAction = &rep, action
+	m.rescueInput = tildePath(bulk.path) // default: the folder itself; navigate or + new folder
+	m.rescueCursor = 0
+	m.rescueNaming, m.rescueName = false, ""
+	m.rescueMode, m.rescueFilter = "", ""
+	return m
+}
+
+// runBulkRescue runs the picked action over every target. Mechanical
+// rebuild and export fire the parallel runner immediately; AI first
+// needs a model, so it opens the model stage.
+func (m model) runBulkRescue(dir string) (model, tea.Cmd) {
+	if m.rescueAction == "rebuild-ai" {
+		rep := m.bulkTargets[0]
+		m.rescueAI = &rep
+		m.rescueDir = dir
+		m.rescueModel = 0
+		m.confirmSel = 1 // Cancel default in the model stage
+		return m, nil
+	}
+	return m.fireBulk(assist.ModelOption{}, dir)
+}
+
+// fireBulk launches the bounded parallel rescue.
+func (m model) fireBulk(option assist.ModelOption, dir string) (model, tea.Cmd) {
+	targets, action, cfg := m.bulkTargets, m.rescueAction, m.cfg
+	m.bulkTargets = nil
+	m.bulkBusy = true
+	return m, tea.Batch(spin(), func() tea.Msg {
+		return runBulkParallel(cfg, targets, action, option, dir)
+	})
+}
+
+// runBulkParallel rescues every target concurrently, bounded so AI
+// rebuilds do not spawn a subprocess per session all at once. Each unit
+// writes its own file and audit line (both concurrency-safe); one
+// backup sync runs after the fan-in.
+func runBulkParallel(cfg config.Config, targets []Session, action string, option assist.ModelOption, dir string) bulkDoneMsg {
+	limit := 8
+	if action == "rebuild-ai" {
+		limit = 4
+	}
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	res := bulkDoneMsg{action: action}
+	for _, target := range targets {
+		if action != "export" && target.Target != "claude" {
+			res.skipped++ // rebuild is claude-only
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(t Session) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			var err error
+			switch action {
+			case "export":
+				_, err = rescueExport(cfg, t.Target, t.ID, t.Title, dir)
+			case "rebuild":
+				_, _, err = rescueReconstruct(cfg, t.ID, t.Title, dir)
+			case "rebuild-ai":
+				_, _, err = rescueReconstructAI(cfg, option, t.ID, t.Title, dir)
+			}
+			mu.Lock()
+			if err != nil {
+				res.failed++
+			} else {
+				res.ok++
+			}
+			mu.Unlock()
+		}(target)
+	}
+	wg.Wait()
+	_, _ = backup.Execute(cfg, backup.Options{SyncOnly: true, AllowUnencrypted: true})
+	return res
 }
 
 // rescueSubdirs lists the picker's directory rows, narrowed by the

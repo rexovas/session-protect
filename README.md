@@ -42,8 +42,12 @@ The only network call is an optional once-daily release check
   ranked by hit count (`ctrl+s`), and AI find — describe the session you
   half-remember and a model of your choice identifies it (`ctrl+g`;
   claude, codex, or fully local via ollama — enumerated live,
-  auto-detected, optional). Past searches replay instantly from saved
-  results, no repeat model calls
+  auto-detected, optional). Opt in to **semantic search** with
+  `sp index` (or `ctrl+b` in the browser) and a local embedder
+  (`ollama pull nomic-embed-text`): sessions are embedded once, then
+  AI find retrieves by meaning, not just shared words, so a paraphrase
+  still lands. Past searches replay instantly from saved results, no
+  repeat model calls
 - Lost-session detection: sessions recorded in agent history but missing
   from disk are surfaced permanently, so nothing disappears silently —
   and can be rescued: export their surviving prompts, or rebuild them
@@ -112,13 +116,21 @@ shows the essentials; the complete reference lives under `m` → Keys.
 | `/` | filter the current pane as you type |
 | `ctrl+s` | search transcripts for the query, ranked by hits |
 | `ctrl+g` | AI find: describe a session, your chosen model ranks matches |
+| `ctrl+b` | build/refresh the semantic-search index (opt-in) |
 | `f` | facet filter: states, agents, models, modified window |
 | `i` or `enter` | inspect: overview · usage/cost · full transcript |
 | `o` | open: jump to a running session, or resume a closed one (new window or in place) |
-| `r` | restore from backup, or rescue a lost session (export · rebuild) |
+| `r` | restore/rescue a session; on a folder row, bulk-rescue its lost sessions |
 | `t` | transplant a session or project to another directory |
 | `x` | show/hide lost sessions |
 | `m` | menu: stats · activity log · key reference |
+
+Folder rows show a **HEALTH** summary of everything beneath them:
+`ok`, `~N` stale, `!N` unbacked, `✝N` recoverable-from-backup, `✕N`
+lost (no transcript anywhere), and `⌂!` when the project's own
+directory is gone from disk (its sessions survive — `t` transplants
+them somewhere that exists). Session rows use the long form in the
+STATE column.
 
 ## CLI reference
 
@@ -129,6 +141,7 @@ sp restore [--session ID]     bring deleted sessions back from backup
 sp transplant --session ID --to DIR [--copy]
                               relocate sessions + memory (also --project)
 sp browse                     the session explorer (alias: ui)
+sp index [--clear]            build the semantic-search index (opt-in)
 sp hook install               realtime sync + session guard hooks
 sp schedule install           daily backup (macOS launchd)
 sp status | project status    machine-wide / per-project protection state
@@ -159,6 +172,9 @@ backend = "auto"         # auto | ollama | claude | codex | none
 model = ""               # ollama model; empty = first installed
 claude_model = "sonnet"  # claude backend model; helper runs are
                          # throwaway and never appear in your sessions
+embed_model = ""         # ollama embedding model for semantic retrieval;
+                         # empty auto-detects an installed embedder
+                         # (nomic-embed-text, etc.); absent = keyword only
 
 [update]
 check = true             # daily new-release check + explorer prompt
