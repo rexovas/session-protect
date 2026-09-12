@@ -183,6 +183,7 @@ type model struct {
 	// binary and relaunches into it.
 	updateOffer string // version tag, "" when none
 	updateBusy  bool
+	updateBrew  bool // running binary is Homebrew-managed: route to brew upgrade
 	// execOnExit replaces this process after the TUI closes: the updated
 	// binary after a self-update, or the agent itself when resuming a
 	// session in the current terminal.
@@ -212,8 +213,9 @@ var (
 // Update plumbing, seam-injected for tests. The check runs at most once
 // a day and only for release-channel binaries with update.check enabled.
 var (
-	updateCheck = update.ThrottledCheck
-	updateApply = update.Apply
+	updateCheck  = update.ThrottledCheck
+	updateApply  = update.Apply
+	updateIsBrew = update.IsBrewManaged
 )
 
 // Rescue actions, seam-injected for tests.
@@ -740,6 +742,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case updateAvailableMsg:
 		m.updateOffer = string(msg)
+		m.updateBrew = updateIsBrew()
 		m.confirmSel = 1
 		return m, nil
 	case updateDoneMsg:
@@ -956,6 +959,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.confirmSel != 0 {
 				m.updateOffer = ""
 				break
+			}
+			if m.updateBrew {
+				// Homebrew owns the binary; run the upgrade in the user's
+				// terminal (visible output) instead of a doomed self-swap.
+				m.execOnExit = []string{"/bin/sh", "-c", update.BrewUpgradeCommand}
+				return m, tea.Quit
 			}
 			m.updateBusy = true
 			tag := m.updateOffer
@@ -1987,6 +1996,15 @@ func (m model) View() string {
 			"",
 			styleDim.Render("current  ") + version.Version,
 			styleDim.Render("latest   ") + styleOK.Render(m.updateOffer),
+		}
+		if m.updateBrew {
+			body = append(body, "",
+				styleDim.Render("installed via Homebrew — this runs, in your terminal:"),
+				"  "+styleBold.Render(update.BrewUpgradeCommand))
+			if m.updateBusy {
+				body = append(body, "", styleDim.Render("upgrading …"))
+			}
+			return m.dialog("Update to "+m.updateOffer+"?", body, "Upgrade with brew", "Later")
 		}
 		if m.updateBusy {
 			body = append(body, "", styleDim.Render("updating …"))
