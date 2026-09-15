@@ -138,6 +138,23 @@ func brewManaged(path string) bool {
 	return strings.Contains(path, string(os.PathSeparator)+"Cellar"+string(os.PathSeparator))
 }
 
+// IsBrewManaged reports whether the running binary was installed via
+// Homebrew — self-swap is impossible, so the update flow routes to
+// `brew upgrade` instead of offering an in-place update.
+func IsBrewManaged() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return brewManaged(exe)
+}
+
+// BrewUpgradeCommand is the shell command that upgrades a Homebrew install.
+const BrewUpgradeCommand = "brew upgrade rexovas/tap/session-protect"
+
 func Apply(tag string) (string, error) {
 	exe, err := executablePath()
 	if err != nil {

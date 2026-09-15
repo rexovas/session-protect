@@ -14,6 +14,7 @@ import (
 	"github.com/rexovas/session-protect/internal/assist"
 	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/update"
 )
 
 // buildEnv fabricates a home with two nested claude projects and one lost
@@ -1634,4 +1635,33 @@ func TestTUIIndexBuildFlow(t *testing.T) {
 	if !strings.Contains(m.notice, "semantic index ready") {
 		t.Fatalf("notice = %q", m.notice)
 	}
+}
+
+func TestBrewUpdateRoutesToBrew(t *testing.T) {
+	m := buildEnv(t)
+	updateIsBrew = func() bool { return true }
+	applied := false
+	updateApply = func(string) (string, error) { applied = true; return "", nil }
+	defer func() { updateIsBrew = update.IsBrewManaged; updateApply = nil }()
+
+	// The launch offer arrives; brew is detected.
+	next, _ := m.Update(updateAvailableMsg("v9.9.9"))
+	m = next.(model)
+	if !m.updateBrew {
+		t.Fatal("brew install not detected on offer")
+	}
+	if view := m.View(); !strings.Contains(view, "Upgrade with brew") || !strings.Contains(view, "brew upgrade rexovas/tap/session-protect") {
+		t.Fatal("brew dialog not shown")
+	}
+	// Choosing upgrade must NOT call the self-swap; it execs brew on exit.
+	m.confirmSel = 0
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if applied {
+		t.Fatal("brew install must not attempt in-place self-swap")
+	}
+	if len(m.execOnExit) == 0 || !strings.Contains(strings.Join(m.execOnExit, " "), "brew upgrade rexovas/tap/session-protect") {
+		t.Fatalf("did not exec brew upgrade: %v", m.execOnExit)
+	}
+	_ = cmd // tea.Quit
 }
