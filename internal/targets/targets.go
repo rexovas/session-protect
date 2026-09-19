@@ -106,10 +106,10 @@ func ClaudeSlug(path string) string {
 
 // CodexSessionMeta reads a codex rollout's identity from its leading
 // session_meta payload: the session id and working directory.
-func CodexSessionMeta(path string) (id string, cwd string) {
+func CodexSessionMeta(path string) (id string, cwd string, subagent bool) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", ""
+		return "", "", false
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
@@ -117,16 +117,32 @@ func CodexSessionMeta(path string) (id string, cwd string) {
 	for i := 0; i < 50 && scanner.Scan(); i++ {
 		var event struct {
 			Payload struct {
-				ID  string `json:"id"`
-				Cwd string `json:"cwd"`
+				ID     string          `json:"id"`
+				Cwd    string          `json:"cwd"`
+				Source json.RawMessage `json:"source"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(scanner.Bytes(), &event) != nil {
 			continue
 		}
 		if event.Payload.Cwd != "" {
-			return event.Payload.ID, event.Payload.Cwd
+			// A top-level session's source is a plain string
+			// ("cli"/"vscode"/"exec"); a subagent's is an object with a
+			// "subagent" key (guardian auto-review, thread_spawn workers).
+			return event.Payload.ID, event.Payload.Cwd, isSubagentSource(event.Payload.Source)
 		}
 	}
-	return "", ""
+	return "", "", false
+}
+
+func isSubagentSource(raw json.RawMessage) bool {
+	if len(raw) == 0 || raw[0] != '{' {
+		return false
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	_, ok := obj["subagent"]
+	return ok
 }

@@ -47,29 +47,32 @@ func applyNames(cfg config.Config, projects []*Project) {
 	for _, project := range projects {
 		for i := range project.Sessions {
 			session := &project.Sessions[i]
-			if session.Target == "codex" {
-				if name, ok := codexNames[session.ID]; ok {
-					session.CustomName = name
-				}
-			}
+			// Resolve name + model from the mtime-keyed cache or by scanning
+			// the session file.
 			file := session.SourcePath
 			if file == "" {
 				file = session.BackupPath
 			}
-			if file == "" {
-				continue
+			if file != "" {
+				mod := newest(*session).Unix()
+				if entry, ok := cache[session.ID]; ok && entry.Mod == mod {
+					session.CustomName = entry.Name
+					session.LastModel = entry.Model
+				} else {
+					name, model := scanFileMeta(file)
+					session.CustomName = name
+					session.LastModel = model
+					cache[session.ID] = nameEntry{Name: name, Model: model, Mod: mod}
+					dirty = true
+				}
 			}
-			mod := newest(*session).Unix()
-			if entry, ok := cache[session.ID]; ok && entry.Mod == mod {
-				session.CustomName = entry.Name
-				session.LastModel = entry.Model
-				continue
+			// Codex's own thread name (from its session index) is the user's
+			// chosen title, so it wins over anything scanned from the file.
+			if session.Target == "codex" {
+				if name, ok := codexNames[session.ID]; ok && name != "" {
+					session.CustomName = name
+				}
 			}
-			name, model := scanFileMeta(file)
-			session.CustomName = name
-			session.LastModel = model
-			cache[session.ID] = nameEntry{Name: name, Model: model, Mod: mod}
-			dirty = true
 		}
 		project.NamesLoaded = true
 	}

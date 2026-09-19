@@ -565,7 +565,7 @@ func copyTree(src string, dst string) error {
 }
 
 func codexCwdOf(path string) string {
-	_, cwd := targets.CodexSessionMeta(path)
+	_, cwd, _ := targets.CodexSessionMeta(path)
 	return cwd
 }
 

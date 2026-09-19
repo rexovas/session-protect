@@ -134,6 +134,43 @@ func TestApplyNamesCache(t *testing.T) {
 	}
 }
 
+// A codex session's thread name (from its session index) is its custom
+// title and must win over anything scanned from the rollout file.
+func TestCodexThreadNameBecomesTitle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	configPath := filepath.Join(home, "config.toml")
+	writeFile(t, configPath, "backup_root = \""+filepath.Join(home, "root")+"\"\n")
+	t.Setenv("SESSION_PROTECT_CONFIG", configPath)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	projectPath := filepath.Join(home, "work", "app")
+	writeFile(t, filepath.Join(home, ".codex", "sessions", "2026", "01a0.jsonl"),
+		`{"type":"session_meta","payload":{"id":"01a0","cwd":"`+projectPath+`","source":"cli"}}`)
+	// Two index entries for the same session: the newer updated_at wins.
+	writeFile(t, filepath.Join(home, ".codex", "session_index.jsonl"),
+		`{"id":"01a0","thread_name":"OLD-NAME","updated_at":"2026-09-18T00:00:00Z"}
+{"id":"01a0","thread_name":"MY-CODEX-THREAD","updated_at":"2026-09-19T00:00:00Z"}
+`)
+
+	projects := ScanNamed(cfg)
+	var got string
+	for _, p := range projects {
+		for _, s := range p.Sessions {
+			if s.ID == "01a0" {
+				got = s.CustomName
+			}
+		}
+	}
+	if got != "MY-CODEX-THREAD" {
+		t.Fatalf("codex custom name = %q, want MY-CODEX-THREAD (latest thread name)", got)
+	}
+}
+
 func TestScanSurfacesLostSessions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

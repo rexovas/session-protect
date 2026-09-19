@@ -132,11 +132,32 @@ type model struct {
 	tailOffset   int // lines scrolled up from the bottom
 	// The menu pane collapses the non-navigation views behind one key:
 	// tab-switchable stats / activity (audit log, newest first) / keys.
-	showMenu  bool
-	menuTab   int // 0 stats · 1 activity · 2 keys
-	stats     *Stats
-	activity  []audit.Entry
-	actOffset int
+	showMenu bool
+	menuTab  int // 0 stats · 1 activity · 2 keys
+	// Session groups (virtual, cross-project; a view, never a move).
+	showGroups        bool
+	groups            []Group
+	gCursor           int             // group-list cursor
+	groupOpen         *Group          // the group currently scoped into the browser (nil = not scoped)
+	fullProjects      []*Project      // saved full project set while a group is scoped
+	scopeRoot         string          // browser root of the active group scope
+	confirmDelGroup   *Group          // group awaiting delete confirmation
+	groupNaming       string          // "" | new | snapshot | addnew
+	groupInput        string          // name being typed
+	addIDs            []string        // session ids awaiting a group choice (1 hovered, or many selected)
+	addLabel          string          // picker label for the pending add
+	agCursor          int             // add-to-group picker cursor
+	selected          map[string]bool // multi-select set in the session pane
+	selectMode        bool            // explicit multi-select mode (v)
+	groupShowArchived bool            // reveal archived members in the open group
+	confirmResumeAll  *Group          // resume-all confirmation
+	confirmResumeSel  []Session       // resume-selected confirmation (select mode)
+	saveAsIDs         []string        // group membership being saved under a new name
+	mergeSource       *Group          // group being merged into another
+	mgCursor          int             // merge-target picker cursor
+	stats             *Stats
+	activity          []audit.Entry
+	actOffset         int
 
 	// confirmRestore holds the recoverable session awaiting a y/enter before
 	// its backup copy is written back into the live tree; confirmResume
@@ -263,11 +284,13 @@ type rescueAIMsg struct {
 // and how many more sit in subfolders (excluded, but named so the
 // non-recursive boundary is visible).
 type bulkRescue struct {
-	folder string
-	path   string
-	lost   []Session
-	nested int
-	claude int // how many of lost are claude (rebuild-eligible)
+	folder    string
+	path      string
+	lost      []Session
+	nested    int
+	recovered int  // eligible-but-skipped: lost sessions already rebuilt
+	claude    int  // how many of lost are claude (rebuild-eligible)
+	selection bool // true = the selected-session set, not a folder
 }
 
 // indexProgress is shared between the build goroutine and the render:
@@ -327,6 +350,7 @@ func newModel(cfg config.Config) model {
 	}
 	m := model{cfg: cfg, projects: projects, start: start, width: 100, height: 32}
 	m.root = NearestRoot(projects, start)
+	m.groups = LoadGroups(cfg)
 	m.rebuild()
 	return m
 }
@@ -701,6 +725,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case bulkDoneMsg:
 		m.bulkBusy = false
+		// A selection rescue consumes the selection; leave select mode clean.
+		m.selectMode, m.selected = false, nil
 		verb := map[string]string{"export": "exported", "rebuild": "rebuilt", "rebuild-ai": "rebuilt with AI"}[msg.action]
 		parts := fmt.Sprintf("%s %d session(s)", verb, msg.ok)
 		if msg.failed > 0 {
@@ -722,7 +748,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tick(), func() tea.Msg { return rescanMsg(ScanNamed(cfg)) })
 	case rescanMsg:
 		m.scanning = false
+		if m.groupOpen != nil {
+			// Keep the auto group and re-apply the active scope; the full
+			// set lives in fullProjects while scoped.
+			if groups, _ := snapshotOpen(m.cfg, m.groups, allProjectSessions(msg), ""); groups != nil {
+				m.groups = groups
+			}
+			m = m.rescopeGroup(msg)
+			return m, nil
+		}
 		m.projects = msg
+		// Keep the reserved "recently open" group current so a workspace
+		// survives a reboot.
+		if groups, _ := snapshotOpen(m.cfg, m.groups, allProjectSessions(msg), ""); groups != nil {
+			m.groups = groups
+		}
 		// The hits pane holds Session copies from before the rescan;
 		// refresh them so state changes (a rescue, a restore) show.
 		if len(m.hits) > 0 {
@@ -910,6 +950,171 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollTail(10)
 		case "pgdown":
 			m.scrollTail(-10)
+		}
+		return m, nil
+	}
+	if len(m.addIDs) > 0 {
+		if m.groupNaming == "addnew" {
+			return m.handleGroupNaming(msg), nil
+		}
+		names := manualGroupNames(m.groups)
+		rows := len(names) + 1 // + new group
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.addIDs, m.agCursor = nil, 0
+		case "up", "k":
+			m.agCursor = (m.agCursor + rows - 1) % rows
+		case "down", "j":
+			m.agCursor = (m.agCursor + 1) % rows
+		case "enter":
+			if m.agCursor == len(names) {
+				m.groupNaming, m.groupInput = "addnew", ""
+				break
+			}
+			var added int
+			m.groups, added = addSessionsToGroup(m.cfg, m.groups, names[m.agCursor], m.addIDs)
+			total := len(m.addIDs)
+			m.addIDs, m.agCursor, m.selected, m.selectMode = nil, 0, nil, false
+			m.notice = fmt.Sprintf("added %d of %d to “%s”", added, total, names[m.agCursor])
+		}
+		return m, nil
+	}
+	if m.confirmResumeAll != nil {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
+			m.confirmSel = (m.confirmSel + 1) % 2
+		case "esc", "n":
+			m.confirmResumeAll = nil
+		case "enter":
+			grp := *m.confirmResumeAll
+			m.confirmResumeAll = nil
+			if m.confirmSel == 0 {
+				m = m.runResumeAll(grp)
+			}
+		}
+		return m, nil
+	}
+	if m.confirmResumeSel != nil {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
+			m.confirmSel = (m.confirmSel + 1) % 2
+		case "esc", "n":
+			m.confirmResumeSel = nil
+		case "enter":
+			members := m.confirmResumeSel
+			m.confirmResumeSel = nil
+			if m.confirmSel == 0 {
+				m = m.runResumeSessions(members)
+				m.selectMode, m.selected = false, nil
+			}
+		}
+		return m, nil
+	}
+	if m.confirmDelGroup != nil {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "left", "right", "tab", "h", "l", "up", "down", "j", "k":
+			m.confirmSel = (m.confirmSel + 1) % 2
+		case "esc", "n":
+			m.confirmDelGroup = nil
+		case "enter":
+			if m.confirmSel == 0 {
+				m.groups = deleteGroup(m.cfg, m.groups, m.confirmDelGroup.Name)
+				m.notice = "deleted group “" + m.confirmDelGroup.Name + "”"
+				m.gCursor = 0
+			}
+			m.confirmDelGroup = nil
+		}
+		return m, nil
+	}
+	if m.mergeSource != nil {
+		targets := m.mergeTargets(m.mergeSource.Name)
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.mergeSource, m.mgCursor = nil, 0
+		case "up", "k":
+			if len(targets) > 0 {
+				m.mgCursor = (m.mgCursor + len(targets) - 1) % len(targets)
+			}
+		case "down", "j":
+			if len(targets) > 0 {
+				m.mgCursor = (m.mgCursor + 1) % len(targets)
+			}
+		case "enter":
+			if m.mgCursor < len(targets) {
+				target := targets[m.mgCursor]
+				added := 0
+				for _, id := range m.mergeSource.Sessions {
+					var ok bool
+					m.groups, ok = addSessionToGroup(m.cfg, m.groups, target, id)
+					if ok {
+						added++
+					}
+				}
+				m.notice = fmt.Sprintf("merged %d new session(s) into “%s”", added, target)
+				m.mergeSource, m.mgCursor = nil, 0
+			}
+		}
+		return m, nil
+	}
+	if m.showGroups && m.confirmResume == nil {
+		if m.groupNaming != "" {
+			return m.handleGroupNaming(msg), nil
+		}
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc", "q", "w":
+			m.showGroups, m.gCursor = false, 0
+		case "up", "k":
+			if len(m.groups) > 0 {
+				m.gCursor = (m.gCursor + len(m.groups) - 1) % len(m.groups)
+			}
+		case "down", "j":
+			if len(m.groups) > 0 {
+				m.gCursor = (m.gCursor + 1) % len(m.groups)
+			}
+		case "enter", "right", "l":
+			if m.gCursor < len(m.groups) && len(m.groups[m.gCursor].Sessions) > 0 {
+				return m.enterGroupScope(m.groups[m.gCursor]), nil
+			}
+		case "o":
+			if m.gCursor < len(m.groups) && len(m.groups[m.gCursor].Sessions) > 0 {
+				m.confirmResumeAll = &m.groups[m.gCursor]
+				m.confirmSel = 1
+			}
+		case "n":
+			m.groupNaming, m.groupInput = "new", ""
+		case "s":
+			m.groupNaming, m.groupInput = "snapshot", ""
+		case "d":
+			if m.gCursor < len(m.groups) && !m.groups[m.gCursor].Auto {
+				grp := m.groups[m.gCursor]
+				m.confirmDelGroup = &grp
+				m.confirmSel = 1 // Cancel default
+			}
+		case "c":
+			// Copy this group's membership into a new named group —
+			// freezes the ephemeral auto group into a durable one.
+			if m.gCursor < len(m.groups) && len(m.groups[m.gCursor].Sessions) > 0 {
+				m.saveAsIDs = append([]string(nil), m.groups[m.gCursor].Sessions...)
+				m.groupNaming, m.groupInput = "saveas", ""
+			}
+		case "M":
+			// Merge this group's sessions into another (union; both kept).
+			if m.gCursor < len(m.groups) && len(m.mergeTargets(m.groups[m.gCursor].Name)) > 0 {
+				src := m.groups[m.gCursor]
+				m.mergeSource, m.mgCursor = &src, 0
+			}
 		}
 		return m, nil
 	}
@@ -1570,10 +1775,96 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		m.showLost = !m.showLost
 		m.rebuild()
+	case "w":
+		if m.groupOpen != nil {
+			return m.exitGroupScope(), nil
+		}
+		m.groups = LoadGroups(m.cfg)
+		m.showGroups, m.gCursor = true, 0
+	case "v":
+		// Toggle multi-select mode. Entering it drops into the session
+		// pane so there is something to select; leaving clears the set.
+		m.selectMode = !m.selectMode
+		if m.selectMode {
+			if !m.showSessions && !m.showAll && !m.showHits && len(m.folders) > 0 && m.sessionCount() > 0 {
+				m.showSessions = true
+				m.setCursor(m.currentCursor())
+			}
+		} else {
+			m.selected = nil
+		}
+	case " ":
+		// Select only in select mode, and only on a session row.
+		if m.selectMode {
+			if session := m.selectedSession(); session != nil {
+				if m.selected == nil {
+					m.selected = map[string]bool{}
+				}
+				if m.selected[session.ID] {
+					delete(m.selected, session.ID)
+				} else {
+					m.selected[session.ID] = true
+				}
+			}
+		}
+	case "+":
+		if len(m.selected) > 0 {
+			for id := range m.selected {
+				m.addIDs = append(m.addIDs, id)
+			}
+			m.addLabel = fmt.Sprintf("%d selected session(s)", len(m.addIDs))
+			m.agCursor = 0
+		} else if session := m.selectedSession(); session != nil {
+			label := session.CustomName
+			if label == "" {
+				label = session.Title
+			}
+			if label == "" {
+				label = session.ID
+			}
+			m.addIDs, m.addLabel, m.agCursor = []string{session.ID}, label, 0
+		}
+	case "-":
+		// While scoped into a group, remove the highlighted session.
+		if m.groupOpen != nil && !m.groupOpen.Auto {
+			if session := m.selectedSession(); session != nil {
+				m.groups = removeSessionFromGroup(m.cfg, m.groups, m.groupOpen.Name, session.ID)
+				if i := groupByName(m.groups, m.groupOpen.Name); i >= 0 {
+					m = m.rescopeGroupTo(m.groups[i])
+				}
+				m.notice = "removed from “" + m.groupOpen.Name + "”"
+			}
+		}
+	case "e":
+		// Archive / unarchive the highlighted session within the group.
+		if m.groupOpen != nil && !m.groupOpen.Auto {
+			if session := m.selectedSession(); session != nil {
+				now := !isArchived(*m.groupOpen, session.ID)
+				m.groups = setArchived(m.cfg, m.groups, m.groupOpen.Name, session.ID, now)
+				if i := groupByName(m.groups, m.groupOpen.Name); i >= 0 {
+					m = m.rescopeGroupTo(m.groups[i])
+				}
+				if now {
+					m.notice = "archived in “" + m.groupOpen.Name + "” (z to show archived)"
+				} else {
+					m.notice = "unarchived"
+				}
+			}
+		}
+	case "z":
+		// Toggle visibility of archived members in the open group.
+		if m.groupOpen != nil {
+			m.groupShowArchived = !m.groupShowArchived
+			m = m.rescopeGroup(m.fullProjects)
+		}
 	case "i":
 		(&m).openDetail()
 	case "r":
-		if m.showSessions || m.showAll || m.showHits {
+		if m.selectMode {
+			// In select mode r rescues the checked lost sessions in bulk,
+			// so it never falls through to single-session or folder rescue.
+			m = m.pressBulkRescueSelected()
+		} else if m.showSessions || m.showAll || m.showHits {
 			if session := m.selectedSession(); session != nil {
 				m = m.pressRescue(*session)
 			}
@@ -1630,6 +1921,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+b":
 		return m.pressBuildIndex()
 	case "o":
+		if m.selectMode {
+			// In select mode o opens/resumes every checked session at once.
+			m = m.pressResumeSelected()
+			break
+		}
 		session := m.selectedSession()
 		if session == nil {
 			break
@@ -1681,6 +1977,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rebuild()
 		}
 	case "esc", "backspace", "h", "left":
+		// Select mode is a modal overlay on whatever pane it was entered from,
+		// so esc/back must leave it first — before any pane navigation.
+		if m.selectMode {
+			m.selectMode, m.selected = false, nil
+			return m, nil
+		}
 		if m.showHits {
 			m.showHits = false
 			return m, nil
@@ -1702,6 +2004,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showSessions = false
 			m.setCursor(m.currentCursor())
 			return m, nil
+		}
+		if m.groupOpen != nil && len(m.trail) == 0 && m.root == m.scopeRoot {
+			return m.exitGroupScope(), nil
 		}
 		m.goUp()
 	}
@@ -1815,35 +2120,86 @@ func (m model) pressBulkRescue() model {
 	}
 	folder := m.folders[m.fCursor]
 	var lost []Session
-	claude := 0
+	claude, directLost, recovered := 0, 0, 0
 	for _, project := range m.projects {
 		if project.Path != folder.Path {
 			continue
 		}
 		for _, session := range project.Sessions {
-			if session.State == "LOST" {
-				session.ProjectPath = project.Path
-				lost = append(lost, session)
-				if session.Target == "claude" {
-					claude++
-				}
+			if session.State != "LOST" {
+				continue
+			}
+			directLost++
+			// Already-recovered originals are skipped: they have a
+			// surviving reconstruction, so rescuing again would only
+			// make a duplicate.
+			if len(m.validRebuilds(session)) > 0 {
+				recovered++
+				continue
+			}
+			session.ProjectPath = project.Path
+			lost = append(lost, session)
+			if session.Target == "claude" {
+				claude++
 			}
 		}
 	}
-	nested := folder.Lost - len(lost)
+	nested := folder.Lost - directLost
 	if nested < 0 {
 		nested = 0
 	}
 	if len(lost) == 0 {
-		if nested > 0 {
+		switch {
+		case recovered > 0 && nested > 0:
+			m.notice, m.noticeErr = fmt.Sprintf("all lost sessions directly in %s are already recovered — %d more are in subfolders", folder.Name, nested), true
+		case recovered > 0:
+			m.notice, m.noticeErr = fmt.Sprintf("all lost sessions directly in %s are already recovered", folder.Name), true
+		case nested > 0:
 			m.notice, m.noticeErr = fmt.Sprintf("no lost sessions directly in %s — %d are in subfolders, open one to rescue them", folder.Name, nested), true
-		} else {
+		default:
 			m.notice, m.noticeErr = "no lost sessions in "+folder.Name, true
 		}
 		return m
 	}
-	m.confirmBulk = &bulkRescue{folder: folder.Name, path: folder.Path, lost: lost, nested: nested, claude: claude}
+	m.confirmBulk = &bulkRescue{folder: folder.Name, path: folder.Path, lost: lost, nested: nested, recovered: recovered, claude: claude}
 	m.bulkFolder = folder.Name
+	m.confirmSel = len(m.bulkButtons(*m.confirmBulk)) - 1 // Cancel default
+	return m
+}
+
+// pressBulkRescueSelected opens the bulk rescue dialog over the lost
+// sessions currently selected in select mode. Like the folder path,
+// already-recovered originals are skipped, and non-lost selections are
+// simply ignored (only lost sessions can be rescued).
+func (m model) pressBulkRescueSelected() model {
+	byID := m.sessionIndex()
+	var lost []Session
+	claude, recovered := 0, 0
+	for id := range m.selected {
+		session, ok := byID[id]
+		if !ok || session.State != "LOST" {
+			continue
+		}
+		if len(m.validRebuilds(session)) > 0 {
+			recovered++
+			continue
+		}
+		lost = append(lost, session)
+		if session.Target == "claude" {
+			claude++
+		}
+	}
+	if len(lost) == 0 {
+		if recovered > 0 {
+			m.notice, m.noticeErr = "every lost session in the selection is already recovered", true
+		} else {
+			m.notice, m.noticeErr = "no lost sessions selected — check some ✕ lost sessions to bulk-recover", true
+		}
+		return m
+	}
+	sort.Slice(lost, func(i, j int) bool { return lost[i].Modified.After(lost[j].Modified) })
+	m.confirmBulk = &bulkRescue{folder: fmt.Sprintf("the selection (%d)", len(lost)), path: m.root, lost: lost, recovered: recovered, claude: claude, selection: true}
+	m.bulkFolder = "selection"
 	m.confirmSel = len(m.bulkButtons(*m.confirmBulk)) - 1 // Cancel default
 	return m
 }
@@ -1854,6 +2210,174 @@ func (m model) bulkButtons(b bulkRescue) []string {
 		return []string{"Rebuild all", "Rebuild with AI all", "Export all", "Cancel"}
 	}
 	return []string{"Export all", "Cancel"}
+}
+
+// allProjectSessions flattens every project's sessions machine-wide.
+// "What is open" is a global fact, so snapshots must span all projects
+// rather than only the current browse root.
+func allProjectSessions(projects []*Project) []Session {
+	var all []Session
+	for _, project := range projects {
+		for _, session := range project.Sessions {
+			session.ProjectPath = project.Path
+			all = append(all, session)
+		}
+	}
+	return all
+}
+
+// sessionIndex maps every session id (across all projects) to its
+// record — groups are cross-project, so lookups span the whole scan.
+func (m model) sessionIndex() map[string]Session {
+	byID := map[string]Session{}
+	for _, project := range m.projects {
+		for _, session := range project.Sessions {
+			session.ProjectPath = project.Path
+			byID[session.ID] = session
+		}
+	}
+	return byID
+}
+
+// manualGroupNames lists user groups (excluding the auto group, which is
+// not a hand-curated destination).
+func manualGroupNames(groups []Group) []string {
+	var names []string
+	for _, g := range groups {
+		if !g.Auto {
+			names = append(names, g.Name)
+		}
+	}
+	return names
+}
+
+// mergeTargets lists manual groups other than the named source — the
+// valid destinations for a merge (the auto group is never a target).
+func (m model) mergeTargets(source string) []string {
+	var out []string
+	for _, g := range m.groups {
+		if !g.Auto && g.Name != source {
+			out = append(out, g.Name)
+		}
+	}
+	return out
+}
+
+// handleGroupNaming edits and commits a group name for the new /
+// snapshot / add-new flows.
+func (m model) handleGroupNaming(msg tea.KeyMsg) model {
+	switch msg.String() {
+	case "esc":
+		if m.groupNaming == "addnew" {
+			m.addIDs, m.agCursor, m.selected = nil, 0, nil
+		}
+		m.groupNaming, m.groupInput = "", ""
+	case "backspace":
+		if r := []rune(m.groupInput); len(r) > 0 {
+			m.groupInput = string(r[:len(r)-1])
+		}
+	case "enter":
+		name := strings.TrimSpace(m.groupInput)
+		if name != "" && name != autoGroupName {
+			switch m.groupNaming {
+			case "new":
+				m.groups, _ = addSessionToGroup(m.cfg, m.groups, name, "") // empty group
+				m.groups = removeSessionFromGroup(m.cfg, m.groups, name, "")
+			case "snapshot":
+				var n int
+				m.groups, n = snapshotOpen(m.cfg, m.groups, allProjectSessions(m.projects), name)
+				m.notice = fmt.Sprintf("snapshotted %d open session(s) → “%s”", n, name)
+			case "saveas":
+				for _, id := range m.saveAsIDs {
+					m.groups, _ = addSessionToGroup(m.cfg, m.groups, name, id)
+				}
+				m.notice = fmt.Sprintf("saved %d session(s) → new group “%s”", len(m.saveAsIDs), name)
+				m.saveAsIDs = nil
+				if m.groupOpen != nil {
+					if i := groupByName(m.groups, m.groupOpen.Name); i >= 0 {
+						m.groupOpen = &m.groups[i]
+					}
+				}
+			case "addnew":
+				added := 0
+				if len(m.addIDs) > 0 {
+					m.groups, added = addSessionsToGroup(m.cfg, m.groups, name, m.addIDs)
+				}
+				m.notice = fmt.Sprintf("added %d session(s) to new group “%s”", added, name)
+				m.addIDs, m.agCursor, m.selected, m.selectMode = nil, 0, nil, false
+			}
+		}
+		m.groupNaming, m.groupInput = "", ""
+	default:
+		if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+			m.groupInput += msg.String()
+		}
+	}
+	return m
+}
+
+// runResumeAll spawns a new terminal window resuming each closed member
+// of a group (open members are already running).
+func (m model) runResumeAll(grp Group) model {
+	return m.runResumeSessions(groupMembers(grp, m.sessionIndex()))
+}
+
+// runResumeSessions spawns a new terminal window resuming each closed
+// session in the set. Already-open sessions are left alone (counted), and
+// lost originals are skipped — they have no transcript to resume.
+func (m model) runResumeSessions(members []Session) model {
+	ok, failed, live, lost := 0, 0, 0, 0
+	for _, s := range members {
+		switch {
+		case s.LiveStatus != "" && s.LivePID > 0:
+			live++
+			continue
+		case s.State == "LOST":
+			lost++
+			continue
+		}
+		project := s.ProjectPath
+		if project == "" {
+			project = m.root
+		}
+		if err := spawnWindow(resumeCommand(s, project)); err != nil {
+			failed++
+		} else {
+			ok++
+		}
+	}
+	m.notice = fmt.Sprintf("resuming %d session(s) in new windows", ok)
+	if live > 0 {
+		m.notice += fmt.Sprintf(" (%d already open)", live)
+	}
+	if lost > 0 {
+		m.notice += fmt.Sprintf(" — %d lost skipped", lost)
+	}
+	if failed > 0 {
+		m.notice += fmt.Sprintf(" — %d failed", failed)
+		m.noticeErr = true
+	}
+	return m
+}
+
+// pressResumeSelected opens the resume-all confirmation for the sessions
+// currently checked in select mode.
+func (m model) pressResumeSelected() model {
+	byID := m.sessionIndex()
+	var members []Session
+	for id := range m.selected {
+		if s, ok := byID[id]; ok {
+			members = append(members, s)
+		}
+	}
+	if len(members) == 0 {
+		m.notice, m.noticeErr = "no sessions selected to open", true
+		return m
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].Modified.After(members[j].Modified) })
+	m.confirmResumeSel = members
+	m.confirmSel = 1 // Cancel default
+	return m
 }
 
 func (m model) selectedSession() *Session {
@@ -2171,6 +2695,86 @@ func (m model) View() string {
 		body = append(body, "", styleDim.Render(truncate(detail, 74)))
 		return m.inputDialog(heading, body, "↑/↓ choose · enter confirm · → open · ← up · / filter · ~ jump to path")
 	}
+	if m.confirmDelGroup != nil {
+		grp := *m.confirmDelGroup
+		body := []string{
+			styleBold.Render("“"+grp.Name+"”") + styleDim.Render(fmt.Sprintf(" — %d session(s)", len(grp.Sessions))),
+			"",
+			styleDim.Render("removes the group only — the sessions themselves are untouched"),
+		}
+		return m.dialog("Delete this group?", body, "Delete", "Cancel")
+	}
+	if m.mergeSource != nil {
+		targets := m.mergeTargets(m.mergeSource.Name)
+		body := []string{
+			styleDim.Render("merge ") + styleBold.Render(m.mergeSource.Name) +
+				styleDim.Render(fmt.Sprintf(" (%d session(s)) into:", len(m.mergeSource.Sessions))),
+			"",
+		}
+		for i, name := range targets {
+			row := "  " + name
+			if i == m.mgCursor {
+				row = styleCursor.Render("❯ " + name)
+			}
+			body = append(body, row)
+		}
+		body = append(body, "", styleDim.Render("union — both groups kept; delete the source after if you want"))
+		return m.inputDialog("Merge into which group?", body, "↑/↓ choose · enter merge · esc cancel")
+	}
+	if len(m.addIDs) > 0 && m.groupNaming != "addnew" {
+		names := manualGroupNames(m.groups)
+		body := []string{styleDim.Render("add ") + truncate(m.addLabel, 60), ""}
+		for i, name := range names {
+			row := "  " + name
+			if i == m.agCursor {
+				row = styleCursor.Render("❯ " + name)
+			}
+			body = append(body, row)
+		}
+		newRow := "  ＋ new group"
+		if m.agCursor == len(names) {
+			newRow = styleCursor.Render("❯ ＋ new group")
+		}
+		body = append(body, newRow)
+		return m.inputDialog("Add to which group?", body, "↑/↓ choose · enter add · esc cancel")
+	}
+	if m.confirmResumeAll != nil {
+		grp := *m.confirmResumeAll
+		members := groupMembers(grp, m.sessionIndex())
+		closed := 0
+		for _, s := range members {
+			if s.LiveStatus == "" {
+				closed++
+			}
+		}
+		body := []string{
+			styleBold.Render(fmt.Sprintf("“%s” — %d session(s)", grp.Name, len(members))),
+			styleDim.Render(fmt.Sprintf("%d will open in new terminal windows (%d already open)", closed, len(members)-closed)),
+		}
+		return m.dialog("Resume all in this group?", body, "Resume all", "Cancel")
+	}
+	if m.confirmResumeSel != nil {
+		members := m.confirmResumeSel
+		closed, live, lost := 0, 0, 0
+		for _, s := range members {
+			switch {
+			case s.LiveStatus != "" && s.LivePID > 0:
+				live++
+			case s.State == "LOST":
+				lost++
+			default:
+				closed++
+			}
+		}
+		body := []string{
+			styleBold.Render(fmt.Sprintf("%d selected session(s)", len(members))),
+			styleDim.Render(fmt.Sprintf("%d will open in new terminal windows (%d already open)", closed, live)),
+		}
+		if lost > 0 {
+			body = append(body, styleStale.Render(fmt.Sprintf("%d lost — skipped (no transcript to resume)", lost)))
+		}
+		return m.dialog("Resume all selected sessions?", body, "Resume all", "Cancel")
+	}
 	if m.indexBusy {
 		done, total := int64(0), int64(0)
 		if m.indexProg != nil {
@@ -2225,20 +2829,32 @@ func (m model) View() string {
 			"Cancel":              {"closes this dialog without touching anything", ""},
 		}
 		desc := describe[labels[min(m.confirmSel, len(labels)-1)]]
-		scope := fmt.Sprintf("%d lost session(s) directly in %s", len(bulk.lost), bulk.folder)
-		body := []string{
-			styleBold.Render(scope),
-			styleDim.Render("this folder only — nested subfolders are never included"),
+		var body []string
+		title := "Rescue all lost sessions in this folder?"
+		if bulk.selection {
+			title = "Rescue the selected lost sessions?"
+			body = []string{
+				styleBold.Render(fmt.Sprintf("%d lost session(s) checked in select mode", len(bulk.lost))),
+				styleDim.Render("only lost sessions are rescued — any other checked sessions are ignored"),
+			}
+		} else {
+			body = []string{
+				styleBold.Render(fmt.Sprintf("%d lost session(s) directly in %s", len(bulk.lost), bulk.folder)),
+				styleDim.Render("this folder only — nested subfolders are never included"),
+			}
+			if bulk.nested > 0 {
+				body = append(body, styleStale.Render(fmt.Sprintf("(%d more lost sessions live in subfolders — open one to rescue those)", bulk.nested)))
+			}
 		}
-		if bulk.nested > 0 {
-			body = append(body, styleStale.Render(fmt.Sprintf("(%d more lost sessions live in subfolders — open one to rescue those)", bulk.nested)))
+		if bulk.recovered > 0 {
+			body = append(body, styleRecover.Render(fmt.Sprintf("(%d already recovered — skipped)", bulk.recovered)))
 		}
 		if bulk.claude > 0 && bulk.claude < len(bulk.lost) {
 			body = append(body, styleDim.Render(fmt.Sprintf("%d claude · %d codex — rebuild acts on claude only, export on both", bulk.claude, len(bulk.lost)-bulk.claude)))
 		}
 		body = append(body, "", styleDim.Render(desc[0]), styleDim.Render(desc[1]),
 			styleDim.Render("all rescue into ONE destination you pick next"))
-		return m.dialog("Rescue all lost sessions in this folder?", body, labels...)
+		return m.dialog(title, body, labels...)
 	}
 	if m.confirmRescue != nil {
 		session := *m.confirmRescue
@@ -2333,6 +2949,9 @@ func (m model) View() string {
 	if m.showMenu {
 		return m.menuView()
 	}
+	if m.showGroups {
+		return m.groupsView()
+	}
 	if m.showTransplant {
 		return m.transplantView()
 	}
@@ -2361,7 +2980,17 @@ func (m model) View() string {
 	if m.showAll {
 		countStyle = styleCursor // the all pane is exactly this set
 	}
-	left := styleHeader.Render("Session Explorer ▸ "+truncate(name, 40)) + countStyle.Render(beneath)
+	crumb := "Session Explorer ▸ " + truncate(name, 40)
+	if m.selectMode {
+		crumb += styleActive.Render("  ✓ SELECT")
+	}
+	if m.groupOpen != nil {
+		crumb = "Session Explorer ▸ group: " + truncate(m.groupOpen.Name, 30) + " ▸ " + truncate(name, 30)
+		if m.groupShowArchived {
+			crumb += styleDim.Render("  (showing archived)")
+		}
+	}
+	left := styleHeader.Render(crumb) + countStyle.Render(beneath)
 	right := m.tabBar()
 	if pad := m.width - lipgloss.Width(left) - lipgloss.Width(right); pad > 0 {
 		left += strings.Repeat(" ", pad)
@@ -2408,7 +3037,13 @@ func (m model) View() string {
 		b.WriteString("\n " + noticeStyle.Render(truncate(m.notice, m.width-2)) + "\n")
 	}
 
-	help := "↑/↓ move · enter open · ← back · tab panes · ctrl+a all · m menu · q quit"
+	help := "↑/↓ move · enter open · o resume · v select · w groups · + add to group · m menu · q"
+	if m.groupOpen != nil {
+		help = "in group “" + truncate(m.groupOpen.Name, 20) + "” · o resume · + add · - remove · e archive · z show/hide archived · w back"
+	}
+	if m.selectMode {
+		help = fmt.Sprintf("SELECT MODE (%d) · space toggle · o open all · + add all to a group · r recover lost · v/esc exit", len(m.selected))
+	}
 	if m.searching {
 		help = "/" + m.query + "▌   enter keep · ctrl+s transcripts · ctrl+g ai find · esc cancel"
 	} else if m.query != "" {
@@ -2423,9 +3058,11 @@ func (m model) View() string {
 			help = m.spinGlyph() + " asking the local model about \"" + m.hitsQuery + "\" …"
 		}
 	}
-	// Explain the health markers on the highlighted row rather than
-	// leaving cryptic glyphs unlabeled.
-	if !m.searching && m.query == "" && !m.hitsBusy && m.filterSummary() == "" && m.fCursor < len(m.folders) {
+	// Explain the health markers on the highlighted FOLDER row — these
+	// hints are about a directory (r bulk-rescues its lost sessions, t
+	// transplants it), so they must not leak into the session views.
+	folderPane := !m.showSessions && !m.showAll && !m.showHits
+	if folderPane && !m.searching && m.query == "" && !m.hitsBusy && m.filterSummary() == "" && m.fCursor < len(m.folders) {
 		if f := m.folders[m.fCursor]; f.HomeGone {
 			help = "⌂! this project's directory is gone — t transplants its sessions somewhere that exists"
 		} else if f.Lost > 0 {
@@ -2627,6 +3264,62 @@ func (m *model) openDetail() {
 
 // menuView is the tabbed home of everything that is not navigation:
 // usage stats, the activity log, and the full key reference.
+// groupsView renders the Groups page: the list of groups, or one
+// group's members when opened, with a naming overlay when creating.
+func (m model) groupsView() string {
+	if m.groupNaming == "new" || m.groupNaming == "snapshot" || m.groupNaming == "saveas" {
+		kind := "new empty group"
+		switch m.groupNaming {
+		case "snapshot":
+			kind = "snapshot of currently-open sessions"
+		case "saveas":
+			kind = fmt.Sprintf("copy of this group's %d session(s) under a new name", len(m.saveAsIDs))
+		}
+		body := []string{
+			styleDim.Render(kind),
+			"",
+			styleActive.Render("❯ ") + m.groupInput + "▌",
+		}
+		return m.inputDialog("Name the group", body, "type a name · enter create · esc cancel")
+	}
+
+	var b strings.Builder
+	byID := m.sessionIndex()
+
+	b.WriteString(styleHeader.Render("Session Explorer ▸ groups") +
+		styleDim.Render(fmt.Sprintf("  %d group(s) ", len(m.groups))) + "\n")
+	b.WriteString(styleFooter.Render(strings.Repeat("─", max(m.width, 10))) + "\n")
+	if len(m.groups) == 0 {
+		b.WriteString(styleDim.Render("  no groups yet") + "\n\n")
+		b.WriteString(styleDim.Render("  s  snapshot your currently-open sessions into a group") + "\n")
+		b.WriteString(styleDim.Render("  n  create an empty group, then + on sessions to fill it") + "\n")
+		return m.pinBottomBare(b.String(), "s snapshot open · n new · esc close")
+	}
+	b.WriteString(styleDim.Render(fmt.Sprintf("  %-24s %8s %8s", "GROUP", "SESSIONS", "OPEN")) + "\n")
+	for i, grp := range m.groups {
+		members := groupMembers(grp, byID)
+		open := 0
+		for _, s := range members {
+			if s.LiveStatus != "" {
+				open++
+			}
+		}
+		name := grp.Name
+		if grp.Auto {
+			name = "◷ " + name
+		}
+		row := fmt.Sprintf("  %-24s %8d %8d", truncate(name, 24), len(members), open)
+		if i == m.gCursor {
+			b.WriteString(styleCursor.Render(fmt.Sprintf("%-*s", m.width, row)) + "\n")
+		} else if grp.Auto {
+			b.WriteString(styleStale.Render(row) + "\n")
+		} else {
+			b.WriteString(row + "\n")
+		}
+	}
+	return m.pinBottomBare(b.String(), "↑/↓ move · enter open · o resume all · s snapshot · n new · c copy · M merge · d delete · esc")
+}
+
 func (m model) menuView() string {
 	tab := func(label string, index int) string {
 		if m.menuTab == index {
@@ -3051,6 +3744,10 @@ func (m model) keysBody(b *strings.Builder) {
 	key("r", "restore a ✝ recover session · rescue a ✕ lost one (rebuild/export)")
 	key("t", "transplant: move/copy a session or project to another dir")
 	key("x", "show or hide ✕ lost sessions")
+	key("w", "groups: named session sets; open one to browse it scoped (/, tab, o all work)")
+	key("v · space", "multi-select mode; space toggles, then + adds all selected to a group")
+	key("+ · -", "add / remove the highlighted session (in a group)")
+	key("e · z", "in a group: archive a session · show/hide archived")
 	section("GLOBAL")
 	key("m", "this menu · s and a jump straight to stats / activity")
 	key("ctrl+r", "rescan now (automatic every 5s)")
@@ -3149,8 +3846,8 @@ func (m model) allSessionRow(session Session, active bool) string {
 	if session.LiveStatus != "" {
 		live = styleUnless(plain, styleActive, "▶")
 	}
-	row := fmt.Sprintf("%s%s  %s %-7s %-12s %8s  %-8s %s",
-		live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
+	row := fmt.Sprintf("%s%s%s  %s %-7s %-12s %8s  %-8s %s",
+		m.selectBox(session, plain), live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
 		truncate(displayModel(session.LastModel), 12), human.Bytes(session.Size), ago(session.Modified),
 		styleUnless(plain, styleDim, truncate(m.relOfRoot(session), 30)))
 	if active {
@@ -3978,6 +4675,18 @@ func (m model) folderRow(folder Folder, active bool) string {
 	return row
 }
 
+// selectBox renders the multi-select checkbox shown before each session
+// row while in select mode: [x] checked, [ ] unchecked. Empty otherwise.
+func (m model) selectBox(session Session, plain bool) string {
+	if !m.selectMode {
+		return ""
+	}
+	if m.selected[session.ID] {
+		return styleUnless(plain, styleOK, "[x] ")
+	}
+	return styleUnless(plain, styleDim, "[ ] ")
+}
+
 func (m model) sessionRow(session Session, active bool) string {
 	state, style := sessionStateFor(session)
 	// Open sessions render the entire row in gold so live work stands
@@ -3992,9 +4701,13 @@ func (m model) sessionRow(session Session, active bool) string {
 	if session.State == "LOST" {
 		size = fmt.Sprintf("%dp", session.Prompts)
 	}
-	row := fmt.Sprintf("%s%s  %s %-7s %-12s %8s  %s",
-		live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
-		truncate(displayModel(session.LastModel), 12), size, ago(session.Modified))
+	archived := ""
+	if m.groupOpen != nil && isArchived(*m.groupOpen, session.ID) {
+		archived = styleUnless(plain, styleDim, "  · archived")
+	}
+	row := fmt.Sprintf("%s%s%s  %s %-7s %-12s %8s  %s%s",
+		m.selectBox(session, plain), live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
+		truncate(displayModel(session.LastModel), 12), size, ago(session.Modified), archived)
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))
 	}

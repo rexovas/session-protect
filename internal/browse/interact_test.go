@@ -14,6 +14,7 @@ import (
 	"github.com/rexovas/session-protect/internal/assist"
 	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/focus"
 	"github.com/rexovas/session-protect/internal/update"
 )
 
@@ -1484,6 +1485,108 @@ func TestBulkRescueParallelRunner(t *testing.T) {
 	}
 }
 
+// r in select mode bulk-rescues the checked lost sessions.
+func TestSelectModeBulkRecoverLost(t *testing.T) {
+	m := buildEnv(t)
+	var lostID string
+	for _, p := range m.projects {
+		for i := range p.Sessions {
+			if p.Sessions[i].State == "LOST" {
+				lostID = p.Sessions[i].ID
+			}
+		}
+	}
+	if lostID == "" {
+		t.Skip("no lost session in env")
+	}
+	m = press(t, m, tea.KeyCtrlA, "v") // all-nested view, then select mode
+	if !m.selectMode {
+		t.Fatal("v did not enter select mode")
+	}
+	m.selected = map[string]bool{lostID: true}
+	m = press(t, m, "r")
+	if m.confirmBulk == nil || !m.confirmBulk.selection {
+		t.Fatal("r in select mode did not open the selection bulk dialog")
+	}
+	if len(m.confirmBulk.lost) != 1 || m.confirmBulk.lost[0].ID != lostID {
+		t.Fatalf("selection bulk targets = %v", m.confirmBulk.lost)
+	}
+	if view := m.View(); !strings.Contains(view, "Rescue the selected lost sessions?") {
+		t.Fatal("selection dialog title missing")
+	}
+}
+
+// Already-recovered lost sessions are skipped by the selection rescue,
+// just as they are by the folder rescue.
+func TestSelectModeBulkRecoverSkipsRecovered(t *testing.T) {
+	m := buildEnv(t)
+	var lostID, liveID string
+	for _, p := range m.projects {
+		for i := range p.Sessions {
+			switch {
+			case p.Sessions[i].State == "LOST":
+				lostID = p.Sessions[i].ID
+			case liveID == "":
+				liveID = p.Sessions[i].ID
+			}
+		}
+	}
+	if lostID == "" || liveID == "" {
+		t.Skip("need a lost and a live session")
+	}
+	// Point the lost original at a surviving reconstruction.
+	for _, p := range m.projects {
+		for i := range p.Sessions {
+			if p.Sessions[i].ID == lostID {
+				p.Sessions[i].RebuiltAs = []string{liveID}
+			}
+		}
+	}
+	m.selectMode = true
+	m.selected = map[string]bool{lostID: true}
+	m = m.pressBulkRescueSelected()
+	if m.confirmBulk != nil {
+		t.Fatal("already-recovered lost session should not open a rescue dialog")
+	}
+	if !strings.Contains(m.notice, "already recovered") {
+		t.Fatalf("notice = %q", m.notice)
+	}
+}
+
+// o in select mode resumes every checked session in a new window.
+func TestSelectModeOpenAll(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyCtrlA, "v") // all-nested view, then select mode
+	if !m.selectMode || len(m.allSessions) == 0 {
+		t.Skip("no selectable sessions")
+	}
+	m.selected = map[string]bool{}
+	for _, s := range m.allSessions {
+		m.selected[s.ID] = true
+	}
+	want := len(m.allSessions)
+
+	var spawned int
+	spawnWindow = func(string) error { spawned++; return nil }
+	defer func() { spawnWindow = focus.SpawnInNewWindow }()
+
+	m = press(t, m, "o")
+	if m.confirmResumeSel == nil {
+		t.Fatal("o in select mode did not open the resume-selected confirm")
+	}
+	if view := m.View(); !strings.Contains(view, "Resume all selected sessions?") {
+		t.Fatal("resume-selected dialog title missing")
+	}
+	m.confirmSel = 0
+	m = press(t, m, tea.KeyEnter)
+	if spawned != want {
+		t.Fatalf("spawned %d windows, want %d", spawned, want)
+	}
+	if m.selectMode || len(m.selected) != 0 {
+		t.Fatal("resume did not clear select mode")
+	}
+}
+
 func TestBulkRescueFolderFlow(t *testing.T) {
 	m := buildEnv(t)
 	// Land on the folder row that holds the lost session (app has one).
@@ -1664,4 +1767,426 @@ func TestBrewUpdateRoutesToBrew(t *testing.T) {
 		t.Fatalf("did not exec brew upgrade: %v", m.execOnExit)
 	}
 	_ = cmd // tea.Quit
+}
+
+func TestGroupSnapshotAndResumeAll(t *testing.T) {
+	m := buildEnv(t)
+	// Mark two sessions open in the scan.
+	openCount := 0
+	for pi := range m.projects {
+		for si := range m.projects[pi].Sessions {
+			if openCount < 2 && m.projects[pi].Sessions[si].State != "LOST" {
+				m.projects[pi].Sessions[si].LiveStatus = "open"
+				m.projects[pi].Sessions[si].LivePID = 1000 + openCount
+				openCount++
+			}
+		}
+	}
+	if openCount < 1 {
+		t.Skip("fixture has no resumable sessions")
+	}
+
+	// w opens the Groups page; s snapshots the open set.
+	m = press(t, m, "w")
+	if !m.showGroups {
+		t.Fatal("w did not open groups")
+	}
+	m = press(t, m, "s")
+	if m.groupNaming != "snapshot" {
+		t.Fatal("s did not start a snapshot")
+	}
+	m = press(t, m, "w", "o", "r", "k") // type a name "work"
+	m = press(t, m, tea.KeyEnter)
+	idx := groupByName(m.groups, "work")
+	if idx < 0 || len(m.groups[idx].Sessions) != openCount {
+		t.Fatalf("snapshot captured %v", m.groups)
+	}
+
+	// Resume-all spawns a window per closed member.
+	var spawned int
+	spawnWindow = func(string) error { spawned++; return nil }
+	defer func() { spawnWindow = focus.SpawnInNewWindow }()
+	// Reopen groups list, highlight the "work" group, resume all.
+	m = press(t, m, "w") // toggle-close then reopen? w closes if open.
+	if m.showGroups {
+		m = press(t, m, "w")
+	}
+	m = press(t, m, "w")
+	for i := range m.groups {
+		if m.groups[i].Name == "work" {
+			m.gCursor = i
+		}
+	}
+	m = press(t, m, "o") // resume-all confirm
+	if m.confirmResumeAll == nil {
+		t.Fatal("o did not open resume-all confirm")
+	}
+	m.confirmSel = 0
+	m = press(t, m, tea.KeyEnter)
+	// Members are "open" (LiveStatus set), so resume-all skips them.
+	if !strings.Contains(m.notice, "already open") {
+		t.Fatalf("notice = %q", m.notice)
+	}
+}
+
+func TestGroupAddToGroupFlow(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyEnter, tea.KeyTab) // into a session pane
+	if m.selectedSession() == nil {
+		t.Skip("no session selected")
+	}
+	// + starts add-to-group; with no groups it offers "new group".
+	m = press(t, m, "+")
+	if len(m.addIDs) != 1 {
+		t.Fatal("+ did not start add-to-group")
+	}
+	m = press(t, m, tea.KeyEnter) // "＋ new group" (only option)
+	if m.groupNaming != "addnew" {
+		t.Fatal("did not prompt for a new group name")
+	}
+	m = press(t, m, "f", "a", "v", "s")
+	m = press(t, m, tea.KeyEnter)
+	if groupByName(m.groups, "favs") < 0 {
+		t.Fatalf("group not created: %v", m.groups)
+	}
+	if idx := groupByName(m.groups, "favs"); len(m.groups[idx].Sessions) != 1 {
+		t.Fatalf("session not added: %v", m.groups[idx])
+	}
+}
+
+func TestSnapshotIsMachineWideNotRootScoped(t *testing.T) {
+	m := buildEnv(t)
+	// Mark a session open in the top "app" project, then browse DEEP into
+	// its "sub" child so AllUnder(root) would exclude the open one.
+	var openID, deepRoot string
+	for pi := range m.projects {
+		p := m.projects[pi]
+		if strings.HasSuffix(p.Path, string(filepath.Separator)+"app") {
+			for si := range p.Sessions {
+				if p.Sessions[si].State != "LOST" {
+					p.Sessions[si].LiveStatus = "open"
+					openID = p.Sessions[si].ID
+				}
+			}
+		}
+		if strings.HasSuffix(p.Path, string(filepath.Separator)+"sub") {
+			deepRoot = p.Path
+		}
+	}
+	if openID == "" || deepRoot == "" {
+		t.Skip("fixture shape")
+	}
+	m.root = deepRoot
+
+	m = press(t, m, "w", "s")
+	m = press(t, m, "d", "e", "e", "p")
+	m = press(t, m, tea.KeyEnter)
+	idx := groupByName(m.groups, "deep")
+	if idx < 0 {
+		t.Fatal("snapshot group not created")
+	}
+	found := false
+	for _, id := range m.groups[idx].Sessions {
+		if id == openID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("machine-wide snapshot missed an open session outside the browse root: %v", m.groups[idx].Sessions)
+	}
+}
+
+func TestGroupOpensScopedBrowser(t *testing.T) {
+	m := buildEnv(t)
+	// A group holding one real session from a project.
+	var sid, sproj string
+	for _, p := range m.projects {
+		for _, sn := range p.Sessions {
+			if sn.State != "LOST" && sid == "" {
+				sid, sproj = sn.ID, p.Path
+			}
+		}
+	}
+	if sid == "" {
+		t.Skip("no session")
+	}
+	m.groups, _ = addSessionToGroup(m.cfg, m.groups, "grp", sid)
+
+	m = press(t, m, "w")
+	for i := range m.groups {
+		if m.groups[i].Name == "grp" {
+			m.gCursor = i
+		}
+	}
+	m = press(t, m, tea.KeyEnter) // enter → scope the browser into the group
+	if m.groupOpen == nil || m.fullProjects == nil {
+		t.Fatal("entering a group did not scope the browser")
+	}
+	if m.showGroups {
+		t.Fatal("still on the group list; expected the scoped browser")
+	}
+	// The scoped browser shows only the member's project, and the header
+	// carries the group breadcrumb.
+	total := 0
+	for _, p := range m.projects {
+		total += len(p.Sessions)
+	}
+	if total != 1 {
+		t.Fatalf("scoped projects hold %d sessions, want 1", total)
+	}
+	if view := m.View(); !strings.Contains(view, "group: grp") {
+		t.Fatal("breadcrumb missing")
+	}
+	_ = sproj
+	// w exits the scope back to the full browser + group list.
+	m = press(t, m, "w")
+	if m.groupOpen != nil || m.fullProjects != nil || !m.showGroups {
+		t.Fatal("w did not exit the group scope")
+	}
+}
+
+func TestGroupSaveAsAndMerge(t *testing.T) {
+	m := buildEnv(t)
+	var a, b string
+	for _, p := range m.projects {
+		for _, s := range p.Sessions {
+			if s.State != "LOST" {
+				if a == "" {
+					a = s.ID
+				} else if b == "" && s.ID != a {
+					b = s.ID
+				}
+			}
+		}
+	}
+	if a == "" || b == "" {
+		t.Skip("need two sessions")
+	}
+	m.groups, _ = addSessionToGroup(m.cfg, m.groups, "src", a)
+	m.groups, _ = addSessionToGroup(m.cfg, m.groups, "src", b)
+	m.groups, _ = addSessionToGroup(m.cfg, m.groups, "dst", a)
+
+	// copy/freeze: highlight "src" in the list, press c, name it "frz".
+	m = press(t, m, "w")
+	for i := range m.groups {
+		if m.groups[i].Name == "src" {
+			m.gCursor = i
+		}
+	}
+	m = press(t, m, "c")
+	if m.groupNaming != "saveas" {
+		t.Fatal("c did not start copy-as-new")
+	}
+	m = press(t, m, "f", "r", "z", tea.KeyEnter)
+	if i := groupByName(m.groups, "frz"); i < 0 || len(m.groups[i].Sessions) != 2 {
+		t.Fatalf("copy did not duplicate membership: %v", m.groups)
+	}
+
+	// merge: src (a,b) into dst (a) — dst should gain b only.
+	for i := range m.groups {
+		if m.groups[i].Name == "src" {
+			m.gCursor = i
+		}
+	}
+	m = press(t, m, "M")
+	if m.mergeSource == nil {
+		t.Fatal("M did not open merge picker")
+	}
+	targets := m.mergeTargets("src")
+	for i, name := range targets {
+		if name == "dst" {
+			m.mgCursor = i
+		}
+	}
+	m = press(t, m, tea.KeyEnter)
+	dst := groupByName(m.groups, "dst")
+	if dst < 0 || len(m.groups[dst].Sessions) != 2 {
+		t.Fatalf("merge did not union: %v", m.groups[dst])
+	}
+	if !strings.Contains(m.notice, "merged 1") {
+		t.Fatalf("notice = %q", m.notice)
+	}
+}
+
+func TestMultiSelectBulkAddToGroup(t *testing.T) {
+	m := buildEnv(t)
+	var ids []string
+	for _, p := range m.projects {
+		for _, s := range p.Sessions {
+			if s.State != "LOST" && len(ids) < 2 {
+				ids = append(ids, s.ID)
+			}
+		}
+	}
+	if len(ids) < 2 {
+		t.Skip("fixture has too few sessions")
+	}
+	m = press(t, m, tea.KeyEnter, tea.KeyTab) // session context
+
+	// space selects only in select mode (v).
+	if s := m.selectedSession(); s != nil {
+		m = press(t, m, " ")
+		if len(m.selected) != 0 {
+			t.Fatal("space selected outside select mode")
+		}
+		m = press(t, m, "v")
+		if !m.selectMode {
+			t.Fatal("v did not enter select mode")
+		}
+		m = press(t, m, " ")
+		if !m.selected[s.ID] {
+			t.Fatal("space did not select in select mode")
+		}
+	}
+	m.selected = map[string]bool{ids[0]: true, ids[1]: true}
+	m = press(t, m, "+")
+	if len(m.addIDs) != 2 {
+		t.Fatalf("+ carried %d ids, want 2", len(m.addIDs))
+	}
+	m = press(t, m, tea.KeyEnter) // new group
+	m = press(t, m, "b", "u", "l", "k", tea.KeyEnter)
+	idx := groupByName(m.groups, "bulk")
+	if idx < 0 || len(m.groups[idx].Sessions) != 2 {
+		t.Fatalf("bulk add put %d, want 2", len(m.groups[idx].Sessions))
+	}
+	if m.selected != nil {
+		t.Fatal("selection not cleared after add")
+	}
+}
+
+func TestGroupArchiveTogglesVisibility(t *testing.T) {
+	m := buildEnv(t)
+	var a, b string
+	for _, p := range m.projects {
+		for _, s := range p.Sessions {
+			if s.State != "LOST" {
+				if a == "" {
+					a = s.ID
+				} else if b == "" && s.ID != a {
+					b = s.ID
+				}
+			}
+		}
+	}
+	if a == "" || b == "" {
+		t.Skip("need two sessions")
+	}
+	m.groups, _ = addSessionsToGroup(m.cfg, m.groups, "grp", []string{a, b})
+	m = press(t, m, "w")
+	for i := range m.groups {
+		if m.groups[i].Name == "grp" {
+			m.gCursor = i
+		}
+	}
+	m = press(t, m, tea.KeyEnter) // scope in — 2 sessions
+	countScoped := func() int {
+		n := 0
+		for _, p := range m.projects {
+			n += len(p.Sessions)
+		}
+		return n
+	}
+	if countScoped() != 2 {
+		t.Fatalf("scoped %d, want 2", countScoped())
+	}
+	// Archive the highlighted session: it vanishes from the scope.
+	m = press(t, m, tea.KeyTab) // sessions pane
+	if m.selectedSession() == nil {
+		t.Skip("no session selected in scope")
+	}
+	m = press(t, m, "e")
+	if idx := groupByName(m.groups, "grp"); len(m.groups[idx].Archived) != 1 {
+		t.Fatalf("archive not recorded: %+v", m.groups[idx])
+	}
+	if countScoped() != 1 {
+		t.Fatalf("archived session still visible: %d", countScoped())
+	}
+	// z reveals archived → both show again.
+	m = press(t, m, "z")
+	if !m.groupShowArchived || countScoped() != 2 {
+		t.Fatalf("show-archived toggle failed: show=%v count=%d", m.groupShowArchived, countScoped())
+	}
+}
+
+func TestFolderHintHiddenInSessionViews(t *testing.T) {
+	m := buildEnv(t)
+	leak := func(v string) bool {
+		return strings.Contains(v, "bulk-rescues them") || strings.Contains(v, "directory is gone")
+	}
+	var lostFolder = -1
+	for i, f := range m.folders {
+		if f.Lost > 0 || f.HomeGone {
+			lostFolder = i
+		}
+	}
+	if lostFolder < 0 {
+		t.Skip("fixture has no folder with a hint")
+	}
+	m.fCursor = lostFolder
+	if !leak(m.View()) {
+		t.Fatal("folder-pane hint missing on a flagged folder")
+	}
+	// Tab into that folder's sessions: the folder hint must be gone.
+	m = press(t, m, tea.KeyEnter, tea.KeyTab)
+	if !m.showSessions {
+		t.Skip("could not reach the session pane")
+	}
+	if leak(m.View()) {
+		t.Fatal("folder hint leaked into the session view")
+	}
+	// All-nested view: also gone.
+	m = press(t, m, tea.KeyCtrlA)
+	if leak(m.View()) {
+		t.Fatal("folder hint leaked into the all-sessions view")
+	}
+}
+
+func TestSelectMarkerShowsInAllView(t *testing.T) {
+	m := buildEnv(t)
+	m = press(t, m, tea.KeyCtrlA) // all-nested view
+	if len(m.allSessions) == 0 {
+		t.Skip("no all-sessions")
+	}
+	m = press(t, m, "v")
+	if !m.selectMode {
+		t.Fatal("v did not enter select mode in all view")
+	}
+	s := m.selectedSession()
+	if s == nil {
+		t.Skip("no selectable session in all view")
+	}
+	cursorBefore := m.currentCursor()
+	m = press(t, m, " ")
+	if !m.selected[s.ID] {
+		t.Fatal("space did not select in all view")
+	}
+	// Space toggles the checkbox in place; it must not advance the cursor.
+	if m.currentCursor() != cursorBefore {
+		t.Fatal("space moved the cursor in select mode")
+	}
+	// The checked box must render for the selected session, and an unchecked
+	// box for any other session in select mode.
+	if !strings.Contains(m.allSessionRow(*s, false), "[x]") {
+		t.Fatal("all-view row missing the [x] checkbox for the selected session")
+	}
+	for _, other := range m.allSessions {
+		if other.ID == s.ID {
+			continue
+		}
+		if !strings.Contains(m.allSessionRow(other, false), "[ ]") {
+			t.Fatal("all-view row missing the [ ] checkbox for an unselected session")
+		}
+		break
+	}
+	// esc must leave select mode, not navigate the underlying pane.
+	m = press(t, m, tea.KeyEsc)
+	if m.selectMode {
+		t.Fatal("esc did not exit select mode from the all view")
+	}
+	if !m.showAll {
+		t.Fatal("esc left the all view instead of just exiting select mode")
+	}
+	if len(m.selected) != 0 {
+		t.Fatal("esc did not clear the selection on exit")
+	}
 }

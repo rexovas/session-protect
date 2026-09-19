@@ -458,7 +458,10 @@ func listCodex(root string) []fileInfo {
 		if infoErr != nil {
 			return nil
 		}
-		id, cwd := targets.CodexSessionMeta(path)
+		id, cwd, subagent := targets.CodexSessionMeta(path)
+		if subagent {
+			return nil // codex subagent (guardian/thread_spawn) — orchestration, not a user session
+		}
 		if id == "" {
 			id = strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		}
@@ -1020,6 +1023,7 @@ func codexHistorySessions() map[string]lostInfo {
 // per session id, codex's own equivalent of a custom title.
 func codexThreadNames() map[string]string {
 	names := map[string]string{}
+	latest := map[string]string{} // id -> updated_at of the winning entry
 	file, err := os.Open(filepath.Join(targets.DetectCodex().Source, "session_index.jsonl"))
 	if err != nil {
 		return names
@@ -1031,9 +1035,16 @@ func codexThreadNames() map[string]string {
 		var entry struct {
 			ID         string `json:"id"`
 			ThreadName string `json:"thread_name"`
+			UpdatedAt  string `json:"updated_at"`
 		}
-		if json.Unmarshal(scanner.Bytes(), &entry) == nil && entry.ID != "" && entry.ThreadName != "" {
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.ID == "" || entry.ThreadName == "" {
+			continue
+		}
+		// A session may be renamed several times; the newest name wins.
+		// updated_at is RFC3339, so lexical comparison orders it correctly.
+		if entry.UpdatedAt >= latest[entry.ID] {
 			names[entry.ID] = entry.ThreadName
+			latest[entry.ID] = entry.UpdatedAt
 		}
 	}
 	return names
