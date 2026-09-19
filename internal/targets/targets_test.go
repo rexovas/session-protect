@@ -40,11 +40,31 @@ func TestCodexSessionMeta(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	id, cwd := CodexSessionMeta(path)
-	if id != "abc-123" || cwd != "/w/project" {
-		t.Fatalf("meta = %q %q", id, cwd)
+	id, cwd, sub := CodexSessionMeta(path)
+	if id != "abc-123" || cwd != "/w/project" || sub {
+		t.Fatalf("meta = %q %q sub=%v", id, cwd, sub)
 	}
-	if id, cwd := CodexSessionMeta(filepath.Join(t.TempDir(), "missing.jsonl")); id != "" || cwd != "" {
+	if id, cwd, _ := CodexSessionMeta(filepath.Join(t.TempDir(), "missing.jsonl")); id != "" || cwd != "" {
 		t.Fatal("missing file must yield empties")
+	}
+}
+
+func TestCodexSessionMetaDetectsSubagent(t *testing.T) {
+	dir := t.TempDir()
+	// Top-level session: source is a plain string.
+	top := filepath.Join(dir, "top.jsonl")
+	if err := os.WriteFile(top, []byte(`{"type":"session_meta","payload":{"id":"t1","cwd":"/w","source":"cli"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, sub := CodexSessionMeta(top); sub {
+		t.Fatal("cli session flagged as subagent")
+	}
+	// Subagent (guardian): source is an object with a subagent key.
+	sa := filepath.Join(dir, "sa.jsonl")
+	if err := os.WriteFile(sa, []byte(`{"type":"session_meta","payload":{"id":"s1","cwd":"/w","source":{"subagent":{"other":"guardian"}}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, sub := CodexSessionMeta(sa); !sub {
+		t.Fatal("guardian subagent not detected")
 	}
 }
