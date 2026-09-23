@@ -2966,11 +2966,10 @@ func (m model) View() string {
 	}
 	var b strings.Builder
 
-	total := 0
-	for _, folder := range m.folders {
-		total += folder.Sessions
-	}
-	total += m.sessionCount()
+	// Distinct sessions under the root. A session whose cwd changed lives
+	// in two projects, so summing per-folder counts would count it twice;
+	// AllUnder dedupes by id, matching the all-nested pane exactly.
+	total := len(AllUnder(m.projects, m.root))
 	name := m.root
 	if idx := strings.LastIndex(m.root, string(os.PathSeparator)); idx >= 0 && len(m.root) > idx+1 {
 		name = m.root[idx+1:]
