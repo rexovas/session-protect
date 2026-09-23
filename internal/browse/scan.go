@@ -1275,6 +1275,12 @@ func aggregate(folder *Folder, project *Project) {
 // with its project path for display.
 func AllUnder(projects []*Project, root string) []Session {
 	var all []Session
+	// A session whose cwd changed during its life is written under two
+	// project slugs, so the same id can appear in two projects. The
+	// flattened view is a session list, not a per-project one, so keep a
+	// single entry per id — the most recently modified, which reflects
+	// where the session currently lives and its freshest state.
+	byID := map[string]int{} // id -> index into all
 	for _, project := range projects {
 		if !filepath.IsAbs(project.Path) {
 			continue
@@ -1287,6 +1293,13 @@ func AllUnder(projects []*Project, root string) []Session {
 		}
 		for _, session := range project.Sessions {
 			session.ProjectPath = project.Path
+			if i, ok := byID[session.ID]; ok {
+				if newest(session).After(newest(all[i])) {
+					all[i] = session
+				}
+				continue
+			}
+			byID[session.ID] = len(all)
 			all = append(all, session)
 		}
 	}

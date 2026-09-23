@@ -13,6 +13,42 @@ import (
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
+// A session whose cwd changed lives under two project slugs, so the same
+// id appears in two projects. AllUnder must return it once — the newest
+// entry — so the all-nested view never shows duplicates.
+func TestAllUnderDedupesByID(t *testing.T) {
+	root := "/home/u"
+	older := time.Now().Add(-time.Hour)
+	newer := time.Now()
+	projects := []*Project{
+		{Path: "/home/u/a", Sessions: []Session{
+			{ID: "dup", Target: "claude", Modified: older},
+			{ID: "only-a", Target: "claude", Modified: newer},
+		}},
+		{Path: "/home/u/b", Sessions: []Session{
+			{ID: "dup", Target: "claude", Modified: newer}, // newer copy wins
+		}},
+	}
+	all := AllUnder(projects, root)
+	seen := map[string]int{}
+	var dup Session
+	for _, s := range all {
+		seen[s.ID]++
+		if s.ID == "dup" {
+			dup = s
+		}
+	}
+	if seen["dup"] != 1 {
+		t.Fatalf("dup id appeared %d times, want 1", seen["dup"])
+	}
+	if len(all) != 2 {
+		t.Fatalf("AllUnder returned %d sessions, want 2 distinct", len(all))
+	}
+	if dup.ProjectPath != "/home/u/b" {
+		t.Fatalf("kept the older copy: ProjectPath = %q, want /home/u/b (newest)", dup.ProjectPath)
+	}
+}
+
 func writeFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
