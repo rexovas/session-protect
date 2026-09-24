@@ -13,6 +13,34 @@ import (
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
+// The initial paint fills names and models from the meta cache without
+// reading any session file, so a warm launch shows custom names instantly.
+func TestApplyCachedNamesReadsCacheOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	backup := filepath.Join(home, "root")
+	configPath := filepath.Join(home, "config.toml")
+	writeFile(t, configPath, "backup_root = \""+backup+"\"\n")
+	t.Setenv("SESSION_PROTECT_CONFIG", configPath)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(backup, ".session-meta.json"),
+		fmt.Sprintf(`{"version":%d,"entries":{"s1":{"name":"CACHED-NAME","model":"opus-5","mod":123}}}`, metaCacheVersion))
+	// The session file path is bogus: if applyCachedNames read files, the
+	// name would not resolve. It must come from the cache alone.
+	projects := []*Project{{Path: "/p", Sessions: []Session{
+		{ID: "s1", Target: "claude", SourcePath: "/nonexistent/s1.jsonl", Title: "first prompt"},
+	}}}
+	applyCachedNames(cfg, projects)
+	got := projects[0].Sessions[0]
+	if got.CustomName != "CACHED-NAME" || got.LastModel != "opus-5" {
+		t.Fatalf("cache not applied: name=%q model=%q", got.CustomName, got.LastModel)
+	}
+}
+
 // A session whose cwd changed lives under two project slugs, so the same
 // id appears in two projects. AllUnder must return it once — the newest
 // entry — so the all-nested view never shows duplicates.

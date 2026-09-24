@@ -344,6 +344,11 @@ func tick() tea.Cmd {
 
 func newModel(cfg config.Config) model {
 	projects := Scan(cfg)
+	// Names and models come from a mtime-keyed cache read (no session files),
+	// so the first paint shows custom names immediately instead of raw
+	// first-prompt titles — which, being similarly worded, read as
+	// duplicates. The async ScanNamed rescan in Init refreshes the rest.
+	applyCachedNames(cfg, projects)
 	start, err := os.Getwd()
 	if err != nil {
 		start = string(os.PathSeparator)
