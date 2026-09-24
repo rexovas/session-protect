@@ -31,6 +31,37 @@ type metaCache struct {
 	Entries map[string]nameEntry `json:"entries"`
 }
 
+// applyCachedNames fills custom names and models from the on-disk meta
+// cache only — it reads no session files — so the first paint shows names
+// and models instantly on a warm cache instead of first-prompt titles and
+// blank models. Codex thread names come from the (cheap) session index.
+// The async ScanNamed rescan that follows refreshes anything stale or new.
+func applyCachedNames(cfg config.Config, projects []*Project) {
+	stored := metaCache{}
+	if data, err := os.ReadFile(filepath.Join(cfg.BackupRoot, ".session-meta.json")); err == nil {
+		_ = json.Unmarshal(data, &stored)
+	}
+	cache := stored.Entries
+	if stored.Version != metaCacheVersion {
+		cache = nil
+	}
+	codexNames := codexThreadNames()
+	for _, project := range projects {
+		for i := range project.Sessions {
+			session := &project.Sessions[i]
+			if entry, ok := cache[session.ID]; ok {
+				session.CustomName = entry.Name
+				session.LastModel = entry.Model
+			}
+			if session.Target == "codex" {
+				if name, ok := codexNames[session.ID]; ok && name != "" {
+					session.CustomName = name
+				}
+			}
+		}
+	}
+}
+
 func applyNames(cfg config.Config, projects []*Project) {
 	path := filepath.Join(cfg.BackupRoot, ".session-meta.json")
 	stored := metaCache{}
