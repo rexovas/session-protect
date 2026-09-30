@@ -218,7 +218,9 @@ type model struct {
 	aCursor    int
 	aOffset    int
 
-	scanning bool // a background rescan is in flight
+	scanning bool      // a background rescan is in flight
+	lastScan time.Time // when the most recent background rescan started
+	blurred  bool      // the terminal reported losing focus; refresh backs off
 
 	width  int
 	height int
@@ -338,6 +340,11 @@ func spin() tea.Cmd {
 // the UI never blocks on them.
 const refreshEvery = 5 * time.Second
 
+// idleRefreshEvery is the cadence while the terminal reports it has lost
+// focus: nobody is looking, so live status can lag without cost to anyone,
+// and a browser left open for days stops rescanning every few seconds.
+const idleRefreshEvery = time.Minute
+
 func tick() tea.Cmd {
 	return tea.Tick(refreshEvery, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
@@ -356,6 +363,9 @@ func newModel(cfg config.Config) model {
 	m := model{cfg: cfg, projects: projects, start: start, width: 100, height: 32}
 	m.root = NearestRoot(projects, start)
 	m.groups = LoadGroups(cfg)
+	// Init launches the first full scan; mark it in flight so the first
+	// tick cannot start a second one on top of it.
+	m.scanning, m.lastScan = true, time.Now()
 	m.rebuild()
 	return m
 }
@@ -745,12 +755,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
 	case tickMsg:
-		if m.scanning {
+		// Never stack scans, and while unfocused only rescan once a minute.
+		if m.scanning || m.blurred && time.Since(m.lastScan) < idleRefreshEvery {
 			return m, tick()
 		}
-		m.scanning = true
+		m.scanning, m.lastScan = true, time.Now()
 		cfg := m.cfg
 		return m, tea.Batch(tick(), func() tea.Msg { return rescanMsg(ScanNamed(cfg)) })
+	case tea.BlurMsg:
+		m.blurred = true
+		return m, nil
+	case tea.FocusMsg:
+		m.blurred = false
+		// Coming back to a view that may be a minute stale: refresh now.
+		if !m.scanning && time.Since(m.lastScan) >= refreshEvery {
+			m.scanning, m.lastScan = true, time.Now()
+			cfg := m.cfg
+			return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
+		}
+		return m, nil
 	case rescanMsg:
 		m.scanning = false
 		if m.groupOpen != nil {
