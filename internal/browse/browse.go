@@ -39,7 +39,7 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 0
 	}
 
-	program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithOutput(stderr))
+	program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus(), tea.WithOutput(stderr))
 	final, err := program.Run()
 	if err != nil {
 		fmt.Fprintf(stderr, "browse failed: %v\n", err)

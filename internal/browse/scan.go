@@ -2,7 +2,6 @@ package browse
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -458,7 +457,7 @@ func listCodex(root string) []fileInfo {
 		if infoErr != nil {
 			return nil
 		}
-		id, cwd, subagent := targets.CodexSessionMeta(path)
+		id, cwd, subagent := cachedCodexSessionMeta(path, stamp{size: info.Size(), mod: info.ModTime()})
 		if subagent {
 			return nil // codex subagent (guardian/thread_spawn) — orchestration, not a user session
 		}
@@ -978,47 +977,6 @@ type lostInfo struct {
 	Last    time.Time
 }
 
-// claudeHistorySessions indexes the claude prompt history by session id.
-// This is the only record of sessions whose transcripts were pruned before
-// any backup existed.
-// codexHistorySessions reads codex prompt history: session id, unix
-// seconds, and prompt text per line.
-func codexHistorySessions() map[string]lostInfo {
-	sessions := map[string]lostInfo{}
-	file, err := os.Open(filepath.Join(targets.DetectCodex().Source, "history.jsonl"))
-	if err != nil {
-		return sessions
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-	for scanner.Scan() {
-		var entry struct {
-			SessionID string `json:"session_id"`
-			Ts        int64  `json:"ts"`
-			Text      string `json:"text"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.SessionID == "" {
-			continue
-		}
-		info := sessions[entry.SessionID]
-		info.Count++
-		if info.Title == "" {
-			info.Title = strings.Join(strings.Fields(entry.Text), " ")
-		}
-		at := time.Unix(entry.Ts, 0)
-		if info.First.IsZero() || at.Before(info.First) {
-			info.First = at
-		}
-		if at.After(info.Last) {
-			info.Last = at
-		}
-		sessions[entry.SessionID] = info
-	}
-	return sessions
-}
-
 // codexThreadNames reads codex's session index: the latest thread_name
 // per session id, codex's own equivalent of a custom title.
 func codexThreadNames() map[string]string {
@@ -1048,46 +1006,6 @@ func codexThreadNames() map[string]string {
 		}
 	}
 	return names
-}
-
-func claudeHistorySessions() map[string]lostInfo {
-	sessions := map[string]lostInfo{}
-	file, err := os.Open(filepath.Join(targets.DetectClaude().Source, "history.jsonl"))
-	if err != nil {
-		return sessions
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-	for scanner.Scan() {
-		var entry struct {
-			Display   string `json:"display"`
-			SessionID string `json:"sessionId"`
-			Project   string `json:"project"`
-			Timestamp int64  `json:"timestamp"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.SessionID == "" {
-			continue
-		}
-		info := sessions[entry.SessionID]
-		info.Count++
-		if info.Project == "" {
-			info.Project = entry.Project
-		}
-		if info.Title == "" || isSlashCommand(info.Title) && !isSlashCommand(entry.Display) {
-			info.Title = strings.Join(strings.Fields(entry.Display), " ")
-		}
-		at := time.UnixMilli(entry.Timestamp)
-		if info.First.IsZero() || at.Before(info.First) {
-			info.First = at
-		}
-		if at.After(info.Last) {
-			info.Last = at
-		}
-		sessions[entry.SessionID] = info
-	}
-	return sessions
 }
 
 // LoadLostDetail builds inspector data for a LOST session from the prompt
@@ -1126,9 +1044,6 @@ func LoadLostDetail(id string) Detail {
 	return detail
 }
 
-// historyTitles maps session ids to the first prompt recorded for them in the
-// agents' history files — a cheap title source that avoids opening every
-// session file.
 // isSlashCommand reports whether a prompt is an agent slash command
 // ("/model sonnet", "/clear") rather than content.
 func isSlashCommand(text string) bool {
@@ -1148,48 +1063,6 @@ func isSlashCommand(text string) bool {
 		}
 	}
 	return true
-}
-
-func historyTitles() map[string]string {
-	titles := map[string]string{}
-	claude := targets.DetectClaude()
-	codex := targets.DetectCodex()
-	for _, path := range []string{
-		filepath.Join(claude.Source, "history.jsonl"),
-		filepath.Join(codex.Source, "history.jsonl"),
-	} {
-		file, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		scanner := bufio.NewScanner(file)
-		scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-		for scanner.Scan() {
-			var entry struct {
-				Display    string `json:"display"`
-				SessionID  string `json:"sessionId"`
-				Text       string `json:"text"`
-				SessionID2 string `json:"session_id"`
-			}
-			if json.Unmarshal(scanner.Bytes(), &entry) != nil {
-				continue
-			}
-			id, text := entry.SessionID, entry.Display
-			if id == "" {
-				id, text = entry.SessionID2, entry.Text
-			}
-			if id == "" || text == "" {
-				continue
-			}
-			// A slash command ("/model", "/clear") is a title only when
-			// nothing substantive ever follows it.
-			if current, seen := titles[id]; !seen || isSlashCommand(current) && !isSlashCommand(text) {
-				titles[id] = strings.Join(strings.Fields(text), " ")
-			}
-		}
-		file.Close()
-	}
-	return titles
 }
 
 // Folder is one child directory of the current view root, aggregating every
@@ -1372,52 +1245,6 @@ func customTitle(path string) string {
 	return name
 }
 
-// scanFileMeta reads a session file once for its latest custom name and the
-// last model used. Cheap byte pre-filters keep this fast on large files.
-func scanFileMeta(path string) (name string, model string) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", ""
-	}
-	defer file.Close()
-
-	titlePattern := []byte(`"custom-title"`)
-	modelPattern := []byte(`"model":"claude`)
-	turnPattern := []byte(`"turn_context"`)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if bytes.Contains(line, titlePattern) {
-			var event struct {
-				Type        string `json:"type"`
-				CustomTitle string `json:"customTitle"`
-			}
-			if json.Unmarshal(line, &event) == nil && event.Type == "custom-title" && event.CustomTitle != "" {
-				name = event.CustomTitle
-			}
-		}
-		if idx := bytes.LastIndex(line, modelPattern); idx >= 0 {
-			rest := line[idx+len(`"model":"`):]
-			if end := bytes.IndexByte(rest, '"'); end > 0 {
-				model = string(rest[:end])
-			}
-		}
-		if bytes.Contains(line, turnPattern) {
-			var event struct {
-				Type    string `json:"type"`
-				Payload struct {
-					Model string `json:"model"`
-				} `json:"payload"`
-			}
-			if json.Unmarshal(line, &event) == nil && event.Type == "turn_context" && event.Payload.Model != "" {
-				model = event.Payload.Model
-			}
-		}
-	}
-	return name, model
-}
-
 // claudeProjectPath recovers the real project path by reading cwd fields
 // from the session files; slugs are not reversible. A transcript can
 // carry cwds from OTHER directories — claude records the process cwd per
@@ -1437,7 +1264,7 @@ func claudeProjectPath(sessions []Session, slug string) string {
 		if path == "" {
 			continue
 		}
-		matched, first := claudeCwd(path, slug)
+		matched, first := cachedClaudeCwd(path, slug)
 		if matched != "" && !newest(session).Before(bestTime) {
 			best = matched
 			bestTime = newest(session)
@@ -1453,7 +1280,7 @@ func claudeProjectPath(sessions []Session, slug string) string {
 	// No transcript line agrees with the slug — a manual copy that was
 	// never resumed here has only foreign cwds. Decoding the slug
 	// against the real filesystem beats trusting a foreign path.
-	if decoded := decodeClaudeSlug(slug); decoded != "" {
+	if decoded := cachedDecodeClaudeSlug(slug); decoded != "" {
 		return decoded
 	}
 	return fallback
@@ -1520,19 +1347,24 @@ func nameSlug(name string) string {
 	return string(out)
 }
 
+// claudeCwdLines caps how far claudeCwd reads — enough to get past a long
+// foreign prefix without reading multi-MB transcripts end to end.
+const claudeCwdLines = 4000
+
 // claudeCwd scans a transcript for cwd fields: matched is the first one
 // whose claude slug equals the wanted slug, first is the first cwd of
-// any kind. The scan is capped — enough to get past a long foreign
-// prefix without reading multi-MB transcripts end to end.
-func claudeCwd(path string, slug string) (matched string, first string) {
+// any kind. final reports that appends can no longer change the answer:
+// a match was found, or the capped scan already covered the whole window.
+func claudeCwd(path string, slug string) (matched string, first string, final bool) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", ""
+		return "", "", false
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-	for i := 0; i < 4000 && scanner.Scan(); i++ {
+	lines := 0
+	for ; lines < claudeCwdLines && scanner.Scan(); lines++ {
 		var event struct {
 			Cwd string `json:"cwd"`
 		}
@@ -1543,10 +1375,10 @@ func claudeCwd(path string, slug string) (matched string, first string) {
 			first = event.Cwd
 		}
 		if targets.ClaudeSlug(event.Cwd) == slug {
-			return event.Cwd, first
+			return event.Cwd, first, true
 		}
 	}
-	return "", first
+	return "", first, lines >= claudeCwdLines
 }
 
 func newest(session Session) time.Time {
