@@ -103,9 +103,10 @@ sp browse                   # the session explorer
 `sp doctor` checks the environment. `sp update` updates in place:
 release installs download the latest release (checksum-verified) and
 swap the binary; source installs rebuild from their checkout. The
-explorer also checks for new releases at launch (at most once a day)
-and offers the specific version before touching anything — disable
-with `update.check = false`.
+explorer also checks for new releases at launch and every six hours
+while it stays open, and offers the specific version before touching
+anything ("Later" skips that version for the session) — disable with
+`update.check = false`.
 
 ## The explorer
 
@@ -207,8 +208,8 @@ enabled = true           # per-agent enable/source overrides
   talks only to your own local ollama server or your own claude or
   codex CLI.
   The sole outbound call the tool ever makes is the release check
-  against GitHub (once a day, version numbers only, off with
-  `update.check = false`).
+  against GitHub (at most every six hours per machine, version numbers
+  only, off with `update.check = false`).
 - **Encryption is opt-in** because local backups mirror data the agents
   already store unencrypted on the same disk; enable git-crypt when
   backups will leave the machine.

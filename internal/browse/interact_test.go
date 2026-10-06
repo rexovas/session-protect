@@ -555,8 +555,14 @@ func TestUpdateOfferFlow(t *testing.T) {
 		t.Fatalf("enter on Later applied: %v", applied)
 	}
 
-	// Offer again; arrow to Update; enter applies and quits to relaunch.
+	// The declined version is not offered again this session.
 	next, _ = m.Update(updateAvailableMsg("v1.2.3"))
+	if next.(model).updateOffer != "" {
+		t.Fatal("declined version re-offered")
+	}
+
+	// A newer one is; arrow to Update; enter applies and quits to relaunch.
+	next, _ = m.Update(updateAvailableMsg("v1.2.4"))
 	m = next.(model)
 	m = press(t, m, tea.KeyLeft)
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -566,7 +572,7 @@ func TestUpdateOfferFlow(t *testing.T) {
 	}
 	next, _ = m.Update(cmd())
 	m = next.(model)
-	if len(applied) != 1 || applied[0] != "v1.2.3" {
+	if len(applied) != 1 || applied[0] != "v1.2.4" {
 		t.Fatalf("applied = %v", applied)
 	}
 	if len(m.execOnExit) == 0 || m.execOnExit[0] != "/fake/bin/session-protect" {

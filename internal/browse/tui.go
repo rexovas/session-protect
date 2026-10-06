@@ -205,6 +205,10 @@ type model struct {
 	updateOffer string // version tag, "" when none
 	updateBusy  bool
 	updateBrew  bool // running binary is Homebrew-managed: route to brew upgrade
+	// updateDeclined is the version the user answered "Later" to; it is not
+	// offered again this session (a newer one still is).
+	updateDeclined  string
+	lastUpdateCheck time.Time // when the release check last ran
 	// execOnExit replaces this process after the TUI closes: the updated
 	// binary after a self-update, or the agent itself when resuming a
 	// session in the current terminal.
@@ -345,6 +349,12 @@ const refreshEvery = 5 * time.Second
 // and a browser left open for days stops rescanning every few seconds.
 const idleRefreshEvery = time.Minute
 
+// updateCheckEvery is how often the release check runs, both at launch
+// and while the explorer stays open, so a window left open for days still
+// learns about a release. The result is cached on disk and shared by every
+// open window, so this bounds GitHub calls per machine, not per window.
+const updateCheckEvery = 6 * time.Hour
+
 func tick() tea.Cmd {
 	return tea.Tick(refreshEvery, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
@@ -366,6 +376,8 @@ func newModel(cfg config.Config) model {
 	// Init launches the first full scan; mark it in flight so the first
 	// tick cannot start a second one on top of it.
 	m.scanning, m.lastScan = true, time.Now()
+	// Init runs the launch release check; the refresh loop repeats it.
+	m.lastUpdateCheck = time.Now()
 	m.rebuild()
 	return m
 }
@@ -703,16 +715,35 @@ func (m model) currentCursor() int {
 // itself stays fast (names arrive from cache or the first background pass).
 func (m model) Init() tea.Cmd {
 	cfg := m.cfg
-	commands := []tea.Cmd{tick(), func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }}
-	if version.Channel == "release" && cfg.Update.CheckEnabled() {
-		commands = append(commands, func() tea.Msg {
-			if latest, newer := updateCheck(cfg.BackupRoot, 24*time.Hour); newer {
-				return updateAvailableMsg(latest)
-			}
-			return nil
-		})
+	return tea.Batch(tick(), func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }, m.updateCheckCmd())
+}
+
+// updateCheckCmd runs the release check in the background, or is nil when
+// checks don't apply (source builds, or update.check = false).
+func (m model) updateCheckCmd() tea.Cmd {
+	if version.Channel != "release" || !m.cfg.Update.CheckEnabled() {
+		return nil
 	}
-	return tea.Batch(commands...)
+	stateDir := m.cfg.BackupRoot
+	return func() tea.Msg {
+		if latest, newer := updateCheck(stateDir, updateCheckEvery); newer {
+			return updateAvailableMsg(latest)
+		}
+		return nil
+	}
+}
+
+// maybeCheckUpdate re-runs the release check from the refresh loop once
+// updateCheckEvery has passed, unless an offer is already showing.
+func (m model) maybeCheckUpdate() (model, tea.Cmd) {
+	if m.updateOffer != "" || m.updateBusy || time.Since(m.lastUpdateCheck) < updateCheckEvery {
+		return m, nil
+	}
+	cmd := m.updateCheckCmd()
+	if cmd != nil {
+		m.lastUpdateCheck = time.Now()
+	}
+	return m, cmd
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -755,13 +786,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
 	case tickMsg:
+		var check tea.Cmd
+		m, check = m.maybeCheckUpdate()
 		// Never stack scans, and while unfocused only rescan once a minute.
 		if m.scanning || m.blurred && time.Since(m.lastScan) < idleRefreshEvery {
-			return m, tick()
+			return m, tea.Batch(tick(), check)
 		}
 		m.scanning, m.lastScan = true, time.Now()
 		cfg := m.cfg
-		return m, tea.Batch(tick(), func() tea.Msg { return rescanMsg(ScanNamed(cfg)) })
+		return m, tea.Batch(tick(), check, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) })
 	case tea.BlurMsg:
 		m.blurred = true
 		return m, nil
@@ -809,6 +842,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuild()
 		return m, nil
 	case updateAvailableMsg:
+		if string(msg) == m.updateDeclined || m.updateOffer != "" || m.updateBusy {
+			return m, nil
+		}
 		m.updateOffer = string(msg)
 		m.updateBrew = updateIsBrew()
 		m.confirmSel = 1
@@ -1180,7 +1216,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "esc", "n":
 			if !m.updateBusy {
-				m.updateOffer = ""
+				m.updateDeclined, m.updateOffer = m.updateOffer, ""
 			}
 		case "y":
 			m.confirmSel = 0
@@ -1190,7 +1226,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if m.confirmSel != 0 {
-				m.updateOffer = ""
+				m.updateDeclined, m.updateOffer = m.updateOffer, ""
 				break
 			}
 			if m.updateBrew {
