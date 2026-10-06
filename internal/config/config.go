@@ -43,9 +43,9 @@ type Assist struct {
 	EmbedModel string `toml:"embed_model" json:"embed_model,omitempty"`
 }
 
-// Update controls the launch-time new-version check. It is the one
-// outbound network call the tool ever makes (GitHub's releases API) and
-// can be disabled entirely.
+// Update controls the new-version check, run at launch and every few hours
+// while the explorer is open. It is the one outbound network call the tool
+// ever makes (GitHub's releases API) and can be disabled entirely.
 type Update struct {
 	Check *bool `toml:"check" json:"check,omitempty"` // default true
 }
