@@ -23,6 +23,7 @@ type Info struct {
 	SessionID string `json:"sessionId"`
 	Cwd       string `json:"cwd"`
 	Status    string `json:"status"`
+	StartedAt int64  `json:"startedAt"` // unix ms the process opened the session
 	UpdatedAt int64  `json:"updatedAt"`
 }
 

@@ -25,6 +25,7 @@ type Session struct {
 	CustomName     string    // user-assigned name, from custom-title events
 	LiveStatus     string    // non-empty when open in a running agent process
 	LivePID        int       // process holding the session open, for jumping to it
+	LiveSince      time.Time // when that process opened it (claude registry), zero if unknown
 	ProjectPath    string    // the session's working directory (resume cd target)
 	Prompts        int       // for LOST sessions: prompt count from history
 	LastModel      string    // most recent model seen in the transcript
@@ -175,6 +176,9 @@ func Scan(cfg config.Config) []*Project {
 			if info, ok := open[session.ID]; ok {
 				session.LiveStatus = info.Status
 				session.LivePID = info.PID
+				if info.StartedAt > 0 {
+					session.LiveSince = time.UnixMilli(info.StartedAt)
+				}
 				project.Open++
 			} else if pid, ok := codexIDs[session.ID]; ok {
 				session.LiveStatus = "open"
@@ -975,6 +979,24 @@ type lostInfo struct {
 	Count   int
 	First   time.Time
 	Last    time.Time
+	// Weeks holds the week keys (see weekKey) of every prompt. It is
+	// replaced, never mutated, so copies of a lostInfo never alias it.
+	Weeks map[string]bool
+}
+
+// withWeek returns info recording a prompt at t in its Weeks set.
+func (info lostInfo) withWeek(t time.Time) lostInfo {
+	key := weekKey(t)
+	if info.Weeks[key] {
+		return info
+	}
+	weeks := make(map[string]bool, len(info.Weeks)+1)
+	for k := range info.Weeks {
+		weeks[k] = true
+	}
+	weeks[key] = true
+	info.Weeks = weeks
+	return info
 }
 
 // codexThreadNames reads codex's session index: the latest thread_name
