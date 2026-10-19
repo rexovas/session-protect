@@ -150,6 +150,7 @@ type model struct {
 	selected          map[string]bool // multi-select set in the session pane
 	selectMode        bool            // explicit multi-select mode (v)
 	groupShowArchived bool            // reveal archived members in the open group
+	weeklyCollapsed   bool            // groups page: weekly section folded away
 	confirmResumeAll  *Group          // resume-all confirmation
 	confirmResumeSel  []Session       // resume-selected confirmation (select mode)
 	saveAsIDs         []string        // group membership being saved under a new name
@@ -815,6 +816,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if groups, _ := snapshotOpen(m.cfg, m.groups, allProjectSessions(msg), ""); groups != nil {
 				m.groups = groups
 			}
+			m.groups, _ = updateWeekly(m.cfg, m.groups, allProjectSessions(msg))
+			// A weekly group grows while you browse it: follow it.
+			if i := groupByName(m.groups, m.groupOpen.Name); i >= 0 {
+				g := m.groups[i]
+				m.groupOpen = &g
+			}
 			m = m.rescopeGroup(msg)
 			return m, nil
 		}
@@ -824,6 +831,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if groups, _ := snapshotOpen(m.cfg, m.groups, allProjectSessions(msg), ""); groups != nil {
 			m.groups = groups
 		}
+		m.groups, _ = updateWeekly(m.cfg, m.groups, allProjectSessions(msg))
 		// The hits pane holds Session copies from before the rescan;
 		// refresh them so state changes (a rescue, a restore) show.
 		if len(m.hits) > 0 {
@@ -1134,26 +1142,32 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.groupNaming != "" {
 			return m.handleGroupNaming(msg), nil
 		}
+		rows := m.groupRows()
+		grp, onGroup := m.cursorGroup()
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "esc", "q", "w":
 			m.showGroups, m.gCursor = false, 0
 		case "up", "k":
-			if len(m.groups) > 0 {
-				m.gCursor = (m.gCursor + len(m.groups) - 1) % len(m.groups)
+			if len(rows) > 0 {
+				m.gCursor = (m.gCursor + len(rows) - 1) % len(rows)
 			}
 		case "down", "j":
-			if len(m.groups) > 0 {
-				m.gCursor = (m.gCursor + 1) % len(m.groups)
+			if len(rows) > 0 {
+				m.gCursor = (m.gCursor + 1) % len(rows)
 			}
 		case "enter", "right", "l":
-			if m.gCursor < len(m.groups) && len(m.groups[m.gCursor].Sessions) > 0 {
-				return m.enterGroupScope(m.groups[m.gCursor]), nil
+			if m.gCursor < len(rows) && rows[m.gCursor].header {
+				m.weeklyCollapsed = !m.weeklyCollapsed
+				break
+			}
+			if onGroup && len(grp.Sessions) > 0 {
+				return m.enterGroupScope(grp), nil
 			}
 		case "o":
-			if m.gCursor < len(m.groups) && len(m.groups[m.gCursor].Sessions) > 0 {
-				m.confirmResumeAll = &m.groups[m.gCursor]
+			if onGroup && len(grp.Sessions) > 0 {
+				m.confirmResumeAll = &grp
 				m.confirmSel = 1
 			}
 		case "n":
@@ -1161,22 +1175,24 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "s":
 			m.groupNaming, m.groupInput = "snapshot", ""
 		case "d":
-			if m.gCursor < len(m.groups) && !m.groups[m.gCursor].Auto {
-				grp := m.groups[m.gCursor]
+			switch {
+			case onGroup && grp.Week != "":
+				m.notice, m.noticeErr = "weekly groups clear themselves after 30 days — c saves a copy to keep", true
+			case onGroup && !grp.Auto:
 				m.confirmDelGroup = &grp
 				m.confirmSel = 1 // Cancel default
 			}
 		case "c":
 			// Copy this group's membership into a new named group —
-			// freezes the ephemeral auto group into a durable one.
-			if m.gCursor < len(m.groups) && len(m.groups[m.gCursor].Sessions) > 0 {
-				m.saveAsIDs = append([]string(nil), m.groups[m.gCursor].Sessions...)
+			// freezes the auto group or a weekly group into a durable one.
+			if onGroup && len(grp.Sessions) > 0 {
+				m.saveAsIDs = append([]string(nil), grp.Sessions...)
 				m.groupNaming, m.groupInput = "saveas", ""
 			}
 		case "M":
 			// Merge this group's sessions into another (union; both kept).
-			if m.gCursor < len(m.groups) && len(m.mergeTargets(m.groups[m.gCursor].Name)) > 0 {
-				src := m.groups[m.gCursor]
+			if onGroup && len(m.mergeTargets(grp.Name)) > 0 {
+				src := grp
 				m.mergeSource, m.mgCursor = &src, 0
 			}
 		}
@@ -1890,6 +1906,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "-":
 		// While scoped into a group, remove the highlighted session.
+		if m.groupOpen != nil && m.groupOpen.Week != "" {
+			m.notice, m.noticeErr = "weekly groups track activity — e archives a session here instead", true
+			break
+		}
 		if m.groupOpen != nil && !m.groupOpen.Auto {
 			if session := m.selectedSession(); session != nil {
 				m.groups = removeSessionFromGroup(m.cfg, m.groups, m.groupOpen.Name, session.ID)
@@ -2303,12 +2323,63 @@ func (m model) sessionIndex() map[string]Session {
 	return byID
 }
 
-// manualGroupNames lists user groups (excluding the auto group, which is
-// not a hand-curated destination).
+// groupRow is one line of the groups page: a group (index into m.groups)
+// or the weekly section's fold/unfold header.
+type groupRow struct {
+	header bool
+	idx    int
+}
+
+// groupRows lays out the groups page: the auto and manual groups, then —
+// when any exist — the weekly section header and, unless folded, the
+// weekly groups (newest week first; sortGroups keeps them last).
+func (m model) groupRows() []groupRow {
+	var rows []groupRow
+	for i, g := range m.groups {
+		if g.Week == "" {
+			rows = append(rows, groupRow{idx: i})
+		}
+	}
+	if m.weeklyCount() == 0 {
+		return rows
+	}
+	rows = append(rows, groupRow{header: true, idx: -1})
+	if !m.weeklyCollapsed {
+		for i, g := range m.groups {
+			if g.Week != "" {
+				rows = append(rows, groupRow{idx: i})
+			}
+		}
+	}
+	return rows
+}
+
+func (m model) weeklyCount() int {
+	n := 0
+	for _, g := range m.groups {
+		if g.Week != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// cursorGroup returns the group under the groups-page cursor; false on the
+// weekly header or an empty page.
+func (m model) cursorGroup() (Group, bool) {
+	rows := m.groupRows()
+	if m.gCursor >= len(rows) || rows[m.gCursor].header {
+		return Group{}, false
+	}
+	return m.groups[rows[m.gCursor].idx], true
+}
+
+// manualGroupNames lists user groups (excluding the auto and weekly
+// groups, which are maintained automatically, not hand-curated).
 func manualGroupNames(groups []Group) []string {
 	var names []string
 	for _, g := range groups {
-		if !g.Auto {
+		if !g.Auto && g.Week == "" {
 			names = append(names, g.Name)
 		}
 	}
@@ -2316,11 +2387,11 @@ func manualGroupNames(groups []Group) []string {
 }
 
 // mergeTargets lists manual groups other than the named source — the
-// valid destinations for a merge (the auto group is never a target).
+// valid destinations for a merge (auto and weekly groups never are).
 func (m model) mergeTargets(source string) []string {
 	var out []string
 	for _, g := range m.groups {
-		if !g.Auto && g.Name != source {
+		if !g.Auto && g.Week == "" && g.Name != source {
 			out = append(out, g.Name)
 		}
 	}
@@ -3358,29 +3429,57 @@ func (m model) groupsView() string {
 		b.WriteString(styleDim.Render("  n  create an empty group, then + on sessions to fill it") + "\n")
 		return m.pinBottomBare(b.String(), "s snapshot open · n new · esc close")
 	}
-	b.WriteString(styleDim.Render(fmt.Sprintf("  %-24s %8s %8s", "GROUP", "SESSIONS", "OPEN")) + "\n")
-	for i, grp := range m.groups {
-		members := groupMembers(grp, byID)
-		open := 0
-		for _, s := range members {
-			if s.LiveStatus != "" {
-				open++
+	b.WriteString(styleDim.Render(fmt.Sprintf("  %-34s %8s %8s", "GROUP", "SESSIONS", "OPEN")) + "\n")
+	thisWeek := weekKey(nowFn())
+	for i, r := range m.groupRows() {
+		var row string
+		var style lipgloss.Style
+		styled := false
+		if r.header {
+			fold := "▾"
+			if m.weeklyCollapsed {
+				fold = "▸"
 			}
-		}
-		name := grp.Name
-		if grp.Auto {
-			name = "◷ " + name
-		}
-		row := fmt.Sprintf("  %-24s %8d %8d", truncate(name, 24), len(members), open)
-		if i == m.gCursor {
-			b.WriteString(styleCursor.Render(fmt.Sprintf("%-*s", m.width, row)) + "\n")
-		} else if grp.Auto {
-			b.WriteString(styleStale.Render(row) + "\n")
+			row = fmt.Sprintf("  %s weekly sessions (%d) — last 30 days", fold, m.weeklyCount())
+			style, styled = styleHeader, true
 		} else {
+			grp := m.groups[r.idx]
+			members := groupMembers(grp, byID)
+			open := 0
+			for _, s := range members {
+				if s.LiveStatus != "" {
+					open++
+				}
+			}
+			name := grp.Name
+			switch {
+			case grp.Auto:
+				name = "◷ " + name
+				style, styled = styleStale, true
+			case grp.Week == thisWeek:
+				name = "  this week (" + name + ")"
+			case grp.Week != "":
+				name = "  " + name
+				style, styled = styleDim, true
+			}
+			row = fmt.Sprintf("  %-34s %8d %8d", truncate(name, 34), len(members), open)
+		}
+		switch {
+		case i == m.gCursor:
+			b.WriteString(styleCursor.Render(fmt.Sprintf("%-*s", m.width, row)) + "\n")
+		case styled:
+			b.WriteString(style.Render(row) + "\n")
+		default:
 			b.WriteString(row + "\n")
 		}
 	}
-	return m.pinBottomBare(b.String(), "↑/↓ move · enter open · o resume all · s snapshot · n new · c copy · M merge · d delete · esc")
+	help := "↑/↓ move · enter open · o resume all · s snapshot · n new · c copy · M merge · d delete · esc"
+	if rows := m.groupRows(); m.gCursor < len(rows) && rows[m.gCursor].header {
+		help = "enter fold/unfold weekly sessions · ↑/↓ move · esc"
+	} else if grp, ok := m.cursorGroup(); ok && grp.Week != "" {
+		help = "↑/↓ move · enter open · o resume all · c copy to keep · M merge · clears after 30 days · esc"
+	}
+	return m.pinBottomBare(b.String(), help)
 }
 
 func (m model) menuView() string {

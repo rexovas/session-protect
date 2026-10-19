@@ -157,7 +157,7 @@ var claudeHistory = &historyCache{apply: func(line []byte, sessions map[string]l
 	if at.After(info.Last) {
 		info.Last = at
 	}
-	sessions[entry.SessionID] = info
+	sessions[entry.SessionID] = info.withWeek(at)
 }}
 
 var codexHistory = &historyCache{apply: func(line []byte, sessions map[string]lostInfo, titles map[string]string) {
@@ -182,7 +182,7 @@ var codexHistory = &historyCache{apply: func(line []byte, sessions map[string]lo
 	if at.After(info.Last) {
 		info.Last = at
 	}
-	sessions[entry.SessionID] = info
+	sessions[entry.SessionID] = info.withWeek(at)
 }}
 
 // claudeHistorySessions indexes the claude prompt history by session id —

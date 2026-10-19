@@ -7,6 +7,7 @@ import (
 
 	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/browse"
+	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/doctor"
 	"github.com/rexovas/session-protect/internal/guard"
 	"github.com/rexovas/session-protect/internal/hook"
@@ -28,9 +29,13 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 	switch args[0] {
 	case "backup", "save":
-		return backup.Run(args[1:], stdout, stderr, false)
+		code := backup.Run(args[1:], stdout, stderr, false)
+		recordWeekly(true)
+		return code
 	case "sync":
-		return backup.Run(args[1:], stdout, stderr, true)
+		code := backup.Run(args[1:], stdout, stderr, true)
+		recordWeekly(false)
+		return code
 	case "restore":
 		return restore.Run(args[1:], os.Stdin, stdout, stderr)
 	case "transplant":
@@ -106,4 +111,23 @@ func hasFlag(args []string, flag string) bool {
 		}
 	}
 	return false
+}
+
+// recordWeekly feeds the weekly session groups. Every sync (the agent's
+// turn-end hook) notes which sessions are open, which is cheap; a backup
+// (scheduled daily) also rebuilds the groups so they stay current and old
+// weeks clear even when the explorer is never opened. Best effort: it
+// never changes the command's outcome.
+func recordWeekly(rebuild bool) {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(cfg.BackupRoot); err != nil {
+		return // not set up yet: never create the backup root as a side effect
+	}
+	browse.RecordOpenSessions(cfg)
+	if rebuild {
+		browse.RecordWeekly(cfg)
+	}
 }

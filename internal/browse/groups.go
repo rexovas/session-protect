@@ -27,14 +27,17 @@ type Group struct {
 	Archived []string  `json:"archived,omitempty"` // hidden-by-default members
 	Created  time.Time `json:"created"`
 	Auto     bool      `json:"auto,omitempty"`
+	// Week is the Monday (YYYY-MM-DD) of a weekly group, "" for every
+	// other group. Weekly groups are maintained automatically.
+	Week string `json:"week,omitempty"`
 }
 
 func groupsPath(cfg config.Config) string {
 	return filepath.Join(cfg.BackupRoot, "groups.json")
 }
 
-// LoadGroups reads the saved groups, auto group first, then manual
-// groups by most-recent.
+// LoadGroups reads the saved groups: auto group first, then manual groups
+// by most-recent, then weekly groups newest week first.
 func LoadGroups(cfg config.Config) []Group {
 	data, err := os.ReadFile(groupsPath(cfg))
 	if err != nil {
@@ -50,10 +53,17 @@ func LoadGroups(cfg config.Config) []Group {
 
 func sortGroups(groups []Group) {
 	sort.SliceStable(groups, func(i, j int) bool {
-		if groups[i].Auto != groups[j].Auto {
-			return groups[i].Auto // auto group pinned first
+		a, b := groups[i], groups[j]
+		if a.Auto != b.Auto {
+			return a.Auto // auto group pinned first
 		}
-		return groups[i].Created.After(groups[j].Created)
+		if (a.Week != "") != (b.Week != "") {
+			return a.Week == "" // weekly groups last, in their own section
+		}
+		if a.Week != "" {
+			return a.Week > b.Week
+		}
+		return a.Created.After(b.Created)
 	})
 }
 
@@ -61,8 +71,13 @@ func saveGroups(cfg config.Config, groups []Group) {
 	if err := os.MkdirAll(cfg.BackupRoot, 0o700); err != nil {
 		return
 	}
+	// The explorer and the scheduled backup can both write this file;
+	// write-then-rename means a reader never sees it half-written.
 	if data, err := json.MarshalIndent(groups, "", "  "); err == nil {
-		_ = os.WriteFile(groupsPath(cfg), data, 0o600)
+		tmp := groupsPath(cfg) + ".tmp"
+		if os.WriteFile(tmp, data, 0o600) == nil {
+			_ = os.Rename(tmp, groupsPath(cfg))
+		}
 	}
 }
 
@@ -112,11 +127,11 @@ func removeSessionFromGroup(cfg config.Config, groups []Group, name, id string) 
 	return groups
 }
 
-// deleteGroup removes a whole group (the auto group cannot be deleted —
-// it just refreshes) and persists.
+// deleteGroup removes a whole group and persists. The auto and weekly
+// groups maintain themselves and cannot be deleted.
 func deleteGroup(cfg config.Config, groups []Group, name string) []Group {
 	idx := groupByName(groups, name)
-	if idx < 0 || groups[idx].Auto {
+	if idx < 0 || groups[idx].Auto || groups[idx].Week != "" {
 		return groups
 	}
 	groups = append(groups[:idx], groups[idx+1:]...)

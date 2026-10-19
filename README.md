@@ -58,7 +58,12 @@ The only network call is an optional once-daily release check
 - Session groups (`w`): named, cross-project sets of sessions — snapshot
   your currently-open sessions or hand-pick them (`+`), then resume the
   whole workspace in new windows or one at a time. A reserved *recently
-  open* group auto-tracks your working set so it survives a reboot
+  open* group auto-tracks your working set so it survives a reboot, and
+  *weekly sessions* keeps one group per Monday–Sunday week (e.g.
+  `10/12/26 - 10/18/26`) of every session you prompted, that wrote
+  output, or that was open — including weeks before you installed, from
+  the agents' prompt history. Weeks clear after 30 days; `c` copies one
+  into a normal group to keep it
 - One-key restore of deleted sessions from backup
 - `o` opens any session: jumps to its terminal window if it's running
   (Spaces included); a closed one resumes in a fresh terminal window or
@@ -128,7 +133,7 @@ shows the essentials; the complete reference lives under `m` → Keys.
 | `r` | restore/rescue a session; on a folder row, bulk-rescue its lost sessions |
 | `t` | transplant a session or project to another directory |
 | `x` | show/hide lost sessions |
-| `w` | groups: named session sets — open one to browse it as a scoped tree (`/`, `tab`, all as normal); `s` snapshot open · `c` copy · `M` merge · `d` delete |
+| `w` | groups: named session sets — open one to browse it as a scoped tree (`/`, `tab`, all as normal); `s` snapshot open · `c` copy · `M` merge · `d` delete · weekly groups fold under *weekly sessions* |
 | `+` | add the highlighted session (or all `space`-selected) to a group |
 | `v` | enter multi-select mode; `space` toggles, then `+` adds all selected to a group |
 | `m` | menu: stats · activity log · key reference |
