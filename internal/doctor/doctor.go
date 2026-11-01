@@ -4,8 +4,13 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
+	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/schedule"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -58,7 +63,70 @@ func Checks() []Check {
 		})
 	}
 
+	if runtime.GOOS == "darwin" {
+		checks = append(checks, scheduleCheck(schedule.Inspect(), lastBackup(), time.Now()))
+	}
+
 	return checks
+}
+
+// staleAfter is how old the newest backup may get before doctor warns: a
+// day plus slack for a machine that was asleep at the scheduled time.
+const staleAfter = 26 * time.Hour
+
+const reloadHint = "run: session-protect schedule reload"
+
+// scheduleCheck reports whether the daily backup is actually running. An
+// agent can look installed while launchd refuses every run, for example
+// after its binary was replaced; the failed exit and the age of the newest
+// backup are what show it.
+func scheduleCheck(agent schedule.Agent, last time.Time, now time.Time) Check {
+	check := Check{Name: "schedule", Status: "ok"}
+	switch {
+	case !agent.Installed:
+		check.Status = "warn"
+		check.Warning = "no daily backup scheduled (session-protect schedule install)"
+		return check
+	case !agent.Loaded:
+		check.Status = "warn"
+		check.Warning = "agent installed but not loaded; " + reloadHint
+		return check
+	}
+	if !last.IsZero() {
+		check.Detail = "last backup " + last.Format("2006-01-02 15:04")
+	}
+	var problems []string
+	if agent.HasExit && agent.LastExit != 0 {
+		problems = append(problems, fmt.Sprintf("last scheduled run failed (exit %d)", agent.LastExit))
+	}
+	if !last.IsZero() && now.Sub(last) > staleAfter {
+		problems = append(problems, "no backup since "+last.Format("2006-01-02"))
+	}
+	if len(problems) > 0 {
+		check.Status = "warn"
+		check.Warning = strings.Join(problems, "; ") + "; " + reloadHint
+	}
+	return check
+}
+
+// lastBackup is the time of the newest commit across the backup repos, or
+// zero when there is none.
+func lastBackup() time.Time {
+	cfg, err := config.Load()
+	if err != nil {
+		return time.Time{}
+	}
+	var newest time.Time
+	for _, name := range []string{"all", "claude", "codex"} {
+		out, err := exec.Command("git", "-C", filepath.Join(cfg.BackupRoot, name), "log", "-1", "--format=%cI").Output()
+		if err != nil {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339, strings.TrimSpace(string(out))); err == nil && at.After(newest) {
+			newest = at
+		}
+	}
+	return newest
 }
 
 func commandCheck(name string, versionCommand string) Check {

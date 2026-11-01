@@ -53,7 +53,10 @@ homebrew_casks:
     custom_block: |
       binary "session-protect", target: "sp"
     # The binaries are not signed or notarized; without this, macOS refuses
-    # to run a binary downloaded by brew.
+    # to run a binary downloaded by brew. Nothing here can reload the daily
+    # backup agent after an upgrade: Homebrew runs these steps in a sandbox
+    # with a temporary HOME. The binary heals itself instead (heal in
+    # internal/app).
     hooks:
       post:
         install_steps: |

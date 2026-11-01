@@ -65,6 +65,13 @@ mkdir -p "$BIN_DIR"
 install -m 0755 "$tmp/session-protect" "$BIN_DIR/session-protect"
 ln -sf "$BIN_DIR/session-protect" "$BIN_DIR/sp"
 
+# launchd refuses to start a LaunchAgent whose binary changed since it was
+# loaded, so a replaced binary silently stops the daily backup. Re-register
+# the agent if one is installed (this also starts a backup).
+if [ "$(uname -s)" = "Darwin" ] && [ -f "$HOME/Library/LaunchAgents/com.session-protect.backup.plist" ]; then
+  "$BIN_DIR/session-protect" schedule reload || echo "warning: could not reload the daily backup schedule; run: session-protect schedule reload" >&2
+fi
+
 echo "Installed $BIN_DIR/session-protect ($tag) with sp alias."
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

@@ -28,6 +28,17 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "guard":
+		// Runs inline at every session start; keep it to its own work.
+	case "browse", "ui":
+		heal() // long-running: repair before it starts
+	default:
+		// After the command, so a reload's backup can't collide with a
+		// backup or sync still holding the lock.
+		defer heal()
+	}
+
+	switch args[0] {
 	case "backup", "save":
 		code := backup.Run(args[1:], stdout, stderr, false)
 		recordWeekly(true)
@@ -130,4 +141,19 @@ func recordWeekly(rebuild bool) {
 	if rebuild {
 		browse.RecordWeekly(cfg)
 	}
+}
+
+// heal repairs what replacing the binary outside `session-protect update`
+// breaks, such as `brew upgrade` (whose sandbox cannot do it) or a manual
+// reinstall: hooks pointing at a removed binary, and a backup agent launchd
+// no longer starts. It runs with every command but guard: sync after every
+// agent turn, and any command a user types, which matters once the hooks
+// and agent both name a removed binary and only a typed command can run.
+// Cheap when nothing changed. Quiet and best effort: `session-protect
+// doctor` reports what is left.
+//
+// A variable so tests never repair the real hooks or agent.
+var heal = func() {
+	_, _ = hook.Repair()
+	_, _ = schedule.ReloadIfStale()
 }

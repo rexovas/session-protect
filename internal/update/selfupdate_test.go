@@ -20,6 +20,12 @@ import (
 	"github.com/rexovas/session-protect/internal/version"
 )
 
+// Tests never reload the real launchd agent; a test that cares about the
+// reload replaces this stub.
+func init() {
+	reloadSchedule = func() (bool, error) { return false, nil }
+}
+
 func TestSemverLess(t *testing.T) {
 	cases := []struct {
 		a, b string
@@ -63,8 +69,11 @@ func releaseArchive(t *testing.T, content string) (archive []byte, sums string) 
 	return buf.Bytes(), hex.EncodeToString(sum[:]) + "  " + assetName("v1.1.0") + "\n"
 }
 
-func TestApplyEndToEnd(t *testing.T) {
-	archive, sums := releaseArchive(t, "NEW BINARY BYTES")
+// serveRelease points the updater at a local release server and the
+// running binary at a scratch file holding "OLD"; it returns that file.
+func serveRelease(t *testing.T, content string) string {
+	t.Helper()
+	archive, sums := releaseArchive(t, content)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "checksums.txt"):
@@ -75,7 +84,7 @@ func TestApplyEndToEnd(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 	downloadBase = server.URL
 	t.Cleanup(func() { downloadBase = "https://github.com" })
 
@@ -85,10 +94,21 @@ func TestApplyEndToEnd(t *testing.T) {
 	}
 	executablePath = func() (string, error) { return target, nil }
 	t.Cleanup(func() { executablePath = os.Executable })
+	return target
+}
+
+func TestApplyEndToEnd(t *testing.T) {
+	serveRelease(t, "NEW BINARY BYTES")
+	reloaded := false
+	reloadSchedule = func() (bool, error) { reloaded = true; return true, nil }
+	t.Cleanup(func() { reloadSchedule = func() (bool, error) { return false, nil } })
 
 	path, err := Apply("v1.1.0")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !reloaded {
+		t.Fatal("Apply must reload the backup schedule after swapping the binary")
 	}
 	data, _ := os.ReadFile(path)
 	if string(data) != "NEW BINARY BYTES" {
@@ -97,6 +117,23 @@ func TestApplyEndToEnd(t *testing.T) {
 	info, _ := os.Stat(path)
 	if info.Mode()&0o111 == 0 {
 		t.Fatal("updated binary not executable")
+	}
+}
+
+func TestApplyReportsScheduleReloadFailure(t *testing.T) {
+	target := serveRelease(t, "NEW BINARY BYTES")
+	reloadSchedule = func() (bool, error) { return true, errors.New("bootstrap failed") }
+	t.Cleanup(func() { reloadSchedule = func() (bool, error) { return false, nil } })
+
+	path, err := Apply("v1.1.0")
+	if !errors.Is(err, ErrScheduleNotReloaded) {
+		t.Fatalf("want ErrScheduleNotReloaded, got %v", err)
+	}
+	if want, _ := filepath.EvalSymlinks(target); path != want {
+		t.Fatalf("path = %q, want the swapped binary %q", path, want)
+	}
+	if data, _ := os.ReadFile(target); string(data) != "NEW BINARY BYTES" {
+		t.Fatalf("binary must still be swapped when only the reload fails: %q", data)
 	}
 }
 

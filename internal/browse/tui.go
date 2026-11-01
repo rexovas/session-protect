@@ -860,7 +860,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateDoneMsg:
 		m.updateBusy = false
 		m.updateOffer = ""
-		if msg.err != nil {
+		// The binary was replaced but the schedule wasn't reloaded: relaunch
+		// into the new binary anyway; `session-protect doctor` flags the agent.
+		if msg.err != nil && !errors.Is(msg.err, update.ErrScheduleNotReloaded) {
 			if errors.Is(msg.err, update.ErrBrewManaged) {
 				m.notice = msg.err.Error()
 				m.noticeErr = false

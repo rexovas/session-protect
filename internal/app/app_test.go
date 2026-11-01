@@ -8,6 +8,28 @@ import (
 	"testing"
 )
 
+// Tests never repair the real hooks or backup agent; a test that cares
+// replaces this stub.
+func init() {
+	heal = func() {}
+}
+
+func TestHealRunsAfterCommandsButNotGuard(t *testing.T) {
+	calls := 0
+	heal = func() { calls++ }
+	t.Cleanup(func() { heal = func() {} })
+
+	var out, errOut bytes.Buffer
+	Run([]string{"version"}, &out, &errOut)
+	if calls != 1 {
+		t.Fatalf("heal ran %d times for version, want 1", calls)
+	}
+	Run([]string{"guard"}, &out, &errOut)
+	if calls != 1 {
+		t.Fatalf("heal ran for guard (%d calls); guard must stay on its own work", calls)
+	}
+}
+
 func TestVersionCommand(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

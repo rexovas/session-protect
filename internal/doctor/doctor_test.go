@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/rexovas/session-protect/internal/schedule"
 )
 
 func TestChecksAndRun(t *testing.T) {
@@ -37,5 +40,29 @@ func TestChecksAndRun(t *testing.T) {
 	Run(&out)
 	if !strings.Contains(out.String(), "git") {
 		t.Fatalf("doctor output missing checks: %s", out.String())
+	}
+}
+
+func TestScheduleCheck(t *testing.T) {
+	now := time.Date(2026, 10, 31, 22, 0, 0, 0, time.UTC)
+	recent := now.Add(-3 * time.Hour)
+	for _, tc := range []struct {
+		name   string
+		agent  schedule.Agent
+		last   time.Time
+		status string
+		warn   string
+	}{
+		{"not installed", schedule.Agent{}, recent, "warn", "no daily backup scheduled"},
+		{"not loaded", schedule.Agent{Installed: true}, recent, "warn", "not loaded"},
+		{"healthy", schedule.Agent{Installed: true, Loaded: true, HasExit: true}, recent, "ok", ""},
+		{"never ran", schedule.Agent{Installed: true, Loaded: true}, recent, "ok", ""},
+		{"refused by launchd", schedule.Agent{Installed: true, Loaded: true, HasExit: true, LastExit: 78}, now.Add(-43 * 24 * time.Hour), "warn", "last scheduled run failed (exit 78); no backup since 2026-09-18"},
+		{"stale only", schedule.Agent{Installed: true, Loaded: true, HasExit: true}, now.Add(-30 * time.Hour), "warn", "no backup since 2026-10-30"},
+	} {
+		got := scheduleCheck(tc.agent, tc.last, now)
+		if got.Status != tc.status || !strings.Contains(got.Warning, tc.warn) {
+			t.Errorf("%s: got %s %q; want %s containing %q", tc.name, got.Status, got.Warning, tc.status, tc.warn)
+		}
 	}
 }
