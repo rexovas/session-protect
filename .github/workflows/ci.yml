@@ -55,3 +55,6 @@ jobs:
           gitleaks detect --source . --redact
       - name: shellcheck
         run: shellcheck scripts/*.sh
+      # scripts/next-version.sh decides release versions (release.yml).
+      - name: next-version.sh cases
+        run: bash scripts/next-version_test.sh

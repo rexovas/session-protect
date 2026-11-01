@@ -1,0 +1,83 @@
+# Every pull request states its release level with exactly one semver label.
+# On merge to main, the release workflow cuts a release at the highest level
+# among the pull requests merged since the latest release (docs/RELEASING.md).
+#
+# Labels are read from the event payload; the job makes no API call. The rule
+# is the same for every author; Dependabot labels its own pull requests
+# (.github/dependabot.yml). Releases are cut from the public repository only,
+# so the check runs only there.
+name: Semver label
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  semver-label:
+    name: semver label
+    if: github.repository == 'rexovas/session-protect'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Exactly one semver label
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t semver < <(printf '%s' "$LABELS" | jq -r '.[] | select(startswith("semver:"))')
+
+          explain() {
+            cat <<'TEXT'
+          Apply exactly one of these labels to the pull request:
+
+            semver:patch  fixes and internal changes
+            semver:minor  new behaviour, backward compatible
+            semver:major  a breaking change; say why in the description,
+                          on a line starting "Breaking:"
+            semver:none   no release: docs, CI, tests, housekeeping
+
+          On merge, main releases at the highest level among the pull
+          requests merged since the latest release.
+          TEXT
+          }
+
+          case ${#semver[@]} in
+            0)
+              echo "::error::This pull request has no semver label."
+              explain
+              exit 1
+              ;;
+            1) ;;
+            *)
+              echo "::error::This pull request has ${#semver[@]} semver labels (${semver[*]}); it needs exactly one."
+              explain
+              exit 1
+              ;;
+          esac
+
+          label=${semver[0]}
+          case $label in
+            semver:patch | semver:minor | semver:none) ;;
+            semver:major)
+              if ! printf '%s\n' "$BODY" | tr -d '\r' | grep -Eq '^[[:space:]]*Breaking:[[:space:]]*[^[:space:]]'; then
+                echo "::error::semver:major requires the description to say what breaks, on a line starting \"Breaking:\"."
+                echo 'Add a line such as "Breaking: the backup command is renamed" to the pull request description.'
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Unknown semver label: $label"
+              explain
+              exit 1
+              ;;
+          esac
+
+          echo "Release level: ${label#semver:}"

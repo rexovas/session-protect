@@ -35,24 +35,38 @@ archives:
 checksum:
   name_template: checksums.txt
 
-brews:
-  - repository:
+# A cask, not a formula: casks are Homebrew's way to ship prebuilt binaries
+# (GoReleaser deprecated `brews` for this). Installs land in Caskroom, which
+# internal/update recognises as brew-managed.
+homebrew_casks:
+  - name: session-protect
+    repository:
       owner: rexovas
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: https://github.com/rexovas/session-protect
     description: "Protect, explore, and command your AI coding-agent sessions"
-    license: Apache-2.0
-    install: |
-      bin.install "session-protect"
-      bin.install_symlink "session-protect" => "sp"
-    test: |
-      system "#{bin}/session-protect", "version"
+    binaries:
+      - session-protect
+    # The `sp` alias the formula installed with bin.install_symlink.
+    custom_block: |
+      binary "session-protect", target: "sp"
+    # The binaries are not signed or notarized; without this, macOS refuses
+    # to run a binary downloaded by brew.
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/session-protect"]
+          end
 
 changelog:
   use: github-native
 
 release:
+  # The release workflow tags locally only; GitHub creates the tag with the
+  # release, on the commit being released rather than main's head.
+  target_commitish: "{{ .FullCommit }}"
   draft: false
   prerelease: auto

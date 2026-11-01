@@ -2,12 +2,17 @@
 # GitHub Actions but carry no .github/dependabot.yml. Patch-level github-actions
 # bumps are grouped into one PR so Delegate auto-merges them once Greenlight is
 # green; minor/major updates arrive as separate PRs for human review.
+#
+# Every pull request needs a semver label (docs/RELEASING.md). Action bumps
+# change CI, not the shipped binary, so they release nothing. Setting `labels`
+# replaces Dependabot's defaults, so the entry restates them.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    labels: ["semver:none", "dependencies", "github_actions"]
     groups:
       actions-patch:
         patterns: ["*"]
