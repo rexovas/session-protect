@@ -1,29 +1,191 @@
+# Releases: cut on every push to main that warrants one. The plan job reads
+# the pull requests merged since the latest release, takes the highest semver
+# label among them and computes the next tag with scripts/next-version.sh. An
+# empty tag means nothing merged since the last release changes the shipped
+# binary, and the run ends there. Otherwise the release job tags this commit
+# and runs GoReleaser: archives, checksums.txt, the GitHub release and the
+# Homebrew formula (docs/RELEASING.md).
+#
+# Everything happens in one run because a tag created with GITHUB_TOKEN
+# triggers no other workflow. The tag is created locally only; GitHub creates
+# it together with the release, pinned to this commit (release.target_commitish
+# in .goreleaser.yaml), so a run that fails before publishing leaves no tag
+# behind and the next push retries.
+#
+# The workflow file is shared with the private development repository, where
+# it must do nothing: every job is gated to the public repository.
 name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
+
+# One release at a time, never cancelled midway: each run reads the release
+# the previous one created. GitHub keeps only one pending run per group, so a
+# run waiting behind another can be replaced by a newer push; that is safe,
+# because the plan job recomputes from the latest release and the newer run
+# covers everything the replaced one would have released.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  goreleaser:
+  plan:
+    name: plan
+    if: github.repository == 'rexovas/session-protect'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      latest: ${{ steps.plan.outputs.latest }}
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # every tag and the first-parent history since the latest
+
+      - name: Compute the release
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # The latest release: the highest strict-semver tag that has a
+          # published (non-draft) GitHub release.
+          released=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 \
+            --json tagName,isDraft --jq '.[] | select(.isDraft | not) | .tagName')
+          latest=""
+          while IFS= read -r t; do
+            if [[ $t =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] &&
+              grep -qxF -- "$t" <<<"$released"; then
+              latest=$t
+              break
+            fi
+          done < <(git tag -l 'v*.*.*' --sort=-v:refname)
+          if [ -z "$latest" ]; then
+            echo "::error::No v*.*.* tag with a published release to count from."
+            exit 1
+          fi
+          echo "Latest release: $latest"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+          levels=$(mktemp)
+          count=0
+
+          # Highest semver level among a pull request's labels, or empty.
+          level_of() {
+            local best="" l
+            for l in "$@"; do
+              case $l in
+                semver:major) best=major ;;
+                semver:minor) [ "$best" = major ] || best=minor ;;
+                semver:patch) [ "$best" = major ] || [ "$best" = minor ] || best="patch" ;;
+                semver:none) [ -n "$best" ] || best=none ;;
+              esac
+            done
+            printf '%s' "$best"
+          }
+
+          while IFS=$'\t' read -r sha subject; do
+            [ -n "$sha" ] || continue
+            count=$((count + 1))
+            if [[ $subject =~ \(#([0-9]+)\)$ ]]; then
+              pr=${BASH_REMATCH[1]}
+              info=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" \
+                --jq '{title: .title, labels: [.labels[].name | select(startswith("semver:"))]}')
+              title=$(jq -r '.title' <<<"$info")
+              mapfile -t labels < <(jq -r '.labels[]' <<<"$info")
+              if [ "${#labels[@]}" -gt 1 ]; then
+                echo "::warning::#$pr carries ${#labels[@]} semver labels (${labels[*]}); the highest applies."
+              fi
+              level=$(level_of "${labels[@]+"${labels[@]}"}")
+              if [ -z "$level" ]; then
+                level="patch"
+                echo "::warning::#$pr ($title) merged without a semver label; releasing it as patch."
+              fi
+            else
+              level="patch"
+              echo "::warning::${sha:0:7} ($subject) names no pull request; releasing it as patch."
+            fi
+            echo "$level" >> "$levels"
+            echo "${sha:0:7} $level  $subject"
+          done < <(git log --first-parent --format='%H%x09%s' "$latest..$GITHUB_SHA")
+
+          tag=$(bash scripts/next-version.sh "$latest" < "$levels")
+          if [ -z "$tag" ]; then
+            echo "::notice::No release: nothing since $latest changes the shipped binary"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Never move or reuse a tag.
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null ||
+            grep -qxF -- "$tag" <<<"$released"; then
+            echo "::error::Computed $tag from $latest, but $tag already exists. Tags are never moved; resolve by hand."
+            exit 1
+          fi
+
+          echo "Release $tag ($count commits since $latest)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: release
+    needs: plan
+    if: needs.plan.outputs.tag != ''
+    runs-on: ubuntu-latest
+    # The only write in the workflow: GoReleaser creates the tag and the
+    # release and uploads its assets.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # GoReleaser and the generated notes need the previous tag
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
-      - name: Verify tag matches the module
+      # main only takes merges that passed CI; this re-checks the exact
+      # commit being shipped.
+      - name: Gate (vet, race tests)
         run: |
-          go test ./... >/dev/null
-          echo "releasing ${GITHUB_REF_NAME}"
+          go vet ./...
+          go test -race ./...
+
+      - name: Tag the commit locally
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # The plan checked this too; check again against the remote, since
+          # a tag may have been pushed while the plan ran.
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+            echo "::error::$TAG already exists on the remote. Tags are never moved; resolve by hand."
+            exit 1
+          fi
+          git tag "$TAG" "$GITHUB_SHA"
+
+      # GitHub's generated notes (merged pull request titles), computed
+      # against this commit explicitly: the tag does not exist on GitHub yet,
+      # and without a target GitHub would measure to main's current head.
+      # Written outside the checkout, which GoReleaser requires to be clean.
+      - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          LATEST: ${{ needs.plan.outputs.latest }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+            -f previous_tag_name="$LATEST" --jq .body > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
 
       # Short-lived token from the org's app — no long-lived PAT. The app
       # needs contents:write and an installation covering homebrew-tap.
@@ -39,7 +201,7 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes ${{ runner.temp }}/notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ steps.tap-token.outputs.token }}

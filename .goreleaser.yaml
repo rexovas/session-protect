@@ -54,5 +54,8 @@ changelog:
   use: github-native
 
 release:
+  # The release workflow tags locally only; GitHub creates the tag with the
+  # release, on the commit being released rather than main's head.
+  target_commitish: "{{ .FullCommit }}"
   draft: false
   prerelease: auto
