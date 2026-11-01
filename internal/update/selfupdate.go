@@ -129,13 +129,15 @@ func assetName(tag string) string {
 // test binary itself.
 var executablePath = os.Executable
 
-// ErrBrewManaged means the binary lives in Homebrew's Cellar; swapping it
-// underneath brew desyncs its bookkeeping, so updates route to brew.
+// ErrBrewManaged means the binary lives in Homebrew's Cellar (formula) or
+// Caskroom (cask); swapping it underneath brew desyncs its bookkeeping, so
+// updates route to brew.
 var ErrBrewManaged = errors.New("installed via Homebrew — update with: brew upgrade session-protect")
 
-// brewManaged reports whether path is inside a Homebrew Cellar.
+// brewManaged reports whether path is inside a Homebrew Cellar or Caskroom.
 func brewManaged(path string) bool {
-	return strings.Contains(path, string(os.PathSeparator)+"Cellar"+string(os.PathSeparator))
+	sep := string(os.PathSeparator)
+	return strings.Contains(path, sep+"Cellar"+sep) || strings.Contains(path, sep+"Caskroom"+sep)
 }
 
 // IsBrewManaged reports whether the running binary was installed via

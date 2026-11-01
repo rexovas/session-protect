@@ -4,7 +4,7 @@
 # empty tag means nothing merged since the last release changes the shipped
 # binary, and the run ends there. Otherwise the release job tags this commit
 # and runs GoReleaser: archives, checksums.txt, the GitHub release and the
-# Homebrew formula (docs/RELEASING.md).
+# Homebrew cask (docs/RELEASING.md).
 #
 # Everything happens in one run because a tag created with GITHUB_TOKEN
 # triggers no other workflow. The tag is created locally only; GitHub creates

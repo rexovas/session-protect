@@ -155,6 +155,9 @@ func TestBrewManagedRouting(t *testing.T) {
 	if !brewManaged("/opt/homebrew/Cellar/session-protect/1.0.0/bin/session-protect") {
 		t.Fatal("Cellar path must be brew-managed")
 	}
+	if !brewManaged("/opt/homebrew/Caskroom/session-protect/1.3.1/session-protect") {
+		t.Fatal("Caskroom path must be brew-managed")
+	}
 	if brewManaged("/Users/x/.local/bin/session-protect") {
 		t.Fatal("local bin must not be brew-managed")
 	}

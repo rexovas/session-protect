@@ -57,7 +57,7 @@ contribute picks up everything merged in between.
 When the plan yields a tag, the **release** job re-runs `go vet` and the race
 tests on the merged commit, tags it locally and runs GoReleaser:
 cross-platform archives (darwin/linux/windows × amd64/arm64), `checksums.txt`,
-the GitHub release and the Homebrew formula. GitHub creates the tag together
+the GitHub release and the Homebrew cask. GitHub creates the tag together
 with the release, on the merged commit (`release.target_commitish`). The
 notes are GitHub's generated list of merged pull request titles — keep those
 titles descriptive, they are the changelog.
@@ -91,11 +91,17 @@ there they do nothing.
   so it only needs re-uploading when the script changes (maintainers:
   `aws s3 cp scripts/get.sh s3://rexovas-artifacts-public/session-protect
   --content-type text/x-shellscript`).
-- **Homebrew**: GoReleaser pushes the formula to `rexovas/homebrew-tap`
-  on every release, authenticating with a short-lived token minted from
-  the org's GitHub App (contents-write, installed on the tap). The
-  `OSS_APP_CLIENT_ID` and `OSS_APP_PRIVATE_KEY` repo secrets must exist
-  before the first release.
+- **Homebrew**: GoReleaser pushes a cask to `rexovas/homebrew-tap`
+  (`Casks/session-protect.rb`) on every release, authenticating with a
+  short-lived token minted from the org's GitHub App (contents-write,
+  installed on the tap). The `OSS_APP_CLIENT_ID` and `OSS_APP_PRIVATE_KEY`
+  repo secrets must exist before the first release. The cask links
+  `session-protect` and the `sp` alias into Homebrew's bin and clears the
+  macOS quarantine flag after install, since the binaries are not
+  notarized. Releases up to v1.3.0 shipped a formula instead; the tap's
+  `tap_migrations.json` moves existing installs to the cask on their next
+  `brew update`. Brew installs (Cellar or Caskroom) are told to
+  `brew upgrade` rather than self-updating.
 
 ## Notes
 
