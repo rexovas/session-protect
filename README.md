@@ -157,6 +157,7 @@ sp browse                     the session explorer (alias: ui)
 sp index [--clear]            build the semantic-search index (opt-in)
 sp hook install               realtime sync + session guard hooks
 sp schedule install           daily backup (macOS launchd)
+sp schedule reload            re-register it after replacing the binary
 sp status | project status    machine-wide / per-project protection state
 sp plan | doctor | version    what would back up · env checks · build info
 ```

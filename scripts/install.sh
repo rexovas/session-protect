@@ -96,6 +96,13 @@ fi
   echo "version=$version"
 } > "$share_dir/install.env"
 
+# launchd refuses to start a LaunchAgent whose binary changed since it was
+# loaded, so a replaced binary silently stops the daily backup. Re-register
+# the agent if one is installed (this also starts a backup).
+if [[ "$(uname -s)" == "Darwin" && -f "$HOME/Library/LaunchAgents/com.session-protect.backup.plist" ]]; then
+  "$binary" schedule reload || echo "warning: could not reload the daily backup schedule; run: session-protect schedule reload" >&2
+fi
+
 echo "Installed $binary"
 if [[ "$install_alias" -eq 1 ]]; then
   echo "Installed alias $alias_binary"

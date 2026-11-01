@@ -92,3 +92,63 @@ func TestInstallCreatesSettingsWhenMissing(t *testing.T) {
 		t.Fatal("managed hook missing")
 	}
 }
+
+func TestRepairRepointsBrokenHooks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A Homebrew prefix with the cask's versioned binary and stable link.
+	prefix := filepath.Join(home, "brew")
+	versioned := filepath.Join(prefix, "Caskroom", "session-protect", "1.3.1", "session-protect")
+	stable := filepath.Join(prefix, "bin", "session-protect")
+	working := filepath.Join(home, "other", "session-protect")
+	for _, file := range []string{versioned, working} {
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(stable), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(versioned, stable); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(home, "deleted", "session-protect")
+
+	settings := map[string]any{"hooks": map[string]any{
+		"Stop": []any{
+			map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "(" + versioned + " sync >/dev/null 2>&1 &) " + marker}}},
+			map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "echo unrelated"}}},
+		},
+		"SessionStart": []any{
+			map[string]any{"hooks": []any{map[string]any{"type": "command", "command": gone + " guard " + marker}}},
+		},
+		"PreCompact": []any{
+			map[string]any{"hooks": []any{map[string]any{"type": "command", "command": working + " guard " + marker}}},
+		},
+	}}
+	current := filepath.Join(home, "current", "session-protect")
+	if n := repoint(settings, current); n != 2 {
+		t.Fatalf("repointed %d commands, want 2", n)
+	}
+
+	command := func(event string, i int) string {
+		entries := settings["hooks"].(map[string]any)[event].([]any)
+		return entries[i].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"].(string)
+	}
+	if got, want := command("Stop", 0), "("+stable+" sync >/dev/null 2>&1 &) "+marker; got != want {
+		t.Errorf("versioned brew binary: got %q, want %q", got, want)
+	}
+	if got := command("Stop", 1); got != "echo unrelated" {
+		t.Errorf("unmanaged hook changed: %q", got)
+	}
+	if got, want := command("SessionStart", 0), current+" guard "+marker; got != want {
+		t.Errorf("missing binary: got %q, want %q", got, want)
+	}
+	if got, want := command("PreCompact", 0), working+" guard "+marker; got != want {
+		t.Errorf("working install must be left alone: got %q", got)
+	}
+}

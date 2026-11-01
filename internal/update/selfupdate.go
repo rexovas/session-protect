@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rexovas/session-protect/internal/schedule"
 	"github.com/rexovas/session-protect/internal/version"
 )
 
@@ -154,6 +155,14 @@ func IsBrewManaged() bool {
 	return brewManaged(exe)
 }
 
+// ErrScheduleNotReloaded means the binary was replaced but the daily backup
+// agent could not be re-registered for it, so scheduled backups will not run
+// until `session-protect schedule reload` succeeds.
+var ErrScheduleNotReloaded = errors.New("updated, but the daily backup schedule could not be reloaded")
+
+// reloadSchedule is injectable so tests never touch the real launchd agent.
+var reloadSchedule = schedule.Reload
+
 // BrewUpgradeCommand is the shell command that upgrades a Homebrew install.
 const BrewUpgradeCommand = "brew upgrade rexovas/tap/session-protect"
 
@@ -203,6 +212,11 @@ func Apply(tag string) (string, error) {
 	if err := os.Rename(tmp, exe); err != nil {
 		_ = os.Remove(tmp)
 		return "", err
+	}
+	// launchd refuses to start an agent whose binary changed since it was
+	// loaded; re-register it, or scheduled backups silently stop.
+	if _, err := reloadSchedule(); err != nil {
+		return exe, fmt.Errorf("%w: %v (run: session-protect schedule reload)", ErrScheduleNotReloaded, err)
 	}
 	return exe, nil
 }

@@ -1,6 +1,7 @@
 package update
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -88,6 +89,11 @@ func selfUpdate(stdout io.Writer, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "Updating %s → %s …\n", current, latest)
 	path, err := Apply(latest)
+	if errors.Is(err, ErrScheduleNotReloaded) {
+		fmt.Fprintf(stdout, "Updated %s to %s.\n", path, latest)
+		fmt.Fprintf(stderr, "warning: %v\n", err)
+		return 1
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "update failed: %v\n", err)
 		return 1

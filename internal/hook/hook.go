@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/rexovas/session-protect/internal/binpath"
 )
 
 // marker identifies entries this tool manages inside the agent's hook config,
@@ -58,10 +60,7 @@ func settingsPath() string {
 // detached sync at every turn end, and the synchronous reopen guard at
 // session start (it must run inline to emit its warning, and is fast).
 func managedHooks() (map[string]string, error) {
-	binary, err := os.Executable()
-	if err == nil {
-		binary, err = filepath.EvalSymlinks(binary)
-	}
+	binary, err := binpath.Current()
 	if err != nil {
 		return nil, err
 	}
@@ -102,21 +101,107 @@ func install(stdout io.Writer, stderr io.Writer) int {
 		})
 		installed++
 	}
-	if installed == 0 {
+	settings["hooks"] = hooks
+	repointed := repoint(settings, currentBinary(commands))
+	if installed == 0 && repointed == 0 {
 		fmt.Fprintf(stdout, "hooks already installed in %s\n", path)
 		return 0
 	}
-	settings["hooks"] = hooks
 
 	if err := writeSettings(path, settings); err != nil {
 		fmt.Fprintf(stderr, "hook install failed: %v\n", err)
 		return 1
+	}
+	if installed == 0 {
+		fmt.Fprintf(stdout, "Repointed %d hook(s) in %s at a working binary\n", repointed, path)
+		return 0
 	}
 	fmt.Fprintf(stdout, "Installed hooks in %s\n", path)
 	fmt.Fprintln(stdout, "  Stop          sync after every turn")
 	fmt.Fprintln(stdout, "  SessionStart  warn when a session is already open elsewhere")
 	fmt.Fprintln(stdout, "Running sessions pick hooks up on restart.")
 	return 0
+}
+
+// Repair repoints installed hooks whose binary no longer works: one in a
+// versioned Homebrew directory (removed by the next upgrade) moves to
+// Homebrew's stable link, and one whose binary is gone moves to the running
+// binary. Hooks pointing at another working install are left alone. It
+// reports how many hook commands it rewrote.
+func Repair() (int, error) {
+	commands, err := managedHooks()
+	if err != nil {
+		return 0, err
+	}
+	path := settingsPath()
+	if _, err := os.Stat(path); err != nil {
+		return 0, nil
+	}
+	settings, err := loadSettings(path)
+	if err != nil {
+		return 0, err
+	}
+	n := repoint(settings, currentBinary(commands))
+	if n == 0 {
+		return 0, nil
+	}
+	return n, writeSettings(path, settings)
+}
+
+// currentBinary is the binary the managed hook commands invoke.
+func currentBinary(commands map[string]string) string {
+	return commandBinary(commands["SessionStart"])
+}
+
+// repoint rewrites the binary in each managed hook command whose binary is
+// broken (see Repair), keeping the rest of the command as written. It
+// returns the number of commands rewritten.
+func repoint(settings map[string]any, current string) int {
+	hooks, _ := settings["hooks"].(map[string]any)
+	n := 0
+	for _, raw := range hooks {
+		entries, _ := raw.([]any)
+		for _, entry := range entries {
+			if !entryIsManaged(entry) {
+				continue
+			}
+			entryMap, _ := entry.(map[string]any)
+			inner, _ := entryMap["hooks"].([]any)
+			for _, h := range inner {
+				hookMap, _ := h.(map[string]any)
+				command, _ := hookMap["command"].(string)
+				binary := commandBinary(command)
+				if name := filepath.Base(binary); name != "session-protect" && name != "sp" {
+					continue
+				}
+				if want := replacement(binary, current); want != binary {
+					hookMap["command"] = strings.Replace(command, binary, want, 1)
+					n++
+				}
+			}
+		}
+	}
+	return n
+}
+
+func replacement(binary string, current string) string {
+	if stable := binpath.Stable(binary); stable != binary {
+		return stable
+	}
+	if _, err := os.Stat(binary); err != nil && current != "" {
+		return current
+	}
+	return binary
+}
+
+// commandBinary is the program a hook command runs: its first word, without
+// the "(" that backgrounds the sync hook.
+func commandBinary(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(fields[0], "(")
 }
 
 func status(stdout io.Writer) int {
