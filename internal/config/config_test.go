@@ -132,3 +132,25 @@ func TestExpandHome(t *testing.T) {
 		t.Fatal("absolute paths must pass through")
 	}
 }
+
+func TestEffectiveKeep(t *testing.T) {
+	cfg := Defaults()
+	if got := cfg.EffectiveKeep(); got != "all" {
+		t.Fatalf("unencrypted default keep = %q, want all", got)
+	}
+	cfg.Encryption.Mode = "git-crypt"
+	if got := cfg.EffectiveKeep(); got != "policy" {
+		t.Fatalf("git-crypt default keep = %q, want policy", got)
+	}
+	cfg.Retention.Keep = "all"
+	if got := cfg.EffectiveKeep(); got != "all" {
+		t.Fatalf("explicit keep = %q, want all", got)
+	}
+	if d := Defaults().Retention; d.Daily != 7 || d.Weekly != 4 || d.Monthly != 6 {
+		t.Fatalf("default retention counts = %+v", d)
+	}
+	cfg.Retention.Keep = "forever"
+	if cfg.validate() == nil {
+		t.Fatal("an unknown retention.keep must be rejected")
+	}
+}

@@ -98,3 +98,43 @@ func TestBuildMissingIncludesAreSkipped(t *testing.T) {
 		t.Fatalf("expected empty plan, got %v", files)
 	}
 }
+
+func TestBuildConfigEntriesAreCappedAndExcluded(t *testing.T) {
+	source := t.TempDir()
+	for _, rel := range []string{
+		"projects/p/synced/s.jsonl", // session under a dir named like a config exclude
+		"config.toml",
+		"skills/mine/SKILL.md",
+		"skills/synced/theirs/SKILL.md", // config-only exclude
+		"skills/cache/x.bin",            // target-wide exclude still applies
+	} {
+		writeFile(t, source, rel)
+	}
+	big := filepath.Join(source, "skills", "mine", "big.bin")
+	if err := os.WriteFile(big, make([]byte, ConfigMaxBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := Build(targets.Target{
+		Name:          "test",
+		Source:        source,
+		Include:       []string{"projects/"},
+		Exclude:       []string{"cache/"},
+		Config:        []string{"config.toml", "skills/", "missing.json"},
+		ConfigExclude: []string{"synced/"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rels(files)
+	for _, want := range []string{"projects/p/synced/s.jsonl", "config.toml", "skills/mine/SKILL.md"} {
+		if !got[want] {
+			t.Errorf("missing expected file %q (got %v)", want, got)
+		}
+	}
+	for _, banned := range []string{"skills/synced/theirs/SKILL.md", "skills/cache/x.bin", "skills/mine/big.bin"} {
+		if got[banned] {
+			t.Errorf("unexpected file %q selected", banned)
+		}
+	}
+}

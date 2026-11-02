@@ -20,49 +20,69 @@ type File struct {
 	ModTime time.Time
 }
 
+// ConfigMaxBytes caps each file selected through a target's Config entries:
+// configuration is small, so anything larger is generated bulk that would
+// otherwise be committed again on every change.
+const ConfigMaxBytes = 1 << 20
+
 // Build resolves a target's include/exclude rules into a concrete file list.
 //
 // Include entries are relative to the source root: "dir/" selects a subtree,
 // "name" selects a single file, and entries containing glob metacharacters
 // match top-level names. Exclude entries apply at any depth: "dir/" prunes any
 // directory with that name, plain names and globs drop matching basenames.
+// Config entries match the same way, limited to ConfigMaxBytes per file and
+// with ConfigExclude applied as well.
 func Build(target targets.Target) ([]File, error) {
 	var files []File
 	seen := map[string]bool{}
 
-	add := func(rel string, info fs.FileInfo, abs string) {
-		if seen[rel] || excluded(rel, target.Exclude) {
-			return
-		}
-		seen[rel] = true
-		files = append(files, File{Rel: rel, Abs: abs, Size: info.Size(), ModTime: info.ModTime()})
-	}
-
-	for _, entry := range target.Include {
-		switch {
-		case strings.HasSuffix(entry, "/"):
-			root := filepath.Join(target.Source, filepath.FromSlash(strings.TrimSuffix(entry, "/")))
-			walkTree(target.Source, root, target.Exclude, add)
-		case strings.ContainsAny(entry, "*?["):
-			matches, err := filepath.Glob(filepath.Join(target.Source, filepath.FromSlash(entry)))
-			if err != nil {
-				return nil, err
+	collect := func(entries []string, excludes []string, maxBytes int64) error {
+		add := func(rel string, info fs.FileInfo, abs string) {
+			if seen[rel] || excluded(rel, excludes) {
+				return
 			}
-			for _, abs := range matches {
+			if maxBytes > 0 && info.Size() > maxBytes {
+				return
+			}
+			seen[rel] = true
+			files = append(files, File{Rel: rel, Abs: abs, Size: info.Size(), ModTime: info.ModTime()})
+		}
+		for _, entry := range entries {
+			switch {
+			case strings.HasSuffix(entry, "/"):
+				root := filepath.Join(target.Source, filepath.FromSlash(strings.TrimSuffix(entry, "/")))
+				walkTree(target.Source, root, excludes, add)
+			case strings.ContainsAny(entry, "*?["):
+				matches, err := filepath.Glob(filepath.Join(target.Source, filepath.FromSlash(entry)))
+				if err != nil {
+					return err
+				}
+				for _, abs := range matches {
+					info, err := os.Stat(abs)
+					if err != nil || info.IsDir() {
+						continue
+					}
+					add(relOf(target.Source, abs), info, abs)
+				}
+			default:
+				abs := filepath.Join(target.Source, filepath.FromSlash(entry))
 				info, err := os.Stat(abs)
 				if err != nil || info.IsDir() {
 					continue
 				}
 				add(relOf(target.Source, abs), info, abs)
 			}
-		default:
-			abs := filepath.Join(target.Source, filepath.FromSlash(entry))
-			info, err := os.Stat(abs)
-			if err != nil || info.IsDir() {
-				continue
-			}
-			add(relOf(target.Source, abs), info, abs)
 		}
+		return nil
+	}
+
+	if err := collect(target.Include, target.Exclude, 0); err != nil {
+		return nil, err
+	}
+	configExcludes := append(append([]string{}, target.Exclude...), target.ConfigExclude...)
+	if err := collect(target.Config, configExcludes, ConfigMaxBytes); err != nil {
+		return nil, err
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].Rel < files[j].Rel })

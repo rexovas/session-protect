@@ -64,7 +64,10 @@ date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # Version comes from the nearest release tag; builds past a tag or with
 # local edits carry a -N-g<sha>/-dirty suffix distinguishing them from
 # the released version.
-version="${SESSION_PROTECT_VERSION:-$(git -C "$source_dir" describe --tags --dirty 2>/dev/null || echo dev)}"
+# The private development repository carries public-vX.Y.Z boundary tags
+# rather than vX.Y.Z; report both the same way.
+described="$(git -C "$source_dir" describe --tags --dirty 2>/dev/null || echo dev)"
+version="${SESSION_PROTECT_VERSION:-${described#public-}}"
 
 ldflags=(
   "-X github.com/rexovas/session-protect/internal/version.Version=$version"
@@ -80,7 +83,9 @@ tmp="$(mktemp "${TMPDIR:-/tmp}/session-protect.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
 echo "Building session-protect from $source_dir"
-go build -ldflags="${ldflags[*]}" -o "$tmp" ./cmd/session-protect
+# Build from the checkout: `session-protect update` runs this script from
+# wherever the user happens to be.
+(cd "$source_dir" && go build -ldflags="${ldflags[*]}" -o "$tmp" ./cmd/session-protect)
 
 install -m 0755 "$tmp" "$binary"
 if [[ "$install_alias" -eq 1 ]]; then

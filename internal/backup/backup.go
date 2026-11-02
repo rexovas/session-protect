@@ -13,6 +13,7 @@ import (
 	"github.com/rexovas/session-protect/internal/fsplan"
 	"github.com/rexovas/session-protect/internal/human"
 	"github.com/rexovas/session-protect/internal/lock"
+	"github.com/rexovas/session-protect/internal/retention"
 	"github.com/rexovas/session-protect/internal/targets"
 	"github.com/rexovas/session-protect/internal/version"
 )
@@ -32,6 +33,9 @@ type Result struct {
 	SyncOnly    bool   `json:"sync_only,omitempty"`
 	Skipped     string `json:"skipped,omitempty"`
 	KeyExported string `json:"key_exported,omitempty"`
+	// Retention reports what the retention policy did to the repo's history
+	// after this backup, reported on the first target sharing the repo.
+	Retention string `json:"retention,omitempty"`
 }
 
 type Options struct {
@@ -197,6 +201,7 @@ func Execute(cfg config.Config, opts Options) ([]Result, error) {
 			results[indexes[0]].Removed = removed
 		}
 
+		results[indexes[0]].Retention = applyRetention(cfg, repo)
 		head := gitrepo.Head(repo)
 		for _, i := range indexes {
 			results[i].Committed = committed
@@ -206,6 +211,29 @@ func Execute(cfg config.Config, opts Options) ([]Result, error) {
 		}
 	}
 	return results, nil
+}
+
+// applyRetention bounds the repo's history under the configured policy once
+// the backup is committed. A failure never fails the backup, which is
+// already safe in history; it is reported instead.
+func applyRetention(cfg config.Config, repo string) string {
+	keep := cfg.EffectiveKeep()
+	if keep == "all" {
+		return ""
+	}
+	plan, err := retention.Build(repo, retention.Policy{
+		Keep: keep, Daily: cfg.Retention.Daily, Weekly: cfg.Retention.Weekly, Monthly: cfg.Retention.Monthly,
+	})
+	if err != nil {
+		return "not applied: " + err.Error()
+	}
+	if plan.Dropped == 0 {
+		return fmt.Sprintf("kept all %d snapshots (%s)", plan.Kept, keep)
+	}
+	if err := retention.Apply(repo, plan); err != nil {
+		return "not applied: " + err.Error()
+	}
+	return fmt.Sprintf("kept %d of %d snapshots (%s)", plan.Kept, plan.Kept+plan.Dropped, keep)
 }
 
 // ensureEncryption enforces the configured encryption mode before any file is
@@ -271,6 +299,9 @@ func printResults(out io.Writer, results []Result, opts Options) {
 					fmt.Fprintln(out, "    commit    none (no changes)")
 				}
 			}
+		}
+		if r.Retention != "" {
+			fmt.Fprintf(out, "    retention %s\n", r.Retention)
 		}
 		if r.KeyExported != "" {
 			fmt.Fprintln(out)

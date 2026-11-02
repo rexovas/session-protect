@@ -14,6 +14,7 @@ import (
 	"github.com/rexovas/session-protect/internal/plan"
 	"github.com/rexovas/session-protect/internal/project"
 	"github.com/rexovas/session-protect/internal/restore"
+	"github.com/rexovas/session-protect/internal/retention"
 	"github.com/rexovas/session-protect/internal/schedule"
 	"github.com/rexovas/session-protect/internal/status"
 	"github.com/rexovas/session-protect/internal/transplant"
@@ -53,6 +54,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return transplant.Run(args[1:], os.Stdin, stdout, stderr)
 	case "schedule":
 		return schedule.Run(args[1:], stdout, stderr)
+	case "retention":
+		return retention.Run(args[1:], stdout, stderr)
 	case "hook":
 		return hook.Run(args[1:], stdout, stderr)
 	case "browse", "ui":
@@ -104,7 +107,8 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "                          [--session ID] [--overwrite] [--dry-run] [--yes]")
 	fmt.Fprintln(out, "  session-protect transplant (--session ID | --project PATH) --to DIR")
 	fmt.Fprintln(out, "                             [--copy] [--memory keep-both|skip|replace] [--dry-run] [--yes]")
-	fmt.Fprintln(out, "  session-protect schedule install|status|uninstall")
+	fmt.Fprintln(out, "  session-protect schedule install|reload|status|uninstall")
+	fmt.Fprintln(out, "  session-protect retention [--dry-run] [--keep all|policy|latest]")
 	fmt.Fprintln(out, "  session-protect hook install|status|uninstall [claude]")
 	fmt.Fprintln(out, "  session-protect browse   (interactive session browser; alias: ui)")
 	fmt.Fprintln(out, "  session-protect version [--verbose]")

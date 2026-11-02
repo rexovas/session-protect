@@ -14,7 +14,14 @@ type Target struct {
 	Mode     string   `json:"mode"`
 	Include  []string `json:"include"`
 	Exclude  []string `json:"exclude"`
-	Notes    []string `json:"notes,omitempty"`
+	// Config selects the small, hand-maintained configuration around the
+	// sessions (settings, instructions, rules, skills) so changes to it are
+	// tracked too. Entries match like Include, but only files up to
+	// fsplan.ConfigMaxBytes are taken, and ConfigExclude applies on top of
+	// Exclude: generated bulk (logs, caches, packages) never belongs here.
+	Config        []string `json:"config,omitempty"`
+	ConfigExclude []string `json:"config_exclude,omitempty"`
+	Notes         []string `json:"notes,omitempty"`
 }
 
 func DetectAll() []Target {
@@ -41,6 +48,23 @@ func DetectClaude() Target {
 			"auth.json",
 			"cache/",
 			"tmp/",
+		},
+		Config: []string{
+			"settings.local.json",
+			"CLAUDE.md",
+			"keybindings.json",
+			"statusline*",
+			"agents/",
+			"commands/",
+			"hooks/",
+			"output-styles/",
+			"skills/",
+			"plugins/installed_plugins.json",
+			"plugins/known_marketplaces.json",
+			"plugins/blocklist.json",
+		},
+		ConfigExclude: []string{
+			"synced/", // skills synced down from claude.ai, not maintained here
 		},
 	}
 }
@@ -69,6 +93,17 @@ func DetectCodex() Target {
 			"cache/",
 			"shell_snapshots/",
 			"logs*.sqlite*",
+		},
+		Config: []string{
+			"config.toml",
+			"AGENTS.md",
+			"AGENTS.override.md",
+			"rules/",
+			"prompts/",
+			"skills/",
+		},
+		ConfigExclude: []string{
+			".system/", // skills bundled with Codex, replaced on every update
 		},
 		Notes: []string{
 			"Codex defaults are intentionally narrower than a full CODEX_HOME mirror.",
