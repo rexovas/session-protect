@@ -23,9 +23,14 @@ The only network call is an optional once-daily release check
 **Protect**
 - Git-based backup of all session state, with realtime sync at every
   turn end via agent hooks (incremental, tens of milliseconds)
+- Tracks the hand-maintained configuration around the sessions too
+  (settings, instructions, rules, hooks, skills, the plugin list), but
+  never generated bulk: no log databases, caches, packages or installed
+  plugins, and no config file over 1 MB
 - Deletion-safe by design: syncing never propagates deletions, and
   scheduled backups commit every file's final state *before* recording
-  its removal — anything that ever existed is recoverable
+  its removal — anything that ever existed is recoverable (within the
+  retention window, when one is set)
 - Optional git-crypt encryption; daily scheduled backups
 - A concurrent-session guard warns when the same session is opened twice
 
@@ -158,6 +163,7 @@ sp index [--clear]            build the semantic-search index (opt-in)
 sp hook install               realtime sync + session guard hooks
 sp schedule install           daily backup (macOS launchd)
 sp schedule reload            re-register it after replacing the binary
+sp retention [--dry-run]      bound backup history (see [retention])
 sp status | project status    machine-wide / per-project protection state
 sp plan | doctor | version    what would back up · env checks · build info
 ```
@@ -177,6 +183,12 @@ topology = "combined"    # combined | per-target
 [encryption]
 mode = "none"            # or "git-crypt": first backup initializes the
                          # repo and exports a recovery key to key_path
+
+[retention]              # how much backup history to keep
+keep = ""                # "" = "policy" with git-crypt, "all" otherwise
+daily = 7                # policy: newest snapshot of each of the last 7 days,
+weekly = 4               #   4 weeks and 6 months, plus the latest; older
+monthly = 6              #   snapshots fold into the oldest kept one
 
 [schedule]
 time = "12:00"           # daily backup, local time
@@ -203,6 +215,15 @@ enabled = true           # per-agent enable/source overrides
 - **Deletions commit last.** Backups commit the working tree first, then
   record deletions in a second commit — a deleted session's final state
   is always in Git history before its removal is.
+- **Retention is bounded, and off unless encrypted.** Git stores an
+  unencrypted repo's history as small deltas, so by default every
+  snapshot is kept. git-crypt stores every changed file whole and
+  incompressible on each snapshot, so encrypted repos default to the
+  retention policy, and any repo can opt in. Kept snapshots keep their
+  exact contents, dates and messages, and a deleted session's final state
+  is kept with its deletion inside the window; anything older than the
+  oldest kept snapshot is no longer recoverable. `sp retention --dry-run`
+  shows what a policy would keep.
 - **Destructive actions preview first.** Restore and transplant show
   exactly what will happen and ask for confirmation. Overwrites take
   timestamped safety copies; transplant is copy-first — sources are

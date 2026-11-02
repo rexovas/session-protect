@@ -19,6 +19,7 @@ type Config struct {
 	Topology   string `toml:"topology" json:"topology"`
 
 	Encryption Encryption              `toml:"encryption" json:"encryption"`
+	Retention  Retention               `toml:"retention" json:"retention"`
 	Schedule   Schedule                `toml:"schedule" json:"schedule"`
 	Assist     Assist                  `toml:"assist" json:"assist"`
 	Update     Update                  `toml:"update" json:"update"`
@@ -65,6 +66,32 @@ type Encryption struct {
 	// KeyPath is where the git-crypt recovery key is exported on first
 	// initialization and looked for by doctor.
 	KeyPath string `toml:"key_path" json:"key_path,omitempty"`
+}
+
+// Retention bounds how much backup history is kept. Git stores an
+// unencrypted repo's history as small deltas, so keeping everything is cheap.
+// With git-crypt every changed file is stored whole and incompressible on
+// each snapshot, and history grows without bound; retention caps it.
+type Retention struct {
+	// Keep is "all" (every snapshot), "policy" (the newest snapshot of each
+	// of the last Daily days, Weekly weeks and Monthly months, plus the
+	// latest) or "latest" (the current state only). Empty means "policy"
+	// with git-crypt and "all" otherwise.
+	Keep    string `toml:"keep" json:"keep,omitempty"`
+	Daily   int    `toml:"daily" json:"daily"`
+	Weekly  int    `toml:"weekly" json:"weekly"`
+	Monthly int    `toml:"monthly" json:"monthly"`
+}
+
+// EffectiveKeep resolves an empty Keep against the encryption mode.
+func (c Config) EffectiveKeep() string {
+	if c.Retention.Keep != "" {
+		return c.Retention.Keep
+	}
+	if c.Encryption.Mode == "git-crypt" {
+		return "policy"
+	}
+	return "all"
 }
 
 type TargetConfig struct {
@@ -123,9 +150,10 @@ func Defaults() Config {
 			Mode:    "none",
 			KeyPath: filepath.Join(home, ".config", "session-protect", "git-crypt.key"),
 		},
-		Schedule: Schedule{Time: "12:00"},
-		Assist:   Assist{Backend: "auto", URL: "http://localhost:11434"},
-		Targets:  map[string]TargetConfig{},
+		Retention: Retention{Daily: 7, Weekly: 4, Monthly: 6},
+		Schedule:  Schedule{Time: "12:00"},
+		Assist:    Assist{Backend: "auto", URL: "http://localhost:11434"},
+		Targets:   map[string]TargetConfig{},
 	}
 }
 
@@ -177,6 +205,14 @@ func (c Config) validate() error {
 	case "git-crypt", "none":
 	default:
 		return fmt.Errorf("invalid encryption.mode %q (want git-crypt or none)", c.Encryption.Mode)
+	}
+	switch c.Retention.Keep {
+	case "", "all", "policy", "latest":
+	default:
+		return fmt.Errorf("invalid retention.keep %q (want all, policy, or latest)", c.Retention.Keep)
+	}
+	if c.Retention.Daily < 0 || c.Retention.Weekly < 0 || c.Retention.Monthly < 0 {
+		return fmt.Errorf("retention.daily, weekly and monthly must not be negative")
 	}
 	if _, _, err := c.Schedule.Clock(); err != nil {
 		return err
