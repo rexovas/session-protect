@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/sessionfile"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -144,7 +145,7 @@ func refreshTextCache(cfg config.Config, sessions []Session) {
 // results, and machine-written compaction summaries are excluded — they
 // are bulk, not conversation.
 func extractText(path string) string {
-	file, err := os.Open(path)
+	file, err := sessionfile.Open(path)
 	if err != nil {
 		return ""
 	}
@@ -162,13 +163,8 @@ func extractText(path string) string {
 			// codex rollout: conversation text lives in event payloads.
 			var line codexLine
 			if json.Unmarshal(scanner.Bytes(), &line) == nil {
-				var payload struct {
-					Type    string `json:"type"`
-					Message string `json:"message"`
-				}
-				if json.Unmarshal(line.Payload, &payload) == nil && payload.Message != "" &&
-					(payload.Type == "user_message" || payload.Type == "agent_message") {
-					b.WriteString(payload.Message)
+				if role, text := codexEventMessage(line.Payload); role != "" {
+					b.WriteString(text)
 					b.WriteByte('\n')
 				}
 			}
