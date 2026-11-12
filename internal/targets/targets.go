@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/rexovas/session-protect/internal/sessionfile"
 )
 
 type Target struct {
@@ -142,7 +144,7 @@ func ClaudeSlug(path string) string {
 // CodexSessionMeta reads a codex rollout's identity from its leading
 // session_meta payload: the session id and working directory.
 func CodexSessionMeta(path string) (id string, cwd string, subagent bool) {
-	file, err := os.Open(path)
+	file, err := sessionfile.Open(path)
 	if err != nil {
 		return "", "", false
 	}

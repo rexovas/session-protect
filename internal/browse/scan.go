@@ -13,6 +13,7 @@ import (
 	"github.com/rexovas/session-protect/internal/audit"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/guard"
+	"github.com/rexovas/session-protect/internal/sessionfile"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -376,10 +377,10 @@ func merge(target string, source []fileInfo, backup []fileInfo) []Session {
 	sourceByID := map[string]fileInfo{}
 	backupByID := map[string]fileInfo{}
 	for _, file := range source {
-		sourceByID[file.ID] = file
+		sourceByID[file.ID] = fuller(sourceByID[file.ID], file)
 	}
 	for _, file := range backup {
-		backupByID[file.ID] = file
+		backupByID[file.ID] = fuller(backupByID[file.ID], file)
 	}
 
 	var sessions []Session
@@ -432,7 +433,7 @@ func listJSONL(root string) []fileInfo {
 		return files
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		if entry.IsDir() || !sessionfile.IsTranscript(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
@@ -440,7 +441,7 @@ func listJSONL(root string) []fileInfo {
 			continue
 		}
 		files = append(files, fileInfo{
-			ID:      strings.TrimSuffix(entry.Name(), ".jsonl"),
+			ID:      sessionfile.Stem(entry.Name()),
 			Path:    filepath.Join(root, entry.Name()),
 			Size:    info.Size(),
 			ModTime: info.ModTime(),
@@ -454,7 +455,8 @@ func listCodex(root string) []fileInfo {
 	fromBackup := strings.Contains(root, string(filepath.Separator)+"all"+string(filepath.Separator)) ||
 		!strings.Contains(root, string(filepath.Separator)+".codex"+string(filepath.Separator))
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		// Newer codex compresses older rollouts to .jsonl.zst in place.
+		if err != nil || entry.IsDir() || !sessionfile.IsTranscript(entry.Name()) {
 			return nil
 		}
 		info, infoErr := entry.Info()
@@ -466,7 +468,7 @@ func listCodex(root string) []fileInfo {
 			return nil // codex subagent (guardian/thread_spawn) — orchestration, not a user session
 		}
 		if id == "" {
-			id = strings.TrimSuffix(filepath.Base(path), ".jsonl")
+			id = sessionfile.Stem(filepath.Base(path))
 		}
 		if cwd == "" {
 			cwd = "(unknown project)"
@@ -548,7 +550,7 @@ func LoadDetailKeep(session Session, keep int) Detail {
 		return detail
 	}
 
-	file, err := os.Open(path)
+	file, err := sessionfile.Open(path)
 	if err != nil {
 		return detail
 	}
@@ -671,6 +673,55 @@ type codexLine struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 
+// codexEventMessage extracts a conversation message from an event_msg
+// payload, returning role "user" or "assistant" and its text, or "" when
+// the event is not a non-empty message. Codex has written two shapes:
+//   - older: {"type":"user_message"|"agent_message","message":"..."}
+//   - newer (0.15x on): {"type":"item_completed","item":{"type":
+//     "UserMessage"|"AgentMessage","content":[{"type":"text","text":"..."}]}}
+func codexEventMessage(payload json.RawMessage) (role string, text string) {
+	var event struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+		Item    struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(payload, &event) != nil {
+		return "", ""
+	}
+	switch event.Type {
+	case "user_message":
+		role, text = "user", event.Message
+	case "agent_message":
+		role, text = "assistant", event.Message
+	case "item_completed":
+		switch event.Item.Type {
+		case "UserMessage":
+			role = "user"
+		case "AgentMessage":
+			role = "assistant"
+		default:
+			return "", ""
+		}
+		var parts []string
+		for _, c := range event.Item.Content {
+			if strings.EqualFold(c.Type, "text") && c.Text != "" {
+				parts = append(parts, c.Text)
+			}
+		}
+		text = strings.Join(parts, "\n")
+	}
+	if strings.TrimSpace(text) == "" {
+		return "", ""
+	}
+	return role, text
+}
+
 // loadCodexDetail streams a codex rollout: user/agent messages and tool
 // calls into the transcript, model from turn_context, cumulative usage
 // from the last token_count event.
@@ -683,7 +734,7 @@ func loadCodexDetail(session Session, keep int) Detail {
 	if path == "" {
 		return detail
 	}
-	file, err := os.Open(path)
+	file, err := sessionfile.Open(path)
 	if err != nil {
 		return detail
 	}
@@ -751,24 +802,22 @@ func loadCodexDetail(session Session, keep int) Detail {
 			if json.Unmarshal(line.Payload, &event) != nil {
 				continue
 			}
-			switch event.Type {
-			case "user_message":
-				if event.Message == "" {
-					continue
-				}
+			switch role, text := codexEventMessage(line.Payload); role {
+			case "user":
 				detail.Messages++
 				if detail.FirstPrompt == "" {
-					detail.FirstPrompt = event.Message
+					detail.FirstPrompt = text
 				}
-				detail.LastPrompt = event.Message
-				appendMsg("user", event.Message)
-			case "agent_message":
-				if event.Message == "" {
-					continue
-				}
+				detail.LastPrompt = text
+				appendMsg("user", text)
+				continue
+			case "assistant":
 				detail.Messages++
-				detail.LastResponse = event.Message
-				appendMsg("assistant", event.Message)
+				detail.LastResponse = text
+				appendMsg("assistant", text)
+				continue
+			}
+			switch event.Type {
 			case "token_count":
 				// Cumulative — the last one is the session total.
 				totals.Input = event.Info.Total.Input
@@ -1378,7 +1427,7 @@ const claudeCwdLines = 4000
 // any kind. final reports that appends can no longer change the answer:
 // a match was found, or the capped scan already covered the whole window.
 func claudeCwd(path string, slug string) (matched string, first string, final bool) {
-	file, err := os.Open(path)
+	file, err := sessionfile.Open(path)
 	if err != nil {
 		return "", "", false
 	}

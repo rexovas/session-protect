@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rexovas/session-protect/internal/sessionfile"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -28,22 +29,38 @@ import (
 // seeing a line twice. ok is false when the file is shorter than offset
 // (truncated or replaced), telling the caller to start over from zero.
 func readAppended(path string, offset int64, partial bool, fn func(line []byte)) (next int64, ok bool) {
-	file, err := os.Open(path)
-	if err != nil {
-		return offset, true
+	var source io.Reader
+	if sessionfile.Compressed(path) {
+		// Compressed transcripts are rewritten whole, never appended to,
+		// and offsets count decompressed bytes: always read from the top.
+		if offset != 0 {
+			return 0, false
+		}
+		file, err := sessionfile.Open(path)
+		if err != nil {
+			return offset, true
+		}
+		defer file.Close()
+		source = file
+	} else {
+		file, err := os.Open(path)
+		if err != nil {
+			return offset, true
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return offset, true
+		}
+		if info.Size() < offset {
+			return 0, false
+		}
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			return 0, false
+		}
+		source = file
 	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return offset, true
-	}
-	if info.Size() < offset {
-		return 0, false
-	}
-	if _, err := file.Seek(offset, io.SeekStart); err != nil {
-		return 0, false
-	}
-	reader := bufio.NewReaderSize(file, 256*1024)
+	reader := bufio.NewReaderSize(source, 256*1024)
 	next = offset
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -369,4 +386,40 @@ func cachedDecodeClaudeSlug(slug string) string {
 	path := decodeClaudeSlug(slug)
 	slugDecodeMemo.Store(slug, slugDecode{at: time.Now(), path: path})
 	return path
+}
+
+// contentMemo caches a compressed transcript's decompressed length.
+var contentMemo sync.Map // path -> headMemo[int64]
+
+// contentSize is how much transcript a file holds: its size, or for a
+// compressed one its decompressed size (read once per file version).
+func contentSize(file fileInfo) int64 {
+	if !sessionfile.Compressed(file.Path) {
+		return file.Size
+	}
+	st := stamp{size: file.Size, mod: file.ModTime}
+	return memoHead(&contentMemo, file.Path, st, func() (int64, bool) {
+		r, err := sessionfile.Open(file.Path)
+		if err != nil {
+			return 0, false
+		}
+		defer r.Close()
+		n, _ := io.Copy(io.Discard, r)
+		return n, false // tied to this exact file version, never final
+	})
+}
+
+// fuller picks between two files carrying the same session id. Codex can
+// leave a rollout both plain and compressed, and sometimes rewrites one of
+// them down to a short stub, so the copy holding more transcript wins;
+// on a tie, the newer one.
+func fuller(current, candidate fileInfo) fileInfo {
+	if current.Path == "" {
+		return candidate
+	}
+	a, b := contentSize(current), contentSize(candidate)
+	if b > a || b == a && candidate.ModTime.After(current.ModTime) {
+		return candidate
+	}
+	return current
 }

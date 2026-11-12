@@ -13,6 +13,7 @@ import (
 
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/human"
+	"github.com/rexovas/session-protect/internal/sessionfile"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -283,7 +284,7 @@ func listJSONL(root string) []sessionFile {
 func codexSessions(root string, projectPath string) []sessionFile {
 	var files []sessionFile
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		if err != nil || entry.IsDir() || !sessionfile.IsTranscript(entry.Name()) {
 			return nil
 		}
 		id, ok := codexSessionIDForProject(path, projectPath)
@@ -300,7 +301,7 @@ func codexSessions(root string, projectPath string) []sessionFile {
 }
 
 func codexSessionIDForProject(path string, projectPath string) (string, bool) {
-	file, err := os.Open(path)
+	file, err := sessionfile.Open(path)
 	if err != nil {
 		return "", false
 	}
@@ -322,7 +323,7 @@ func codexSessionIDForProject(path string, projectPath string) (string, bool) {
 		if event.Payload.Cwd == projectPath {
 			id := event.Payload.ID
 			if id == "" {
-				id = strings.TrimSuffix(filepath.Base(path), ".jsonl")
+				id = sessionfile.Stem(filepath.Base(path))
 			}
 			return id, true
 		}

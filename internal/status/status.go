@@ -200,7 +200,7 @@ func countFiles(root string, suffix string) int {
 		if err != nil || entry.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(entry.Name(), suffix) {
+		if strings.HasSuffix(entry.Name(), suffix) || strings.HasSuffix(entry.Name(), suffix+".zst") {
 			count++
 		}
 		return nil

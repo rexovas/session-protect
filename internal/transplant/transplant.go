@@ -20,6 +20,7 @@ import (
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/guard"
 	"github.com/rexovas/session-protect/internal/lock"
+	"github.com/rexovas/session-protect/internal/sessionfile"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -191,10 +192,19 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 			InPlace: !opts.Copy,
 			Open:    codexOpen(id),
 		}
+		// A compressed rollout can't be rewritten where it lives: it is
+		// rewritten as plain JSONL beside it (codex reads both), and a move
+		// then removes the compressed original.
+		name := base
+		if sessionfile.Compressed(base) {
+			name = sessionfile.Stem(base) + ".jsonl"
+			session.DstFile = filepath.Join(filepath.Dir(path), name)
+			session.InPlace = false
+		}
 		if opts.Copy {
 			session.NewID = newUUID()
 			session.DstFile = filepath.Join(filepath.Dir(path),
-				strings.Replace(base, id, session.NewID, 1))
+				strings.Replace(name, id, session.NewID, 1))
 			session.InPlace = false
 		}
 		plan.Sessions = append(plan.Sessions, session)
@@ -352,7 +362,7 @@ func Apply(cfg config.Config, plan *Plan, opts Options) error {
 // Lines are decoded with UseNumber so numeric fields survive untouched;
 // anything unparseable passes through verbatim.
 func rewriteSession(src string, dst string, target string, fromPath string, toPath string, oldID string, newID string) error {
-	in, err := os.Open(src)
+	in, err := sessionfile.Open(src)
 	if err != nil {
 		return err
 	}
@@ -526,7 +536,7 @@ func verifyLineCount(src string, dst string) error {
 }
 
 func countLines(path string) (int, error) {
-	file, err := os.Open(path)
+	file, err := sessionfile.Open(path)
 	if err != nil {
 		return 0, err
 	}
@@ -574,10 +584,10 @@ func codexCwdOf(path string) string {
 func findCodexSession(root string, id string) (string, error) {
 	var found string
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
+		if err != nil || entry.IsDir() || !sessionfile.IsTranscript(entry.Name()) {
 			return nil
 		}
-		if strings.HasSuffix(entry.Name(), id+".jsonl") {
+		if strings.HasSuffix(sessionfile.Stem(entry.Name()), id) {
 			found = path
 		}
 		return nil
@@ -596,10 +606,10 @@ func codexSessionsFor(root string, projectPath string, sessionID string) []strin
 	}
 	var out []string
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		if err != nil || entry.IsDir() || !sessionfile.IsTranscript(entry.Name()) {
 			return nil
 		}
-		if sessionID != "" && !strings.HasSuffix(entry.Name(), sessionID+".jsonl") {
+		if sessionID != "" && !strings.HasSuffix(sessionfile.Stem(entry.Name()), sessionID) {
 			return nil
 		}
 		if codexCwdOf(path) == projectPath {
@@ -612,7 +622,7 @@ func codexSessionsFor(root string, projectPath string, sessionID string) []strin
 
 // codexIDFromName pulls the session uuid from a rollout filename.
 func codexIDFromName(name string) string {
-	name = strings.TrimSuffix(name, ".jsonl")
+	name = sessionfile.Stem(name)
 	if len(name) > 36 {
 		return name[len(name)-36:]
 	}
