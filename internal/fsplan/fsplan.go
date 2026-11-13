@@ -98,23 +98,58 @@ func TotalSize(files []File) int64 {
 	return total
 }
 
+// walkTree visits the files under root. Symlinks are followed — to files
+// and to directories, root included — so a config dir that links shared
+// hooks or skills in from elsewhere is backed up as real files under its
+// own paths, and restores as plain files. Each real directory is walked
+// once, which also stops link cycles.
 func walkTree(sourceRoot string, root string, excludes []string, add func(string, fs.FileInfo, string)) {
-	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	walkLinked(sourceRoot, root, excludes, add, map[string]bool{})
+}
+
+// walkLinked walks the real directory behind shown, reporting every path
+// as if it lay under shown.
+func walkLinked(sourceRoot string, shown string, excludes []string, add func(string, fs.FileInfo, string), visited map[string]bool) {
+	real, err := filepath.EvalSymlinks(shown)
+	if err != nil || visited[real] {
+		return
+	}
+	visited[real] = true
+	_ = filepath.WalkDir(real, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		rel := relOf(sourceRoot, path)
+		inner, err := filepath.Rel(real, path)
+		if err != nil {
+			return nil
+		}
+		logical := filepath.Join(shown, inner)
+		rel := relOf(sourceRoot, logical)
 		if entry.IsDir() {
 			if rel != "." && excludedDir(rel, excludes) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			info, err := os.Stat(path)
+			if err != nil {
+				return nil // dangling link
+			}
+			if info.IsDir() {
+				if !excludedDir(rel, excludes) {
+					walkLinked(sourceRoot, logical, excludes, add, visited)
+				}
+				return nil
+			}
+			add(rel, info, logical)
+			return nil
+		}
 		info, err := entry.Info()
 		if err != nil {
 			return nil
 		}
-		add(rel, info, path)
+		add(rel, info, logical)
 		return nil
 	})
 }

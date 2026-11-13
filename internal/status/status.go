@@ -81,6 +81,10 @@ func Print(out io.Writer, asJSON bool) int {
 	fmt.Fprintf(out, "Topology    %s\n\n", s.Topology)
 
 	fmt.Fprintln(out, "Targets")
+	nameWidth := 8
+	for _, target := range s.Targets {
+		nameWidth = max(nameWidth, len(target.Name))
+	}
 	for _, target := range s.Targets {
 		state := "missing"
 		if target.Detected {
@@ -94,7 +98,7 @@ func Print(out io.Writer, asJSON bool) int {
 				repoState = "dirty"
 			}
 		}
-		fmt.Fprintf(out, "  %-8s source:%-8s backup:%s\n", target.Name, state, repoState)
+		fmt.Fprintf(out, "  %-*s source:%-8s backup:%s\n", nameWidth, target.Name, state, repoState)
 		if target.LastModified != "" {
 			fmt.Fprintf(out, "    source modified  %s\n", target.LastModified)
 		}
@@ -121,8 +125,8 @@ func Print(out io.Writer, asJSON bool) int {
 func detectRepos(cfg config.Config) []RepoStatus {
 	var candidates []RepoStatus
 	if cfg.Topology == "per-target" {
-		for _, name := range []string{"claude", "codex"} {
-			candidates = append(candidates, RepoStatus{Name: name, Kind: "managed", Path: filepath.Join(cfg.BackupRoot, name)})
+		for _, target := range targets.DetectAll() {
+			candidates = append(candidates, RepoStatus{Name: target.Name, Kind: "managed", Path: filepath.Join(cfg.BackupRoot, target.Name)})
 		}
 	} else {
 		candidates = append(candidates, RepoStatus{Name: "all", Kind: "managed", Path: filepath.Join(cfg.BackupRoot, "all")})
@@ -184,7 +188,7 @@ func findRepo(repos []RepoStatus, path string) *RepoStatus {
 }
 
 func sessionCount(target targets.Target) int {
-	switch target.Name {
+	switch target.Agent {
 	case "claude":
 		return countFiles(filepath.Join(target.Source, "projects"), ".jsonl")
 	case "codex":

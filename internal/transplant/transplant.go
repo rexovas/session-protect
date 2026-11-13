@@ -31,6 +31,9 @@ type Options struct {
 	Copy      bool   // duplicate instead of move
 	Memory    string // keep-both | skip | replace
 	DryRun    bool
+	// Home is the claude home (label) to work in. Empty finds it: the
+	// home holding the session, or the one holding the project's sessions.
+	Home string
 }
 
 // SessionPlan is one session's part of the plan.
@@ -72,14 +75,65 @@ func codexSessionsRoot(cfg config.Config) string {
 	return filepath.Join(home, ".codex", "sessions")
 }
 
-func projectsRoot(cfg config.Config) string {
+func projectsRoot(cfg config.Config, home targets.ClaudeHome) string {
 	for _, target := range cfg.ResolveTargets() {
-		if target.Name == "claude" {
+		if target.Name == home.TargetName() {
 			return filepath.Join(target.Source, "projects")
 		}
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "projects")
+	return filepath.Join(home.Dir, "projects")
+}
+
+// chooseHome picks the claude home a transplant works in (see
+// Options.Home). A project with sessions in several homes is ambiguous:
+// each home is its own account, so the caller must name one.
+func chooseHome(cfg config.Config, opts Options) (targets.ClaudeHome, error) {
+	if opts.Home != "" {
+		home, ok := targets.HomeByLabel(opts.Home)
+		if !ok {
+			return targets.ClaudeHome{}, fmt.Errorf("no claude dir labelled %q (see `session-protect claude-dirs`)", opts.Home)
+		}
+		return home, nil
+	}
+	homes := targets.ClaudeHomes()
+	if len(homes) == 1 {
+		return homes[0], nil
+	}
+	if opts.SessionID != "" {
+		for _, home := range homes {
+			if _, err := findSessionSlug(projectsRoot(cfg, home), opts.SessionID); err == nil {
+				return home, nil
+			}
+		}
+		return homes[0], nil
+	}
+	source, err := filepath.Abs(opts.Project)
+	if err != nil {
+		return targets.ClaudeHome{}, err
+	}
+	var holding []targets.ClaudeHome
+	for _, home := range homes {
+		dir := filepath.Join(projectsRoot(cfg, home), targets.ClaudeSlug(source))
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
+					holding = append(holding, home)
+					break
+				}
+			}
+		}
+	}
+	switch len(holding) {
+	case 0:
+		return homes[0], nil
+	case 1:
+		return holding[0], nil
+	}
+	labels := make([]string, len(holding))
+	for i, home := range holding {
+		labels[i] = home.Label
+	}
+	return targets.ClaudeHome{}, fmt.Errorf("this project has sessions in several claude dirs (%s); pass --home to pick one", strings.Join(labels, ", "))
 }
 
 // Build resolves the source sessions and memory and lays out the plan.
@@ -94,7 +148,11 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	root := projectsRoot(cfg)
+	home, err := chooseHome(cfg, opts)
+	if err != nil {
+		return nil, err
+	}
+	root := projectsRoot(cfg, home)
 
 	plan := &Plan{TargetPath: target, TargetSlug: targets.ClaudeSlug(target)}
 	if info, err := os.Stat(target); err == nil {
@@ -129,8 +187,15 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 	if plan.SourcePath == plan.TargetPath || plan.SourceSlug == plan.TargetSlug {
 		return nil, fmt.Errorf("source and target are the same project")
 	}
+	// An owned folder holds one account's sessions only.
+	if owner := targets.FolderOwner(plan.TargetPath); len(owner.Conflict) > 0 {
+		return nil, fmt.Errorf("%s has sessions in several claude dirs (%s); resolve that first", plan.TargetPath, strings.Join(owner.Conflict, ", "))
+	} else if owner.Owned() && owner.Owner.Label != home.Label {
+		return nil, fmt.Errorf("%s belongs to the %s claude dir but these sessions are on %s; move them with `session-protect transfer --to %s` first, or pick another destination",
+			plan.TargetPath, owner.Owner.Label, home.Label, owner.Owner.Label)
+	}
 
-	live := guard.Live(guard.RegistryDir())
+	live := guard.LiveAll()
 	liveCodexIDs, liveCodexCwds := guard.LiveCodex()
 	codexOpen := func(id string) bool {
 		if _, open := liveCodexIDs[id]; open {

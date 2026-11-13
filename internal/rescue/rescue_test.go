@@ -294,3 +294,28 @@ func TestReconstructRecreatesAndOverridesProjectDir(t *testing.T) {
 		t.Fatal("override cwd missing from transcript")
 	}
 }
+
+// A lost session recorded in another claude home's history is rebuilt
+// back into that home, so it resumes on the same account.
+func TestReconstructLandsInTheSessionsHome(t *testing.T) {
+	cfg, project := setup(t)
+	home, _ := os.UserHomeDir()
+	client := filepath.Join(home, "client-config")
+	if err := os.MkdirAll(client, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Move the history into the client home.
+	if err := os.Rename(filepath.Join(home, ".claude", "history.jsonl"), filepath.Join(client, "history.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := targets.RegisterClaudeDir(client, "client"); err != nil {
+		t.Fatal(err)
+	}
+	_, path, err := Reconstruct(cfg, lostID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(client, "projects", targets.ClaudeSlug(project)); filepath.Dir(path) != want {
+		t.Fatalf("rebuilt at %s, want under %s", path, want)
+	}
+}

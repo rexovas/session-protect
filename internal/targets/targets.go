@@ -10,7 +10,11 @@ import (
 )
 
 type Target struct {
-	Name     string   `json:"name"`
+	Name string `json:"name"`
+	// Agent is the agent that writes the target ("claude" or "codex");
+	// Home is the claude home label (see ClaudeHome), empty for codex.
+	Agent    string   `json:"agent"`
+	Home     string   `json:"home,omitempty"`
 	Source   string   `json:"source"`
 	Detected bool     `json:"detected"`
 	Mode     string   `json:"mode"`
@@ -27,17 +31,34 @@ type Target struct {
 }
 
 func DetectAll() []Target {
-	return []Target{
-		DetectClaude(),
-		DetectCodex(),
+	var all []Target
+	for _, home := range ClaudeHomes() {
+		all = append(all, DetectClaudeHome(home))
 	}
+	return append(all, DetectCodex())
 }
 
+// DetectClaude is the default claude home, ~/.claude.
 func DetectClaude() Target {
-	home := homeDir()
-	source := filepath.Join(home, ".claude")
+	return DetectClaudeHome(ClaudeHomes()[0])
+}
+
+// DetectClaudeTargets lists one target per claude home.
+func DetectClaudeTargets() []Target {
+	var all []Target
+	for _, home := range ClaudeHomes() {
+		all = append(all, DetectClaudeHome(home))
+	}
+	return all
+}
+
+// DetectClaudeHome is the backup target for one claude home.
+func DetectClaudeHome(home ClaudeHome) Target {
+	source := home.Dir
 	return Target{
-		Name:     "claude",
+		Name:     home.TargetName(),
+		Agent:    "claude",
+		Home:     home.Label,
 		Source:   source,
 		Detected: dirExists(source),
 		Mode:     "sessions",
@@ -78,6 +99,7 @@ func DetectCodex() Target {
 	}
 	return Target{
 		Name:     "codex",
+		Agent:    "codex",
 		Source:   source,
 		Detected: dirExists(source),
 		Mode:     "safe-default",

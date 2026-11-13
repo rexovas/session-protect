@@ -138,3 +138,44 @@ func TestBuildConfigEntriesAreCappedAndExcluded(t *testing.T) {
 		}
 	}
 }
+
+// A config dir that links shared folders and files in from elsewhere is
+// backed up as real files under its own paths; link cycles end.
+func TestBuildFollowsSymlinks(t *testing.T) {
+	shared := t.TempDir()
+	writeFile(t, shared, "hooks/guard.py")
+	writeFile(t, shared, "hooks/nested/deep.sh")
+	writeFile(t, shared, "skills/tool/SKILL.md")
+	writeFile(t, shared, "statusline.sh")
+	source := t.TempDir()
+	writeFile(t, source, "skills/own/SKILL.md")
+	for link, to := range map[string]string{
+		"hooks":                 "hooks",
+		"skills/shared":         "skills/tool",
+		"statusline-command.sh": "statusline.sh",
+	} {
+		if err := os.Symlink(filepath.Join(shared, to), filepath.Join(source, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A cycle: a link back up to its own parent.
+	if err := os.Symlink(filepath.Join(source, "skills"), filepath.Join(source, "skills", "loop")); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := Build(targets.Target{Source: source, Config: []string{"hooks/", "skills/", "statusline*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rels(files)
+	for _, want := range []string{"hooks/guard.py", "hooks/nested/deep.sh", "skills/own/SKILL.md", "skills/shared/SKILL.md", "statusline-command.sh"} {
+		if !got[want] {
+			t.Errorf("missing %s in %v", want, got)
+		}
+	}
+	for _, file := range files {
+		if file.Rel == "hooks" || file.Size != 1 {
+			t.Errorf("a link was recorded instead of its target: %+v", file)
+		}
+	}
+}

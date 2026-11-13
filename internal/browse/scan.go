@@ -21,6 +21,7 @@ import (
 // both.
 type Session struct {
 	Target         string
+	Home           string // claude home label (see targets.ClaudeHome); empty for codex
 	ID             string
 	Title          string    // first prompt of the session, from agent history
 	CustomName     string    // user-assigned name, from custom-title events
@@ -85,24 +86,28 @@ func Scan(cfg config.Config) []*Project {
 			}
 		}
 	}
-	for id, ghost := range claudeHistorySessions() {
-		if seen[id] || ghost.Project == "" {
-			continue
+	for _, history := range claudeHistoriesByHome() {
+		for id, ghost := range history.sessions {
+			if seen[id] || ghost.Project == "" {
+				continue
+			}
+			seen[id] = true
+			project := byPath[ghost.Project]
+			if project == nil {
+				project = &Project{Path: ghost.Project}
+				byPath[ghost.Project] = project
+			}
+			project.Sessions = append(project.Sessions, Session{
+				Target:      "claude",
+				Home:        history.home.Label,
+				ID:          id,
+				Title:       ghost.Title,
+				State:       "LOST",
+				Modified:    ghost.Last,
+				Prompts:     ghost.Count,
+				ProjectPath: ghost.Project,
+			})
 		}
-		project := byPath[ghost.Project]
-		if project == nil {
-			project = &Project{Path: ghost.Project}
-			byPath[ghost.Project] = project
-		}
-		project.Sessions = append(project.Sessions, Session{
-			Target:      "claude",
-			ID:          id,
-			Title:       ghost.Title,
-			State:       "LOST",
-			Modified:    ghost.Last,
-			Prompts:     ghost.Count,
-			ProjectPath: ghost.Project,
-		})
 	}
 	// Codex history records no project path, so its lost sessions
 	// surface under one pseudo-folder at the start root.
@@ -127,7 +132,7 @@ func Scan(cfg config.Config) []*Project {
 	}
 
 	titles := historyTitles()
-	open := guard.Live(guard.RegistryDir())
+	open := guard.LiveAll()
 	codexIDs, codexCwds := guard.LiveCodex()
 	if codexIDs == nil {
 		codexIDs = map[string]string{}
@@ -275,8 +280,17 @@ func Scan(cfg config.Config) []*Project {
 }
 
 func scanClaude(cfg config.Config, byPath map[string]*Project) {
-	target := targets.DetectClaude()
-	repo, prefix := cfg.RepoFor("claude")
+	for _, home := range targets.ClaudeHomes() {
+		scanClaudeHome(cfg, home, byPath)
+	}
+}
+
+// scanClaudeHome adds one claude home's sessions. Homes share the folder
+// tree: a project used from two homes lists both homes' sessions, each
+// tagged with its home.
+func scanClaudeHome(cfg config.Config, home targets.ClaudeHome, byPath map[string]*Project) {
+	target := targets.DetectClaudeHome(home)
+	repo, prefix := cfg.RepoFor(target.Name)
 	sourceRoot := filepath.Join(target.Source, "projects")
 	backupRoot := filepath.Join(repo, prefix, "projects")
 
@@ -307,6 +321,9 @@ func scanClaude(cfg config.Config, byPath map[string]*Project) {
 		sessions := merge("claude", source, backup)
 		if len(sessions) == 0 {
 			continue
+		}
+		for i := range sessions {
+			sessions[i].Home = home.Label
 		}
 		path := claudeProjectPath(sessions, slug)
 		if path == "" {
@@ -1081,9 +1098,9 @@ func codexThreadNames() map[string]string {
 
 // LoadLostDetail builds inspector data for a LOST session from the prompt
 // history — the user's half of the conversation is all that survives.
-func LoadLostDetail(id string) Detail {
+func LoadLostDetail(home string, id string) Detail {
 	var detail Detail
-	file, err := os.Open(filepath.Join(targets.DetectClaude().Source, "history.jsonl"))
+	file, err := os.Open(filepath.Join(targets.HomeFor(home).Dir, "history.jsonl"))
 	if err != nil {
 		return detail
 	}

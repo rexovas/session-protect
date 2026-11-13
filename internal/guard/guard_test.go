@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 func writeEntry(t *testing.T, dir string, name string, info Info) {
@@ -72,5 +74,59 @@ func TestRunEmitsWarningOnConflict(t *testing.T) {
 	out.Reset()
 	if code := Run(strings.NewReader(`{"session_id":"other-session"}`), &out, &errOut); code != 0 || out.Len() != 0 {
 		t.Fatalf("expected silent success, got code=%d out=%q", code, out.String())
+	}
+}
+
+// The reopen guard sees sessions open in any claude home, and registers
+// the home of the session that ran it.
+func TestRunCoversEveryClaudeHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SESSION_PROTECT_CONFIG", filepath.Join(home, "cfg", "config.toml"))
+	client := filepath.Join(home, "client-config")
+	registry := filepath.Join(client, "sessions")
+	if err := os.MkdirAll(registry, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeEntry(t, registry, "other.json", Info{PID: os.Getpid(), SessionID: "sess-c", Status: "idle"})
+	t.Setenv("CLAUDE_CONFIG_DIR", client)
+
+	var out, errOut bytes.Buffer
+	if code := Run(strings.NewReader(`{"session_id":"sess-c"}`), &out, &errOut); code != 0 {
+		t.Fatalf("guard exit %d (%s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "ALREADY OPEN") {
+		t.Fatalf("conflict in an extra home not reported: %q", out.String())
+	}
+	if h, ok := targets.HomeForDir(client); !ok || LiveAll()["sess-c"].Home != h.Label {
+		t.Fatalf("home not registered or entry untagged: %+v %v", h, ok)
+	}
+}
+
+// A session started on another account than its folder's owner is told so.
+func TestAccountMismatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SESSION_PROTECT_CONFIG", filepath.Join(home, "cfg", "config.toml"))
+	acme := filepath.Join(home, "acme-config")
+	project := filepath.Join(home, "work", "client")
+	slugDir := filepath.Join(acme, "projects", targets.ClaudeSlug(project))
+	if err := os.MkdirAll(slugDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(slugDir, "s.jsonl"), []byte(`{"cwd":"`+project+`"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := targets.RegisterClaudeDir(acme, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if msg := AccountMismatch(project, filepath.Join(home, ".claude")); !strings.Contains(msg, "belongs to the acme account") {
+		t.Errorf("default session in an acme folder: %q", msg)
+	}
+	if msg := AccountMismatch(filepath.Join(project, "sub"), acme); msg != "" {
+		t.Errorf("right account flagged: %q", msg)
+	}
+	if msg := AccountMismatch(filepath.Join(home, "other"), filepath.Join(home, ".claude")); msg != "" {
+		t.Errorf("unowned folder flagged: %q", msg)
 	}
 }

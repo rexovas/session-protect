@@ -201,10 +201,11 @@ func lostTexts(sessions []Session) map[string]string {
 	if len(wanted) == 0 {
 		return nil
 	}
-	for _, path := range []string{
-		filepath.Join(targets.DetectClaude().Source, "history.jsonl"),
-		filepath.Join(targets.DetectCodex().Source, "history.jsonl"),
-	} {
+	var histories []string
+	for _, home := range targets.ClaudeHomes() {
+		histories = append(histories, filepath.Join(home.Dir, "history.jsonl"))
+	}
+	for _, path := range append(histories, filepath.Join(targets.DetectCodex().Source, "history.jsonl")) {
 		file, err := os.Open(path)
 		if err != nil {
 			continue

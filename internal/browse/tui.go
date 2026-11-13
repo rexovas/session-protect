@@ -23,6 +23,7 @@ import (
 	"github.com/rexovas/session-protect/internal/focus"
 	"github.com/rexovas/session-protect/internal/human"
 	"github.com/rexovas/session-protect/internal/rescue"
+	"github.com/rexovas/session-protect/internal/targets"
 	"github.com/rexovas/session-protect/internal/transplant"
 	"github.com/rexovas/session-protect/internal/update"
 	"github.com/rexovas/session-protect/internal/version"
@@ -40,6 +41,7 @@ var (
 	styleFooter   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#666666", Dark: "#999999"})
 	styleUserMsg  = lipgloss.NewStyle().Background(lipgloss.AdaptiveColor{Light: "#E8E8E8", Dark: "#262626"}).Foreground(lipgloss.AdaptiveColor{Light: "#111111", Dark: "#E6E6E6"})
 	styleBold     = lipgloss.NewStyle().Bold(true)
+	styleAccount  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#0B7285", Dark: "#66D9E8"})
 )
 
 type model struct {
@@ -66,7 +68,13 @@ type model struct {
 	fStates      map[string]bool
 	fAgents      map[string]bool
 	fModels      map[string]bool
-	fWindow      time.Duration // 0 = any
+	fHomes       map[string]bool // claude home labels (ACCOUNT)
+	fWindow      time.Duration   // 0 = any
+
+	// homes are the claude homes (accounts) sessions come from; ownIndex
+	// is folder ownership from the current scan (rebuilt with the view).
+	homes    []targets.ClaudeHome
+	ownIndex sessionIndex
 
 	// query filters the current pane: the folder tree prunes to matching
 	// branches (auto-expanded down to each match), session panes to
@@ -142,6 +150,7 @@ type model struct {
 	fullProjects      []*Project      // saved full project set while a group is scoped
 	scopeRoot         string          // browser root of the active group scope
 	confirmDelGroup   *Group          // group awaiting delete confirmation
+	xfer              *xferState      // account transfer dialog (A)
 	groupNaming       string          // "" | new | snapshot | addnew
 	groupInput        string          // name being typed
 	addIDs            []string        // session ids awaiting a group choice (1 hovered, or many selected)
@@ -372,6 +381,8 @@ func newModel(cfg config.Config) model {
 		start = string(os.PathSeparator)
 	}
 	m := model{cfg: cfg, projects: projects, start: start, width: 100, height: 32}
+	m.homes = targets.ClaudeHomes()
+	m.applyDefaultAccounts()
 	m.root = NearestRoot(projects, start)
 	m.groups = LoadGroups(cfg)
 	// Init launches the first full scan; mark it in flight so the first
@@ -384,6 +395,9 @@ func newModel(cfg config.Config) model {
 }
 
 func (m *model) rebuild() {
+	if m.multiHome() {
+		m.ownIndex = newSessionIndex(m.projects)
+	}
 	if m.query != "" {
 		m.folders = m.filteredTree(ChildrenOf(m.projects, m.root, m.start), 0)
 	} else {
@@ -463,14 +477,14 @@ func (m model) filterQuery(sessions []Session) []Session {
 }
 
 type filterItem struct {
-	kind  string // header | state | agent | model | window
+	kind  string // header | state | agent | model | home | window
 	key   string
 	label string
 }
 
 // filterActive reports whether any facet constrains the list.
 func (m model) filterActive() bool {
-	return len(m.fStates) > 0 || len(m.fAgents) > 0 || len(m.fModels) > 0 || m.fWindow > 0
+	return len(m.fStates) > 0 || len(m.fAgents) > 0 || len(m.fModels) > 0 || len(m.fHomes) > 0 || m.fWindow > 0
 }
 
 // matchesFacets applies the f-filter to one session.
@@ -482,6 +496,9 @@ func (m model) matchesFacets(session Session) bool {
 		return false
 	}
 	if len(m.fModels) > 0 && !m.fModels[displayModel(session.LastModel)] {
+		return false
+	}
+	if len(m.fHomes) > 0 && !m.fHomes[homeOf(session)] {
 		return false
 	}
 	if m.fWindow > 0 && time.Since(newest(session)) > m.fWindow {
@@ -516,9 +533,11 @@ func (m *model) buildFilterItems() {
 	states := map[string]int{}
 	agents := map[string]int{}
 	models := map[string]int{}
+	accounts := map[string]int{}
 	for _, session := range sessions {
 		states[displayState(session)]++
 		agents[session.Target]++
+		accounts[homeOf(session)]++
 		if model := displayModel(session.LastModel); model != "" && model != "-" {
 			models[model]++
 		}
@@ -536,6 +555,17 @@ func (m *model) buildFilterItems() {
 		if agents[agent] > 0 {
 			items = append(items, filterItem{kind: "agent", key: agent,
 				label: fmt.Sprintf("%-10s %d", agent, agents[agent])})
+		}
+	}
+	if m.multiHome() {
+		saved := "all"
+		if labels := loadPrefs(m.cfg).Accounts; len(labels) > 0 {
+			saved = strings.Join(labels, ", ")
+		}
+		items = append(items, filterItem{kind: "header", label: "ACCOUNT  · default at launch: " + saved})
+		for _, home := range m.homes {
+			items = append(items, filterItem{kind: "home", key: home.Label,
+				label: fmt.Sprintf("%-16s %d", home.Label, accounts[home.Label])})
 		}
 	}
 	if len(models) > 0 {
@@ -614,6 +644,13 @@ func (m *model) toggleFilterItem() {
 		} else {
 			set[item.key] = true
 		}
+	case "home":
+		set := *ensure(&m.fHomes)
+		if set[item.key] {
+			delete(set, item.key)
+		} else {
+			set[item.key] = true
+		}
 	case "window":
 		if item.key == "any" {
 			m.fWindow = 0
@@ -636,6 +673,8 @@ func (m model) filterItemChecked(item filterItem) bool {
 		return m.fAgents[item.key]
 	case "model":
 		return m.fModels[item.key]
+	case "home":
+		return m.fHomes[item.key]
 	case "window":
 		if item.key == "any" {
 			return m.fWindow == 0
@@ -660,6 +699,7 @@ func (m model) filterSummary() string {
 	appendSet(m.fStates)
 	appendSet(m.fAgents)
 	appendSet(m.fModels)
+	appendSet(m.fHomes)
 	if m.fWindow > 0 {
 		parts = append(parts, "<"+m.fWindow.String())
 	}
@@ -810,6 +850,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case rescanMsg:
 		m.scanning = false
+		// A home registered meanwhile (its first session ran) joins the view.
+		m.homes = targets.ClaudeHomes()
 		if m.groupOpen != nil {
 			// Keep the auto group and re-apply the active scope; the full
 			// set lives in fullProjects while scoped.
@@ -881,6 +923,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showHits = true
 		m.hCursor, m.hOffset = 0, 0
 		return m, nil
+	case transferMsg:
+		m.xfer = nil
+		if msg.err != nil {
+			m.notice, m.noticeErr = "transfer failed: "+msg.err.Error(), true
+			return m, nil
+		}
+		m.notice, m.noticeErr = fmt.Sprintf("transferred %d session(s) to %s", msg.moved, msg.to), false
+		m.scanning = true
+		cfg := m.cfg
+		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
 	case transplantMsg:
 		m.tpBusy = false
 		m.showTransplant = false
@@ -1089,6 +1141,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	}
+	if m.xfer != nil {
+		return m.handleTransferKey(msg)
 	}
 	if m.confirmDelGroup != nil {
 		switch msg.String() {
@@ -1789,7 +1844,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case " ", "x":
 			(&m).toggleFilterItem()
 		case "c":
-			m.fStates, m.fAgents, m.fModels, m.fWindow = nil, nil, nil, 0
+			m.fStates, m.fAgents, m.fModels, m.fHomes, m.fWindow = nil, nil, nil, nil, 0
+		case "D":
+			if m.multiHome() {
+				(&m).saveDefaultAccounts()
+			}
 		}
 		return m, nil
 	}
@@ -2017,6 +2076,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m = m.pressOpen(*session)
+	case "A":
+		m = m.pressTransfer()
 	case "t":
 		if m.showSessions || m.showAll || m.showHits {
 			session := m.selectedSession()
@@ -2618,7 +2679,7 @@ func (m model) nameWidth() int { return max(24, m.width-46) }
 // titleWidth is the flexible session-title column; the all pane reserves
 // room for the IN column.
 func (m model) titleWidth() int {
-	width := m.width - 54 // state, agent, model, size, modified columns
+	width := m.width - 54 - m.accountColumns() // state, agent, account, model, size, modified columns
 	if m.showAll {
 		width -= 31
 	}
@@ -2831,6 +2892,9 @@ func (m model) View() string {
 		body = append(body, rows...)
 		body = append(body, "", styleDim.Render(truncate(detail, 74)))
 		return m.inputDialog(heading, body, "↑/↓ choose · enter confirm · → open · ← up · / filter · ~ jump to path")
+	}
+	if m.xfer != nil {
+		return m.transferView()
 	}
 	if m.confirmDelGroup != nil {
 		grp := *m.confirmDelGroup
@@ -3137,15 +3201,15 @@ func (m model) View() string {
 	cursor := m.currentCursor()
 	switch {
 	case m.showAll:
-		b.WriteString(styleDim.Render(fmt.Sprintf(" %-11s  %-*s %-7s %-12s %8s  %-8s %s",
-			"STATE", m.titleWidth(), "TITLE", "AGENT", "MODEL", "SIZE", "MODIFIED", "IN")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf(" %-11s  %-*s %-7s %s%-12s %8s  %-8s %s",
+			"STATE", m.titleWidth(), "TITLE", "AGENT", m.accountHeader(), "MODEL", "SIZE", "MODIFIED", "IN")) + "\n")
 		end := min(len(m.allSessions), m.aOffset+m.pageSize())
 		for i := m.aOffset; i < end; i++ {
 			b.WriteString(m.allSessionRow(m.allSessions[i], i == cursor) + "\n")
 		}
 	case m.showSessions:
-		b.WriteString(styleDim.Render(fmt.Sprintf(" %-11s  %-*s %-7s %-12s %8s  %s",
-			"STATE", m.titleWidth(), "TITLE", "AGENT", "MODEL", "SIZE", "MODIFIED")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf(" %-11s  %-*s %-7s %s%-12s %8s  %s",
+			"STATE", m.titleWidth(), "TITLE", "AGENT", m.accountHeader(), "MODEL", "SIZE", "MODIFIED")) + "\n")
 		end := min(m.sessionCount(), m.sOffset+m.pageSize())
 		for i := m.sOffset; i < end; i++ {
 			b.WriteString(m.sessionRow(m.visible[i], i == cursor) + "\n")
@@ -3374,10 +3438,23 @@ func (m model) replayAsk(entry askHistoryEntry) (model, bool) {
 
 // resumeCommand is the shell line a spawned window runs to pick the
 // session back up in its project directory.
+//
+// With several claude homes the agent is pinned to the session's own home
+// through env(1), which also skips any shell wrapper that picks a home by
+// folder. The default home runs with CLAUDE_CONFIG_DIR removed rather than
+// set to ~/.claude: the agent keys its stored login on whether the
+// variable is set at all, so setting it would ask for a fresh login.
 func resumeCommand(session Session, project string) string {
 	agent := "claude --resume " + session.ID
 	if session.Target == "codex" {
 		agent = "codex resume " + session.ID
+	} else if homes := targets.ClaudeHomes(); len(homes) > 1 {
+		home := targets.HomeFor(session.Home)
+		if home.IsDefault() {
+			agent = "env -u CLAUDE_CONFIG_DIR " + agent
+		} else {
+			agent = "env CLAUDE_CONFIG_DIR=" + focus.ShellQuote(home.Dir) + " " + agent
+		}
 	}
 	return "cd " + focus.ShellQuote(project) + " && " + agent
 }
@@ -3391,7 +3468,7 @@ func (m *model) openDetail() {
 	m.detail = session
 	m.tailKeep = transcriptKeep
 	if session.State == "LOST" {
-		m.detailData = LoadLostDetail(session.ID)
+		m.detailData = LoadLostDetail(session.Home, session.ID)
 	} else {
 		m.detailData = LoadDetail(*session)
 	}
@@ -3762,7 +3839,11 @@ func (m model) filterView() string {
 		}
 	}
 	b.WriteString("\n" + styleDim.Render("  empty categories don't constrain; MODIFIED is single-choice") + "\n")
-	return m.pinBottomBare(b.String(), "↑/↓ move · space toggle · c clear · f/esc apply")
+	help := "↑/↓ move · space toggle · c clear · f/esc apply"
+	if m.multiHome() {
+		help = "↑/↓ move · space toggle · c clear · D save accounts as default · f/esc apply"
+	}
+	return m.pinBottomBare(b.String(), help)
 }
 
 // hitsView lists content-search results ranked by hit count; the
@@ -3794,11 +3875,11 @@ func (m model) hitsView() string {
 	}
 
 	if m.hitsMode == "ask" {
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %4s %6s  %-11s %-*s %-7s %-9s %s",
-			"RANK", "HITS", "STATE", m.titleWidth(), "TITLE", "AGENT", "MODIFIED", "IN")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %4s %6s  %-11s %-*s %-7s %s%-9s %s",
+			"RANK", "HITS", "STATE", m.titleWidth(), "TITLE", "AGENT", m.accountHeader(), "MODIFIED", "IN")) + "\n")
 	} else {
-		b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-11s %-*s %-7s %-9s %s",
-			"HITS", "STATE", m.titleWidth(), "TITLE", "AGENT", "MODIFIED", "IN")) + "\n")
+		b.WriteString(styleDim.Render(fmt.Sprintf("  %6s  %-11s %-*s %-7s %s%-9s %s",
+			"HITS", "STATE", m.titleWidth(), "TITLE", "AGENT", m.accountHeader(), "MODIFIED", "IN")) + "\n")
 	}
 	end := min(len(m.hits), m.hOffset+m.pageSize())
 	for i := m.hOffset; i < end; i++ {
@@ -3838,10 +3919,10 @@ func (m model) hitRow(hit Hit, index int, active bool) string {
 		}
 		lead = fmt.Sprintf("%4d %6s", index+1, hitsCell)
 	}
-	row := fmt.Sprintf("  %s  %s %-*s %-7s %-9s %s",
+	row := fmt.Sprintf("  %s  %s %-*s %-7s %s%-9s %s",
 		lead, styleUnless(active, stateStyle, stateLabel),
 		m.titleWidth(), truncate(title, m.titleWidth()),
-		hit.Session.Target,
+		hit.Session.Target, m.accountCell(hit.Session, active),
 		ago(hit.Session.Modified),
 		styleUnless(active, styleDim, truncate(in, max(10, m.width-m.titleWidth()-44))))
 	if active {
@@ -4010,8 +4091,8 @@ func (m model) allSessionRow(session Session, active bool) string {
 	if session.LiveStatus != "" {
 		live = styleUnless(plain, styleActive, "▶")
 	}
-	row := fmt.Sprintf("%s%s%s  %s %-7s %-12s %8s  %-8s %s",
-		m.selectBox(session, plain), live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
+	row := fmt.Sprintf("%s%s%s  %s %-7s %s%-12s %8s  %-8s %s",
+		m.selectBox(session, plain), live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target, m.accountCell(session, plain),
 		truncate(displayModel(session.LastModel), 12), human.Bytes(session.Size), ago(session.Modified),
 		styleUnless(plain, styleDim, truncate(m.relOfRoot(session), 30)))
 	if active {
@@ -4086,6 +4167,9 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	}
 	kv("state", strings.TrimSpace(style.Render(state))+liveNote)
 	kv("agent", session.Target)
+	if m.multiHome() && session.Target == "claude" {
+		kv("account", homeOf(session)+"  "+tildePath(targets.HomeFor(session.Home).Dir))
+	}
 	kv("session", session.ID)
 	if session.RebuiltFrom != "" {
 		kv("rebuilt", "from "+styleRecover.Render("✕ "+session.RebuiltFrom[:8]+"…")+
@@ -4520,6 +4604,7 @@ func (m model) runRescue(session Session, dir string) (model, tea.Cmd) {
 func (m model) offerRebuiltResume(original Session, newID string, path string, dir string) model {
 	rebuilt := Session{
 		Target:      "claude",
+		Home:        original.Home,
 		ID:          newID,
 		Title:       original.Title,
 		State:       "REBUILT",
@@ -4827,6 +4912,7 @@ func (m model) folderRow(folder Folder, active bool) string {
 	if folder.HomeGone {
 		health += styleUnless(active, styleStale, " ⌂!")
 	}
+	health += m.ownerBadge(folder, active)
 
 	row := fmt.Sprintf(" %s %-*s  %8d  %8s  %-9s%s",
 		styleUnless(plain, glyphStyle, glyph), m.nameWidth(), name, folder.Sessions, human.Bytes(folder.SizeBytes), ago(folder.Latest), health)
@@ -4869,8 +4955,8 @@ func (m model) sessionRow(session Session, active bool) string {
 	if m.groupOpen != nil && isArchived(*m.groupOpen, session.ID) {
 		archived = styleUnless(plain, styleDim, "  · archived")
 	}
-	row := fmt.Sprintf("%s%s%s  %s %-7s %-12s %8s  %s%s",
-		m.selectBox(session, plain), live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target,
+	row := fmt.Sprintf("%s%s%s  %s %-7s %s%-12s %8s  %s%s",
+		m.selectBox(session, plain), live, styleUnless(plain, style, state), sessionTitle(session, m.titleWidth(), plain), session.Target, m.accountCell(session, plain),
 		truncate(displayModel(session.LastModel), 12), size, ago(session.Modified), archived)
 	if active {
 		return styleCursor.Render(fmt.Sprintf("%-*s", m.width, row))

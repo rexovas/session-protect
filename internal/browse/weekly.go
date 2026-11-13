@@ -142,7 +142,7 @@ var liveCodexIDs = func() map[string]string {
 func RecordOpenSessions(cfg config.Config) {
 	now := nowFn()
 	seen := loadObservations(cfg)
-	for id, info := range guard.Live(guard.RegistryDir()) {
+	for id, info := range guard.LiveAll() {
 		var since time.Time
 		if info.StartedAt > 0 {
 			since = time.UnixMilli(info.StartedAt)

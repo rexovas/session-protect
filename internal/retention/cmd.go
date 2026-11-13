@@ -9,6 +9,7 @@ import (
 
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/lock"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 // Run is `session-protect retention [--dry-run] [--keep all|policy|latest]`:
@@ -96,7 +97,10 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 func repos(cfg config.Config) []string {
 	names := []string{"all"}
 	if cfg.Topology == "per-target" {
-		names = []string{"claude", "codex"}
+		names = nil
+		for _, target := range targets.DetectAll() {
+			names = append(names, target.Name)
+		}
 	}
 	var out []string
 	for _, name := range names {

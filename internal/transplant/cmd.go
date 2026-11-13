@@ -41,6 +41,13 @@ func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int
 				return 2
 			}
 			opts.To = args[i]
+		case "--home":
+			i++
+			if i == len(args) {
+				fmt.Fprintln(stderr, "--home requires a value")
+				return 2
+			}
+			opts.Home = args[i]
 		case "--memory":
 			i++
 			if i == len(args) {
@@ -165,7 +172,7 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  session-protect transplant (--session ID | --project PATH) --to DIR")
 	fmt.Fprintln(out, "                             [--copy] [--memory keep-both|skip|replace]")
-	fmt.Fprintln(out, "                             [--dry-run] [--yes]")
+	fmt.Fprintln(out, "                             [--home LABEL] [--dry-run] [--yes]")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Relocates claude sessions (and project memory) to another directory,")
 	fmt.Fprintln(out, "rewriting internal paths so resume works from the new home. Moves are")

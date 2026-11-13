@@ -96,10 +96,8 @@ func Build(path string) (Status, error) {
 	}
 	return Status{
 		ProjectPath: projectPath,
-		Targets: []TargetStatus{
-			claudeStatus(cfg, home, projectPath),
-			codexStatus(cfg, home, projectPath),
-		},
+		Targets: append(claudeStatuses(cfg, projectPath),
+			codexStatus(cfg, home, projectPath)),
 	}, nil
 }
 
@@ -160,11 +158,21 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  session-protect project status [path] [--json]")
 }
 
-func claudeStatus(cfg config.Config, home string, projectPath string) TargetStatus {
+// claudeStatuses reports the project in each claude home: always the
+// default, and any other home that has sessions for it.
+func claudeStatuses(cfg config.Config, projectPath string) []TargetStatus {
 	slug := targets.ClaudeSlug(projectPath)
-	source := filepath.Join(home, ".claude", "projects", slug)
-	backup := backupDir(cfg, "claude", filepath.Join("projects", slug))
-	return compareTarget("claude", source, backup, listJSONL(source), listJSONL(backup))
+	var out []TargetStatus
+	for _, home := range targets.ClaudeHomes() {
+		name := home.TargetName()
+		source := filepath.Join(home.Dir, "projects", slug)
+		backup := backupDir(cfg, name, filepath.Join("projects", slug))
+		status := compareTarget(name, source, backup, listJSONL(source), listJSONL(backup))
+		if home.IsDefault() || status.SourceCount > 0 || status.BackupCount > 0 {
+			out = append(out, status)
+		}
+	}
+	return out
 }
 
 func codexStatus(cfg config.Config, home string, projectPath string) TargetStatus {
