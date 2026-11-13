@@ -8,6 +8,7 @@ import (
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/lock"
 	"github.com/rexovas/session-protect/internal/restore"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 // restoreDest resolves where a session's backup copy would land in the live
@@ -19,16 +20,17 @@ func restoreDest(cfg config.Config, session Session) (dest string, overwriting b
 	if session.SourcePath != "" {
 		return session.SourcePath, true, nil
 	}
+	name := backupTargetName(session)
 	var sourceRoot string
 	for _, target := range cfg.ResolveTargets() {
-		if target.Name == session.Target {
+		if target.Name == name {
 			sourceRoot = target.Source
 		}
 	}
 	if sourceRoot == "" {
-		return "", false, fmt.Errorf("target %s is not configured", session.Target)
+		return "", false, fmt.Errorf("target %s is not configured", name)
 	}
-	repo, prefix := cfg.RepoFor(session.Target)
+	repo, prefix := cfg.RepoFor(name)
 	base := filepath.Join(repo, prefix)
 	rel, relErr := filepath.Rel(base, session.BackupPath)
 	if relErr != nil || strings.HasPrefix(rel, "..") {
@@ -51,7 +53,7 @@ func RestoreSession(cfg config.Config, session Session) (string, error) {
 	}
 	defer release()
 	_, err = restore.Apply(cfg, []restore.Item{{
-		Target:      session.Target,
+		Target:      backupTargetName(session),
 		SessionID:   session.ID,
 		State:       session.State,
 		From:        session.BackupPath,
@@ -62,4 +64,13 @@ func RestoreSession(cfg config.Config, session Session) (string, error) {
 		return "", err
 	}
 	return dest, nil
+}
+
+// backupTargetName is the backup target holding a session: its claude
+// home's target (claude, claude-<label>) or codex.
+func backupTargetName(session Session) string {
+	if session.Target != "claude" {
+		return session.Target
+	}
+	return targets.HomeFor(session.Home).TargetName()
 }

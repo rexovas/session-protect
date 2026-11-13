@@ -371,3 +371,41 @@ func TestMemoryReplaceAndSkip(t *testing.T) {
 		})
 	}
 }
+
+// A transplant works inside one claude home: the home holding the
+// session, or the one named when a project spans several.
+func TestTransplantPicksTheClaudeHome(t *testing.T) {
+	cfg, home, source, target := setup(t)
+	client := filepath.Join(home, "client-config")
+	slug := targets.ClaudeSlug(source)
+	const clientID = "99999999-2222-3333-4444-555555555555"
+	clientFile := filepath.Join(client, "projects", slug, clientID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(clientFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(clientFile, []byte(`{"type":"user","sessionId":"`+clientID+`","cwd":"`+source+`"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := targets.RegisterClaudeDir(client, "client"); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := Build(cfg, Options{SessionID: clientID, To: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Sessions) != 1 || plan.Sessions[0].DstFile != filepath.Join(client, "projects", targets.ClaudeSlug(target), clientID+".jsonl") {
+		t.Fatalf("client session planned outside its home: %+v", plan.Sessions)
+	}
+
+	if _, err := Build(cfg, Options{Project: source, To: target}); err == nil || !strings.Contains(err.Error(), "--home") {
+		t.Fatalf("a project spanning homes was not refused: %v", err)
+	}
+	plan, err = Build(cfg, Options{Project: source, To: target, Home: "default"})
+	if err != nil || len(plan.Sessions) != 1 || plan.Sessions[0].ID != sessionID {
+		t.Fatalf("--home default plan = %+v, %v", plan, err)
+	}
+	if _, err := Build(cfg, Options{Project: source, To: target, Home: "nope"}); err == nil {
+		t.Fatal("an unknown --home was accepted")
+	}
+}

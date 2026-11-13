@@ -3,6 +3,7 @@ package doctor
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/hook"
 	"github.com/rexovas/session-protect/internal/schedule"
 	"github.com/rexovas/session-protect/internal/targets"
 )
@@ -23,8 +25,12 @@ type Check struct {
 
 func Run(out io.Writer) int {
 	checks := Checks()
+	width := 16
 	for _, check := range checks {
-		line := fmt.Sprintf("%-6s  %-16s", strings.ToUpper(check.Status), check.Name)
+		width = max(width, len(check.Name))
+	}
+	for _, check := range checks {
+		line := fmt.Sprintf("%-6s  %-*s", strings.ToUpper(check.Status), width, check.Name)
 		if check.Detail != "" {
 			line += "  " + check.Detail
 		}
@@ -62,6 +68,7 @@ func Checks() []Check {
 			Warning: warning,
 		})
 	}
+	checks = append(checks, claudeDirChecks()...)
 
 	if runtime.GOOS == "darwin" {
 		checks = append(checks, scheduleCheck(schedule.Inspect(), lastBackup(), time.Now()))
@@ -117,7 +124,11 @@ func lastBackup() time.Time {
 		return time.Time{}
 	}
 	var newest time.Time
-	for _, name := range []string{"all", "claude", "codex"} {
+	names := []string{"all"}
+	for _, target := range targets.DetectAll() {
+		names = append(names, target.Name)
+	}
+	for _, name := range names {
 		out, err := exec.Command("git", "-C", filepath.Join(cfg.BackupRoot, name), "log", "-1", "--format=%cI").Output()
 		if err != nil {
 			continue
@@ -144,4 +155,40 @@ func commandCheck(name string, versionCommand string) Check {
 	}
 
 	return Check{Name: name, Status: "ok", Detail: detail}
+}
+
+// claudeDirChecks covers extra claude config dirs: each needs our hooks
+// for its turn-end syncs, and a CLAUDE_CONFIG_DIR in use but unregistered
+// is not protected at all.
+func claudeDirChecks() []Check {
+	var checks []Check
+	for _, home := range targets.ClaudeHomes() {
+		if home.IsDefault() || !dirExists(home.Dir) {
+			continue
+		}
+		if !hook.InstalledIn(home.Dir) {
+			checks = append(checks, Check{
+				Name:    home.TargetName() + " hooks",
+				Status:  "warn",
+				Detail:  home.Dir,
+				Warning: "no session-protect hooks; run: session-protect claude-dirs add " + home.Dir,
+			})
+		}
+	}
+	if active := targets.ActiveClaudeDir(); dirExists(active) {
+		if _, known := targets.HomeForDir(active); !known {
+			checks = append(checks, Check{
+				Name:    "CLAUDE_CONFIG_DIR",
+				Status:  "warn",
+				Detail:  active,
+				Warning: "not protected; run: session-protect claude-dirs add " + active,
+			})
+		}
+	}
+	return checks
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ type Info struct {
 	Status    string `json:"status"`
 	StartedAt int64  `json:"startedAt"` // unix ms the process opened the session
 	UpdatedAt int64  `json:"updatedAt"`
+	Home      string `json:"-"` // label of the claude home whose registry holds it
 }
 
 // Run implements the SessionStart hook: read the hook payload, look for
@@ -34,24 +36,42 @@ type Info struct {
 func Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 	var input struct {
 		SessionID string `json:"session_id"`
+		Cwd       string `json:"cwd"`
 	}
 	_ = json.NewDecoder(stdin).Decode(&input)
-	if input.SessionID == "" {
+	targets.NoteActiveClaudeDir()
+
+	var messages []string
+	account := AccountMismatch(input.Cwd, targets.ActiveClaudeDir())
+	if account != "" {
+		messages = append(messages, account)
+	}
+	var conflicts []Info
+	if input.SessionID != "" {
+		conflicts = conflictsIn(LiveAll(), input.SessionID, os.Getppid())
+	}
+	if len(conflicts) > 0 {
+		conflict := conflicts[0]
+		messages = append(messages, fmt.Sprintf(
+			"⚠ session-protect: this session is ALREADY OPEN in another process (pid %d, status %s, last active %s). "+
+				"Working in both places will interleave and can diverge the transcript (claude-code#69364). "+
+				"A safety backup commit was started; consider closing one side.",
+			conflict.PID, conflict.Status, sinceMillis(conflict.UpdatedAt)))
+	}
+	if len(messages) == 0 {
 		return 0
 	}
-
-	conflicts := Conflicts(RegistryDir(), input.SessionID, os.Getppid())
+	output := map[string]any{"systemMessage": strings.Join(messages, "\n")}
+	if account != "" {
+		output["hookSpecificOutput"] = map[string]any{
+			"hookEventName":     "SessionStart",
+			"additionalContext": account + " Tell the user before starting work.",
+		}
+	}
+	_ = json.NewEncoder(stdout).Encode(output)
 	if len(conflicts) == 0 {
 		return 0
 	}
-
-	conflict := conflicts[0]
-	message := fmt.Sprintf(
-		"⚠ session-protect: this session is ALREADY OPEN in another process (pid %d, status %s, last active %s). "+
-			"Working in both places will interleave and can diverge the transcript (claude-code#69364). "+
-			"A safety backup commit was started; consider closing one side.",
-		conflict.PID, conflict.Status, sinceMillis(conflict.UpdatedAt))
-	_ = json.NewEncoder(stdout).Encode(map[string]string{"systemMessage": message})
 
 	if binary, err := os.Executable(); err == nil {
 		command := exec.Command(binary, "backup")
@@ -61,16 +81,37 @@ func Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
-// RegistryDir is where the agent records one JSON file per running process.
+// RegistryDir is where the agent records one JSON file per running process,
+// for the default claude home.
 func RegistryDir() string {
 	return filepath.Join(targets.DetectClaude().Source, "sessions")
+}
+
+// LiveAll merges the live registries of every claude home, each entry
+// tagged with its home. Session ids are unique, so a session open in two
+// homes at once (a copied transcript) keeps the most recently updated.
+func LiveAll() map[string]Info {
+	live := map[string]Info{}
+	for _, home := range targets.ClaudeHomes() {
+		for id, info := range Live(filepath.Join(home.Dir, "sessions")) {
+			info.Home = home.Label
+			if existing, ok := live[id]; !ok || info.UpdatedAt > existing.UpdatedAt {
+				live[id] = info
+			}
+		}
+	}
+	return live
 }
 
 // Conflicts returns live registry entries holding sessionID, excluding the
 // process that invoked us (its parent is the agent that just started).
 func Conflicts(dir string, sessionID string, excludePID int) []Info {
+	return conflictsIn(Live(dir), sessionID, excludePID)
+}
+
+func conflictsIn(live map[string]Info, sessionID string, excludePID int) []Info {
 	var conflicts []Info
-	for _, info := range Live(dir) {
+	for _, info := range live {
 		if info.SessionID == sessionID && info.PID != excludePID {
 			conflicts = append(conflicts, info)
 		}
@@ -130,4 +171,29 @@ func sinceMillis(ms int64) string {
 	default:
 		return fmt.Sprintf("%dh ago", int(since.Hours()))
 	}
+}
+
+// AccountMismatch explains a session started on a claude home (account)
+// other than the one that owns its folder, or in a folder several homes
+// claim; "" when the account fits. Folder owners are learned from where
+// sessions live (see targets.FolderOwner).
+func AccountMismatch(cwd string, configDir string) string {
+	if cwd == "" {
+		return ""
+	}
+	active, ok := targets.HomeForDir(configDir)
+	if !ok {
+		return ""
+	}
+	owner := targets.FolderOwner(cwd)
+	switch {
+	case len(owner.Conflict) > 0:
+		return fmt.Sprintf("⚠ session-protect: this folder has sessions in several accounts (%s). Keep each folder on one account.",
+			strings.Join(owner.Conflict, ", "))
+	case owner.Owned() && owner.Owner.Label != active.Label:
+		return fmt.Sprintf("⚠ session-protect: this folder belongs to the %s account, but this session runs on %s (%s). "+
+			"Quit and relaunch with `claude` from the shell (or `claude --account %s`) unless this is intentional.",
+			owner.Owner.Label, active.Label, active.Dir, owner.Owner.Label)
+	}
+	return ""
 }

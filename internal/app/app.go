@@ -7,16 +7,20 @@ import (
 
 	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/browse"
+	"github.com/rexovas/session-protect/internal/claudedirs"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/doctor"
 	"github.com/rexovas/session-protect/internal/guard"
 	"github.com/rexovas/session-protect/internal/hook"
+	"github.com/rexovas/session-protect/internal/launch"
 	"github.com/rexovas/session-protect/internal/plan"
 	"github.com/rexovas/session-protect/internal/project"
 	"github.com/rexovas/session-protect/internal/restore"
 	"github.com/rexovas/session-protect/internal/retention"
 	"github.com/rexovas/session-protect/internal/schedule"
 	"github.com/rexovas/session-protect/internal/status"
+	"github.com/rexovas/session-protect/internal/targets"
+	"github.com/rexovas/session-protect/internal/transfer"
 	"github.com/rexovas/session-protect/internal/transplant"
 	"github.com/rexovas/session-protect/internal/update"
 	"github.com/rexovas/session-protect/internal/version"
@@ -29,8 +33,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 
 	switch args[0] {
-	case "guard":
-		// Runs inline at every session start; keep it to its own work.
+	case "guard", "launch", "shell-init":
+		// Inline on every session start or agent launch; keep it to its own work.
 	case "browse", "ui":
 		heal() // long-running: repair before it starts
 	default:
@@ -45,6 +49,9 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		recordWeekly(true)
 		return code
 	case "sync":
+		// The turn-end hook inherits the session's CLAUDE_CONFIG_DIR:
+		// register that dir first so this sync already backs it up.
+		targets.NoteActiveClaudeDir()
 		code := backup.Run(args[1:], stdout, stderr, true)
 		recordWeekly(false)
 		return code
@@ -58,6 +65,14 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return retention.Run(args[1:], stdout, stderr)
 	case "hook":
 		return hook.Run(args[1:], stdout, stderr)
+	case "claude-dirs":
+		return claudedirs.Run(args[1:], stdout, stderr)
+	case "transfer":
+		return transfer.Run(args[1:], os.Stdin, stdout, stderr)
+	case "launch":
+		return launch.Run(args[1:], stdout, stderr)
+	case "shell-init":
+		return launch.ShellInit(args[1:], stdout, stderr)
 	case "browse", "ui":
 		return browse.Run(args[1:], stdout, stderr)
 	case "index":
@@ -100,16 +115,23 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "SessionProtect")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  session-protect backup [claude|codex] [--dry-run] [--allow-unencrypted] [--json]")
-	fmt.Fprintln(out, "  session-protect save [claude|codex]   (alias for backup)")
-	fmt.Fprintln(out, "  session-protect sync [claude|codex]   (mirror without committing)")
+	fmt.Fprintln(out, "  session-protect backup [TARGET] [--dry-run] [--allow-unencrypted] [--json]")
+	fmt.Fprintln(out, "  session-protect save [TARGET]   (alias for backup)")
+	fmt.Fprintln(out, "  session-protect sync [TARGET]   (mirror without committing)")
+	fmt.Fprintln(out, "      TARGET: claude, codex, or claude-LABEL for an extra claude config dir")
 	fmt.Fprintln(out, "  session-protect restore [--missing] [--target claude|codex] [--project PATH]")
 	fmt.Fprintln(out, "                          [--session ID] [--overwrite] [--dry-run] [--yes]")
 	fmt.Fprintln(out, "  session-protect transplant (--session ID | --project PATH) --to DIR")
-	fmt.Fprintln(out, "                             [--copy] [--memory keep-both|skip|replace] [--dry-run] [--yes]")
+	fmt.Fprintln(out, "                             [--copy] [--memory keep-both|skip|replace] [--home LABEL]")
+	fmt.Fprintln(out, "                             [--dry-run] [--yes]")
 	fmt.Fprintln(out, "  session-protect schedule install|reload|status|uninstall")
 	fmt.Fprintln(out, "  session-protect retention [--dry-run] [--keep all|policy|latest]")
 	fmt.Fprintln(out, "  session-protect hook install|status|uninstall [claude]")
+	fmt.Fprintln(out, "  session-protect claude-dirs [add PATH [--label L] | remove LABEL | which [DIR]]")
+	fmt.Fprintln(out, "  session-protect transfer --to LABEL (--session ID | --project PATH [--recursive])")
+	fmt.Fprintln(out, "                           [--from LABEL] [--dry-run] [--yes]")
+	fmt.Fprintln(out, "  session-protect shell-init [zsh|bash]   (eval in your shell rc: claude runs on")
+	fmt.Fprintln(out, "                                          the account that owns the folder)")
 	fmt.Fprintln(out, "  session-protect browse   (interactive session browser; alias: ui)")
 	fmt.Fprintln(out, "  session-protect version [--verbose]")
 	fmt.Fprintln(out, "  session-protect doctor")

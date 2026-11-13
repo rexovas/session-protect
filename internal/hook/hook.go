@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/rexovas/session-protect/internal/binpath"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 // marker identifies entries this tool manages inside the agent's hook config,
@@ -32,7 +33,7 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 	switch args[0] {
 	case "install":
-		return install(stdout, stderr)
+		return installAt(settingsPath(), stdout, stderr)
 	case "status":
 		return status(stdout)
 	case "uninstall":
@@ -52,8 +53,23 @@ func usage(out io.Writer) {
 }
 
 func settingsPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "settings.json")
+	return SettingsPathFor(targets.DefaultClaudeDir())
+}
+
+// SettingsPathFor is the settings file of a claude config dir.
+func SettingsPathFor(dir string) string {
+	return filepath.Join(dir, "settings.json")
+}
+
+// InstallInto installs the hooks into a claude config dir's settings.
+func InstallInto(dir string, stdout io.Writer, stderr io.Writer) int {
+	return installAt(SettingsPathFor(dir), stdout, stderr)
+}
+
+// InstalledIn reports whether a claude config dir has our hooks.
+func InstalledIn(dir string) bool {
+	settings, err := loadSettings(SettingsPathFor(dir))
+	return err == nil && hasManagedHook(settings)
 }
 
 // managedHooks returns the hook entries this tool installs per event: a
@@ -70,14 +86,13 @@ func managedHooks() (map[string]string, error) {
 	}, nil
 }
 
-func install(stdout io.Writer, stderr io.Writer) int {
+func installAt(path string, stdout io.Writer, stderr io.Writer) int {
 	commands, err := managedHooks()
 	if err != nil {
 		fmt.Fprintf(stderr, "hook install failed: %v\n", err)
 		return 1
 	}
 
-	path := settingsPath()
 	settings, err := loadSettings(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "hook install failed: %v\n", err)
@@ -133,19 +148,26 @@ func Repair() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	path := settingsPath()
-	if _, err := os.Stat(path); err != nil {
-		return 0, nil
+	total := 0
+	for _, home := range targets.ClaudeHomes() {
+		path := SettingsPathFor(home.Dir)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		settings, err := loadSettings(path)
+		if err != nil {
+			return total, err
+		}
+		n := repoint(settings, currentBinary(commands))
+		if n == 0 {
+			continue
+		}
+		if err := writeSettings(path, settings); err != nil {
+			return total, err
+		}
+		total += n
 	}
-	settings, err := loadSettings(path)
-	if err != nil {
-		return 0, err
-	}
-	n := repoint(settings, currentBinary(commands))
-	if n == 0 {
-		return 0, nil
-	}
-	return n, writeSettings(path, settings)
+	return total, nil
 }
 
 // currentBinary is the binary the managed hook commands invoke.

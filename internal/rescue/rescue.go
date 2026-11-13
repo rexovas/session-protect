@@ -28,17 +28,38 @@ type Prompt struct {
 }
 
 // LostPrompts reads every prompt recorded for a session from the agent's
-// history file (read-only), oldest first.
+// history file (read-only), oldest first. For claude every home's history
+// is searched; the session lives in exactly one.
 func LostPrompts(target string, sessionID string) (prompts []Prompt, project string, err error) {
-	var path string
+	prompts, project, _, err = lostPrompts(target, sessionID)
+	return prompts, project, err
+}
+
+// lostPrompts is LostPrompts that also names the claude home whose history
+// recorded the session, so a reconstruction lands back in that home.
+func lostPrompts(target string, sessionID string) ([]Prompt, string, targets.ClaudeHome, error) {
 	switch target {
 	case "claude":
-		path = filepath.Join(targets.DetectClaude().Source, "history.jsonl")
+		var firstErr error
+		for _, home := range targets.ClaudeHomes() {
+			prompts, project, err := promptsFrom(filepath.Join(home.Dir, "history.jsonl"), sessionID)
+			if err == nil {
+				return prompts, project, home, nil
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		return nil, "", targets.ClaudeHome{}, firstErr
 	case "codex":
-		path = filepath.Join(targets.DetectCodex().Source, "history.jsonl")
+		prompts, project, err := promptsFrom(filepath.Join(targets.DetectCodex().Source, "history.jsonl"), sessionID)
+		return prompts, project, targets.ClaudeHome{}, err
 	default:
-		return nil, "", fmt.Errorf("unknown target %q", target)
+		return nil, "", targets.ClaudeHome{}, fmt.Errorf("unknown target %q", target)
 	}
+}
+
+func promptsFrom(path string, sessionID string) (prompts []Prompt, project string, err error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, "", fmt.Errorf("no prompt history: %w", err)
@@ -129,7 +150,7 @@ func Export(cfg config.Config, target string, sessionID string, title string, de
 // recorded project path (both are recreated on disk if gone, so the
 // resume has a working directory to land in).
 func Reconstruct(cfg config.Config, sessionID string, title string, projectDir string) (newID string, path string, err error) {
-	prompts, project, err := LostPrompts("claude", sessionID)
+	prompts, project, home, err := lostPrompts("claude", sessionID)
 	if err != nil {
 		return "", "", err
 	}
@@ -142,7 +163,7 @@ func Reconstruct(cfg config.Config, sessionID string, title string, projectDir s
 
 	note := "[reconstructed by session-protect — the original transcript was lost; " +
 		"only the prompt history survived. The conversation continues from here.]"
-	newID, path, err = writeReconstruction(project, prompts, note)
+	newID, path, err = writeReconstruction(home, project, prompts, note)
 	if err != nil {
 		return "", "", err
 	}
@@ -164,7 +185,7 @@ var complete = assist.Complete
 // explicitly marked AI-inferred; per-turn responses are never invented.
 // projectDir overrides the recorded project path, as in Reconstruct.
 func ReconstructAI(cfg config.Config, option assist.ModelOption, sessionID string, title string, projectDir string) (newID string, path string, err error) {
-	prompts, project, err := LostPrompts("claude", sessionID)
+	prompts, project, home, err := lostPrompts("claude", sessionID)
 	if err != nil {
 		return "", "", err
 	}
@@ -199,7 +220,7 @@ Prompts:
 		option.Label() + "; the original responses were lost and are NOT recovered]\n\n" +
 		strings.TrimSpace(brief) +
 		"\n\n[reconstructed by session-protect — the conversation continues from here.]"
-	newID, path, err = writeReconstruction(project, prompts, final)
+	newID, path, err = writeReconstruction(home, project, prompts, final)
 	if err != nil {
 		return "", "", err
 	}
@@ -214,13 +235,18 @@ Prompts:
 // writeReconstruction lays out the transcript: user prompts interleaved
 // with loss placeholders, the given text as the final assistant message,
 // under a fresh identity that can never overwrite anything.
-func writeReconstruction(project string, prompts []Prompt, finalText string) (newID string, path string, err error) {
+func writeReconstruction(home targets.ClaudeHome, project string, prompts []Prompt, finalText string) (newID string, path string, err error) {
 	// Recreate the working directory too: the resume cd's into it, and a
 	// rebuild is pointless if that lands nowhere.
 	if err := os.MkdirAll(project, 0o755); err != nil {
 		return "", "", fmt.Errorf("recreate project dir: %w", err)
 	}
-	dir := filepath.Join(targets.DetectClaude().Source, "projects", targets.ClaudeSlug(project))
+	// A rebuild is a new session: it belongs to the account that owns the
+	// folder now, if one does.
+	if owner := targets.FolderOwner(project); owner.Owned() {
+		home = owner.Owner
+	}
+	dir := filepath.Join(home.Dir, "projects", targets.ClaudeSlug(project))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", "", err
 	}

@@ -202,12 +202,63 @@ var codexHistory = &historyCache{apply: func(line []byte, sessions map[string]lo
 	sessions[entry.SessionID] = info.withWeek(at)
 }}
 
-// claudeHistorySessions indexes the claude prompt history by session id —
-// the only record of sessions whose transcripts were pruned before any
-// backup existed. The returned map is shared: callers must not modify it.
+// claudeHistories holds one prompt-history cache per claude home, keyed by
+// the history file's path.
+var (
+	claudeHistoriesMu sync.Mutex
+	claudeHistories   = map[string]*historyCache{}
+)
+
+func claudeHistoryOf(home targets.ClaudeHome) (map[string]lostInfo, map[string]string) {
+	path := filepath.Join(home.Dir, "history.jsonl")
+	claudeHistoriesMu.Lock()
+	cache := claudeHistories[path]
+	if cache == nil {
+		if home.IsDefault() {
+			cache = claudeHistory
+		} else {
+			cache = &historyCache{apply: claudeHistory.apply}
+		}
+		claudeHistories[path] = cache
+	}
+	claudeHistoriesMu.Unlock()
+	return cache.load(path)
+}
+
+// homeHistory is one claude home's prompt history.
+type homeHistory struct {
+	home     targets.ClaudeHome
+	sessions map[string]lostInfo
+	titles   map[string]string
+}
+
+func claudeHistoriesByHome() []homeHistory {
+	var out []homeHistory
+	for _, home := range targets.ClaudeHomes() {
+		sessions, titles := claudeHistoryOf(home)
+		out = append(out, homeHistory{home: home, sessions: sessions, titles: titles})
+	}
+	return out
+}
+
+// claudeHistorySessions indexes every claude home's prompt history by
+// session id — the only record of sessions whose transcripts were pruned
+// before any backup existed. The returned map is shared: callers must not
+// modify it.
 func claudeHistorySessions() map[string]lostInfo {
-	sessions, _ := claudeHistory.load(filepath.Join(targets.DetectClaude().Source, "history.jsonl"))
-	return sessions
+	histories := claudeHistoriesByHome()
+	if len(histories) == 1 {
+		return histories[0].sessions
+	}
+	merged := map[string]lostInfo{}
+	for _, history := range histories {
+		for id, info := range history.sessions {
+			if _, ok := merged[id]; !ok {
+				merged[id] = info
+			}
+		}
+	}
+	return merged
 }
 
 // codexHistorySessions indexes every session the codex prompt history
@@ -221,11 +272,14 @@ func codexHistorySessions() map[string]lostInfo {
 // for them in the agents' history files — a cheap title source that avoids
 // opening every session file.
 func historyTitles() map[string]string {
-	_, claude := claudeHistory.load(filepath.Join(targets.DetectClaude().Source, "history.jsonl"))
 	_, codex := codexHistory.load(filepath.Join(targets.DetectCodex().Source, "history.jsonl"))
-	titles := make(map[string]string, len(claude)+len(codex))
-	for id, title := range claude {
-		titles[id] = title
+	titles := make(map[string]string, len(codex))
+	for _, history := range claudeHistoriesByHome() {
+		for id, title := range history.titles {
+			if _, ok := titles[id]; !ok {
+				titles[id] = title
+			}
+		}
 	}
 	for id, title := range codex {
 		if _, ok := titles[id]; !ok {

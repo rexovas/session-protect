@@ -62,9 +62,11 @@ func Run(args []string, stdout io.Writer, stderr io.Writer, syncOnly bool) int {
 			opts.AllowUnencrypted = true
 		case "--json":
 			asJSON = true
-		case "claude", "codex":
-			opts.Target = arg
 		default:
+			if knownTarget(arg) {
+				opts.Target = arg
+				continue
+			}
 			fmt.Fprintf(stderr, "unexpected argument: %s\n", arg)
 			usage(stderr)
 			return 2
@@ -324,4 +326,15 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  session-protect backup [claude|codex] [--dry-run] [--allow-unencrypted] [--json]")
 	fmt.Fprintln(out, "  session-protect sync [claude|codex] [--allow-unencrypted] [--json]")
+}
+
+// knownTarget reports whether name is a backup target: claude, codex, or a
+// registered claude home (claude-<label>).
+func knownTarget(name string) bool {
+	for _, target := range targets.DetectAll() {
+		if target.Name == name {
+			return true
+		}
+	}
+	return false
 }

@@ -132,11 +132,12 @@ shows the essentials; the complete reference lives under `m` → Keys.
 | `ctrl+s` | search transcripts for the query, ranked by hits |
 | `ctrl+g` | AI find: describe a session, your chosen model ranks matches |
 | `ctrl+b` | build/refresh the semantic-search index (opt-in) |
-| `f` | facet filter: states, agents, models, modified window |
+| `f` | facet filter: states, agents, accounts, models, modified window (`D` saves the account selection as the launch default) |
 | `i` or `enter` | inspect: overview · usage/cost · full transcript |
 | `o` | open: jump to a running session, or resume a closed one (new window or in place) |
 | `r` | restore/rescue a session; on a folder row, bulk-rescue its lost sessions |
 | `t` | transplant a session or project to another directory |
+| `A` | transfer a folder (with subfolders) or session to another account |
 | `x` | show/hide lost sessions |
 | `w` | groups: named session sets — open one to browse it as a scoped tree (`/`, `tab`, all as normal); `s` snapshot open · `c` copy · `M` merge · `d` delete · weekly groups fold under *weekly sessions* |
 | `+` | add the highlighted session (or all `space`-selected) to a group |
@@ -150,10 +151,63 @@ directory is gone from disk (its sessions survive — `t` transplants
 them somewhere that exists). Session rows use the long form in the
 STATE column.
 
+## Several Claude accounts
+
+Claude keeps its login, settings and sessions in its config dir:
+`~/.claude`, or wherever `CLAUDE_CONFIG_DIR` points. Running one dir per
+account (or per client) keeps logins, history and memory apart, and
+session-protect protects each dir as its own **account**:
+
+- **Discovery by path, not name.** A dir whose `settings.json` carries the
+  session-protect hooks registers itself on its first session (the hooks
+  inherit `CLAUDE_CONFIG_DIR`). `sp claude-dirs add PATH` registers one up
+  front and installs the hooks; `sp claude-dirs` lists them. `~/.claude`
+  is always present as `default`; other labels come from the dir name
+  (`~/.claude-acme` → `acme`) unless given with `--label`. A label names
+  the dir's backup folder (`claude-acme`), so it is fixed once set.
+- **Backups** go to one target per dir; the default keeps `claude`.
+  Restores, rescues and rebuilds land back in the session's own dir.
+- **The explorer** shows every dir's sessions in one tree, with an
+  ACCOUNT column and an ACCOUNT section in the `f` filter whose selection
+  `D` saves as the default at launch. Resuming pins the agent to the
+  session's dir: other dirs run with `CLAUDE_CONFIG_DIR` set, the default
+  with it removed (setting it, even to `~/.claude`, makes Claude look for
+  a different login).
+- `sp transplant` works inside one dir; a project with sessions in
+  several asks for `--home LABEL`.
+
+**Folder ownership is learned, never configured.** A folder belongs to the
+account whose dir holds its sessions; a folder without sessions of its own
+inherits from the nearest owned parent, as long as nothing under that
+parent belongs to another account (so one stray session started in
+`~/projects` never claims everything beneath it). Unowned folders are
+default's. `sp claude-dirs which [DIR]` shows a folder's owner.
+
+- **`claude` on the right account.** Add `eval "$(sp shell-init zsh)"`
+  (or `bash`) to your shell rc: `claude` then starts on the account that
+  owns the current folder. `claude --account LABEL` picks one, which is
+  how a brand-new folder gets its first owner; an explicit
+  `CLAUDE_CONFIG_DIR` is respected; `command claude` skips it all.
+- **One account per owned folder.** The session-start hook warns when a
+  session runs on another account than its folder's owner (the desktop
+  app or an IDE bypasses the shell); transplants into a folder another
+  account owns are refused; rebuilt lost sessions land in the owner's dir.
+- **Transfers.** `sp transfer --to LABEL --project PATH --recursive` (or
+  `--session ID`) moves sessions to another account without changing
+  their folder: transcripts and everything keyed by their id, project
+  memory, and a copy of their prompt history, with a backup committed
+  before and after. The preview lists each folder with its owner before
+  and after. In the explorer, folder rows show `@owner` and `⇄N` for
+  sessions on another account inside an owned folder; `A` transfers.
+
+Symlinks inside a config dir (shared hooks or skills, say) are followed,
+so each dir's backup holds real files and restores as plain files.
+
 ## CLI reference
 
 ```text
-sp backup [claude|codex]      full backup commit (alias: save)
+sp backup [TARGET]            full backup commit (alias: save); TARGET is
+                              claude, codex, or claude-LABEL
 sp sync                       mirror working state without committing
 sp restore [--session ID]     bring deleted sessions back from backup
 sp transplant --session ID --to DIR [--copy]
@@ -161,6 +215,10 @@ sp transplant --session ID --to DIR [--copy]
 sp browse                     the session explorer (alias: ui)
 sp index [--clear]            build the semantic-search index (opt-in)
 sp hook install               realtime sync + session guard hooks
+sp claude-dirs [add PATH]     extra claude config dirs (accounts); which DIR
+sp transfer --to LABEL --project PATH [--recursive]
+                              move sessions to another account
+sp shell-init zsh             `claude` starts on the folder's account
 sp schedule install           daily backup (macOS launchd)
 sp schedule reload            re-register it after replacing the binary
 sp retention [--dry-run]      bound backup history (see [retention])

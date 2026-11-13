@@ -514,7 +514,8 @@ func claudeComplete(model string, prompt string, timeout time.Duration) (string,
 	if resolved, err := filepath.EvalSymlinks(scratch); err == nil {
 		scratch = resolved
 	}
-	defer os.RemoveAll(filepath.Join(targets.DetectClaude().Source, "projects", targets.ClaudeSlug(scratch)))
+	// claude -p writes into the config dir this process would give it.
+	defer os.RemoveAll(filepath.Join(targets.ActiveClaudeDir(), "projects", targets.ClaudeSlug(scratch)))
 
 	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", model, "--max-turns", "1", prompt)
 	cmd.Dir = scratch
