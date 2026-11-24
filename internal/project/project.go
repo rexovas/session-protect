@@ -89,7 +89,6 @@ func Build(path string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	home, _ := os.UserHomeDir()
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = config.Defaults()
@@ -97,7 +96,7 @@ func Build(path string) (Status, error) {
 	return Status{
 		ProjectPath: projectPath,
 		Targets: append(claudeStatuses(cfg, projectPath),
-			codexStatus(cfg, home, projectPath)),
+			codexStatuses(cfg, projectPath)...),
 	}, nil
 }
 
@@ -175,10 +174,20 @@ func claudeStatuses(cfg config.Config, projectPath string) []TargetStatus {
 	return out
 }
 
-func codexStatus(cfg config.Config, home string, projectPath string) TargetStatus {
-	source := filepath.Join(home, ".codex", "sessions")
-	backup := backupDir(cfg, "codex", "sessions")
-	return compareTarget("codex", source, backup, codexSessions(source, projectPath), codexSessions(backup, projectPath))
+// codexStatuses reports the project in each codex home: always the
+// default, and any other home that has sessions for it.
+func codexStatuses(cfg config.Config, projectPath string) []TargetStatus {
+	var out []TargetStatus
+	for _, home := range targets.CodexHomes() {
+		name := home.TargetName()
+		source := filepath.Join(home.Dir, "sessions")
+		backup := backupDir(cfg, name, "sessions")
+		status := compareTarget(name, source, backup, codexSessions(source, projectPath), codexSessions(backup, projectPath))
+		if home.IsDefault() || status.SourceCount > 0 || status.BackupCount > 0 {
+			out = append(out, status)
+		}
+	}
+	return out
 }
 
 func backupDir(cfg config.Config, target string, rel string) string {

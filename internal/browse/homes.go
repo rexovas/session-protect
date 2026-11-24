@@ -19,13 +19,18 @@ import (
 // homeOf is a session's account key: its claude home label, or "" for
 // codex, which has a single home and so no account.
 func homeOf(session Session) string {
-	if session.Target != "claude" {
-		return ""
-	}
 	if session.Home == "" {
 		return targets.DefaultHomeLabel
 	}
 	return session.Home
+}
+
+// sessionHome is the agent home a session lives in.
+func sessionHome(session Session) targets.Home {
+	if session.Target == "codex" {
+		return targets.HomeForOf(targets.AgentCodex, session.Home)
+	}
+	return targets.HomeFor(session.Home)
 }
 
 // multiHome reports whether accounts are worth showing at all.

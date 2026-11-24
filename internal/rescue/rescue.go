@@ -52,8 +52,17 @@ func lostPrompts(target string, sessionID string) ([]Prompt, string, targets.Cla
 		}
 		return nil, "", targets.ClaudeHome{}, firstErr
 	case "codex":
-		prompts, project, err := promptsFrom(filepath.Join(targets.DetectCodex().Source, "history.jsonl"), sessionID)
-		return prompts, project, targets.ClaudeHome{}, err
+		var firstErr error
+		for _, home := range targets.CodexHomes() {
+			prompts, project, err := promptsFrom(filepath.Join(home.Dir, "history.jsonl"), sessionID)
+			if err == nil {
+				return prompts, project, home, nil
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		return nil, "", targets.Home{}, firstErr
 	default:
 		return nil, "", targets.ClaudeHome{}, fmt.Errorf("unknown target %q", target)
 	}

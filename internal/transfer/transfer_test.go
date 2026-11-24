@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rexovas/session-protect/internal/config"
+	"github.com/rexovas/session-protect/internal/guard/codextest"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -192,5 +193,176 @@ func TestTransferRefusals(t *testing.T) {
 	}
 	if _, err := Build(e.cfg, Options{To: "nope", Project: e.project}); err == nil {
 		t.Fatal("an unknown destination was accepted")
+	}
+}
+
+// codexRollout writes a rollout in a codex home's date tree.
+func codexRollout(t *testing.T, home, date, id, cwd, source string) string {
+	t.Helper()
+	if source == "" {
+		source = `"cli"`
+	}
+	path := filepath.Join(home, "sessions", date, "rollout-2026-11-01T10-00-00-"+id+".jsonl")
+	write(t, path, `{"type":"session_meta","payload":{"id":"`+id+`","cwd":"`+cwd+`","source":`+source+`}}`+"\n")
+	return path
+}
+
+// An account's codex sessions move with its claude ones: the rollouts in
+// scope, the subagents they spawned (wherever those worked), and copies
+// of their history and thread names; other folders' rollouts stay.
+func TestTransferMovesCodexSessions(t *testing.T) {
+	e := setup(t)
+	defCodex := filepath.Join(e.home, ".codex")
+	acmeCodex := filepath.Join(e.home, "acme-codex")
+	if err := os.MkdirAll(acmeCodex, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := targets.RegisterDir(targets.AgentCodex, acmeCodex, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	session(t, e.def, e.project, "s1")
+	top := codexRollout(t, defCodex, "2026/11/01", "c1", e.project, "")
+	child := codexRollout(t, defCodex, "2026/11/02", "c2", filepath.Join(e.home, "elsewhere"),
+		`{"subagent":{"thread_spawn":{"parent_thread_id":"c1","depth":1}}}`)
+	grandchild := codexRollout(t, defCodex, "2026/11/02", "c3", filepath.Join(e.home, "elsewhere"),
+		`{"subagent":{"thread_spawn":{"parent_thread_id":"c2","depth":2}}}`)
+	other := codexRollout(t, defCodex, "2026/11/01", "c9", filepath.Join(e.home, "other"), "")
+	write(t, filepath.Join(defCodex, "history.jsonl"), `{"session_id":"c1","ts":1,"text":"hi"}`+"\n"+`{"session_id":"c9","ts":2,"text":"no"}`+"\n")
+	write(t, filepath.Join(defCodex, "session_index.jsonl"), `{"id":"c1","thread_name":"named","updated_at":"2026-11-01T00:00:00Z"}`+"\n")
+
+	plan, err := Build(e.cfg, Options{To: "acme", Project: e.project, Recursive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Sessions) != 1 || len(plan.Codex) != 3 {
+		t.Fatalf("claude %d, codex %d", len(plan.Sessions), len(plan.Codex))
+	}
+	if len(plan.Folders) != 1 || plan.Folders[0].Sessions != 1 || plan.Folders[0].Codex != 1 || plan.Folders[0].After != "acme" {
+		t.Fatalf("folders = %+v", plan.Folders)
+	}
+	if err := Apply(e.cfg, plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{top, child, grandchild} {
+		rel, _ := filepath.Rel(filepath.Join(defCodex, "sessions"), path)
+		if exists(path) || !exists(filepath.Join(acmeCodex, "sessions", rel)) {
+			t.Errorf("not moved: %s", rel)
+		}
+	}
+	if !exists(other) {
+		t.Error("another folder's rollout moved")
+	}
+	names, _ := os.ReadFile(filepath.Join(acmeCodex, "session_index.jsonl"))
+	history, _ := os.ReadFile(filepath.Join(acmeCodex, "history.jsonl"))
+	if !strings.Contains(string(names), "named") || !strings.Contains(string(history), `"c1"`) || strings.Contains(string(history), `"c9"`) {
+		t.Errorf("names=%s history=%s", names, history)
+	}
+
+	// The account has no codex home for codex-only work elsewhere: refused.
+	codexRollout(t, defCodex, "2026/11/03", "c5", filepath.Join(e.home, "work", "g"), "")
+	if _, err := Build(e.cfg, Options{To: "globex", Project: filepath.Join(e.home, "work", "g")}); err == nil || !strings.Contains(err.Error(), "no codex home") {
+		t.Fatalf("missing codex home: %v", err)
+	}
+	if _, err := Build(e.cfg, Options{To: "globex", Project: filepath.Join(e.home, "work", "g"), Agent: "claude"}); err == nil {
+		t.Fatal("--agent claude with nothing of claude's should be refused")
+	}
+}
+
+// A conversation codex's background server has open can't move, even
+// with no codex process in a terminal.
+func TestTransferRefusesCodexOpenInServer(t *testing.T) {
+	e := setup(t)
+	defCodex := filepath.Join(e.home, ".codex")
+	acmeCodex := filepath.Join(e.home, "acme-codex")
+	if err := os.MkdirAll(acmeCodex, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := targets.RegisterDir(targets.AgentCodex, acmeCodex, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	codexRollout(t, defCodex, "2026/11/01", "c1", e.project, "")
+	codextest.Server(t, defCodex, []string{"c1"})
+	if _, err := Build(e.cfg, Options{To: "acme", Project: e.project, Agent: "codex"}); err == nil || !strings.Contains(err.Error(), "open in codex") {
+		t.Fatalf("open conversation not refused: %v", err)
+	}
+}
+
+// Lost sessions (history only) in scope have their prompt history copied
+// to the account; a second run copies nothing twice.
+func TestTransferCopiesLostSessionHistory(t *testing.T) {
+	e := setup(t)
+	session(t, e.acme, e.project, "live-elsewhere") // acme owns the folder already
+	write(t, filepath.Join(e.def, "history.jsonl"),
+		`{"display":"one","sessionId":"ghost","project":"`+e.project+`","timestamp":1}`+"\n"+
+			`{"display":"two","sessionId":"ghost","project":"`+e.project+`/sub","timestamp":2}`+"\n"+
+			`{"display":"moved","sessionId":"live-elsewhere","project":"`+e.project+`","timestamp":3}`+"\n"+
+			`{"display":"mine","sessionId":"mine","project":"`+e.home+`/other","timestamp":4}`+"\n")
+	plan, err := Build(e.cfg, Options{To: "acme", Project: e.project, Recursive: true, Agent: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(plan.Lost, ",") != "ghost" || len(plan.Sessions) != 0 {
+		t.Fatalf("lost = %v, sessions = %d", plan.Lost, len(plan.Sessions))
+	}
+	// The preview lists the lost session under its (last recorded) folder.
+	if len(plan.Folders) != 1 || plan.Folders[0].Path != e.project+"/sub" || plan.Folders[0].Lost != 1 {
+		t.Fatalf("folders = %+v", plan.Folders)
+	}
+	var preview strings.Builder
+	PrintPlan(&preview, plan, true)
+	if !strings.Contains(preview.String(), "LOST") || !strings.Contains(preview.String(), "/sub") {
+		t.Errorf("preview = %s", preview.String())
+	}
+	for run := 0; run < 2; run++ {
+		if err := Apply(e.cfg, plan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if again, err := Build(e.cfg, Options{To: "acme", Project: e.project, Recursive: true, Agent: "claude"}); err == nil {
+		t.Errorf("an already-copied lost session was planned again: %+v", again.Lost)
+	}
+	history, _ := os.ReadFile(filepath.Join(e.acme, "history.jsonl"))
+	if n := strings.Count(string(history), `"ghost"`); n != 2 || strings.Contains(string(history), `"mine"`) {
+		t.Errorf("acme history (%d ghost lines) = %s", n, history)
+	}
+	if source, _ := os.ReadFile(filepath.Join(e.def, "history.jsonl")); strings.Count(string(source), "\n") != 4 {
+		t.Error("the source history was modified")
+	}
+}
+
+// Codex indexes a moved rollout without its name, so a transfer sets each
+// moved thread's latest name in the destination.
+func TestTransferRestoresCodexThreadNames(t *testing.T) {
+	e := setup(t)
+	defCodex := filepath.Join(e.home, ".codex")
+	acmeCodex := filepath.Join(e.home, "acme-codex")
+	if err := os.MkdirAll(acmeCodex, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := targets.RegisterDir(targets.AgentCodex, acmeCodex, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	codexRollout(t, defCodex, "2026/11/01", "c1", e.project, "")
+	write(t, filepath.Join(defCodex, "session_index.jsonl"),
+		`{"id":"c1","thread_name":"first","updated_at":"2026-09-17T18:00:00Z"}`+"\n"+
+			`{"id":"c1","thread_name":"LATEST-NAME","updated_at":"2026-09-17T22:00:00Z"}`+"\n")
+	var got map[string]string
+	setCodexNames = func(home string, names map[string]string) []string {
+		if home != acmeCodex {
+			t.Errorf("names set in %s", home)
+		}
+		got = names
+		return nil
+	}
+	t.Cleanup(func() { setCodexNames = func(string, map[string]string) []string { return nil } })
+	plan, err := Build(e.cfg, Options{To: "acme", Project: e.project, Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(e.cfg, plan); err != nil {
+		t.Fatal(err)
+	}
+	if got["c1"] != "LATEST-NAME" || len(got) != 1 {
+		t.Fatalf("names restored = %v", got)
 	}
 }

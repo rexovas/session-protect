@@ -50,6 +50,12 @@ func parseCodexProcs(psOutput string) (ids map[string]string, pids []string) {
 		if base := command[strings.LastIndexByte(command, '/')+1:]; base != "codex" {
 			continue
 		}
+		// Codex's background app-server (one per codex home, started by
+		// launchd or the terminal UI) runs from a project folder but is
+		// not a session; counting it marked the newest session there open.
+		if len(fields) > 2 && fields[2] == "app-server" {
+			continue
+		}
 		if id := uuidPattern.FindString(strings.Join(fields[2:], " ")); id != "" {
 			ids[id] = fields[0]
 		} else {

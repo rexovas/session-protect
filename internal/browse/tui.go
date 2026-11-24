@@ -381,7 +381,7 @@ func newModel(cfg config.Config) model {
 		start = string(os.PathSeparator)
 	}
 	m := model{cfg: cfg, projects: projects, start: start, width: 100, height: 32}
-	m.homes = targets.ClaudeHomes()
+	m.homes = targets.Accounts()
 	m.applyDefaultAccounts()
 	m.root = NearestRoot(projects, start)
 	m.groups = LoadGroups(cfg)
@@ -851,7 +851,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case rescanMsg:
 		m.scanning = false
 		// A home registered meanwhile (its first session ran) joins the view.
-		m.homes = targets.ClaudeHomes()
+		m.homes = targets.Accounts()
 		if m.groupOpen != nil {
 			// Keep the auto group and re-apply the active scope; the full
 			// set lives in fullProjects while scoped.
@@ -930,6 +930,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.notice, m.noticeErr = fmt.Sprintf("transferred %d session(s) to %s", msg.moved, msg.to), false
+		if len(msg.warnings) > 0 {
+			m.notice, m.noticeErr = fmt.Sprintf("transferred to %s, but %d codex thread name(s) weren't restored: %s",
+				msg.to, len(msg.warnings), msg.warnings[0]), true
+		}
 		m.scanning = true
 		cfg := m.cfg
 		return m, func() tea.Msg { return rescanMsg(ScanNamed(cfg)) }
@@ -3446,14 +3450,16 @@ func (m model) replayAsk(entry askHistoryEntry) (model, bool) {
 // variable is set at all, so setting it would ask for a fresh login.
 func resumeCommand(session Session, project string) string {
 	agent := "claude --resume " + session.ID
+	kind := targets.AgentClaude
 	if session.Target == "codex" {
-		agent = "codex resume " + session.ID
-	} else if homes := targets.ClaudeHomes(); len(homes) > 1 {
-		home := targets.HomeFor(session.Home)
-		if home.IsDefault() {
-			agent = "env -u CLAUDE_CONFIG_DIR " + agent
+		agent, kind = "codex resume "+session.ID, targets.AgentCodex
+	}
+	if homes := targets.HomesOf(kind); len(homes) > 1 {
+		home := targets.HomeForOf(kind, session.Home)
+		if value, unset := home.Pin(); unset {
+			agent = "env -u " + home.EnvVar() + " " + agent
 		} else {
-			agent = "env CLAUDE_CONFIG_DIR=" + focus.ShellQuote(home.Dir) + " " + agent
+			agent = "env " + home.EnvVar() + "=" + focus.ShellQuote(value) + " " + agent
 		}
 	}
 	return "cd " + focus.ShellQuote(project) + " && " + agent
@@ -4167,8 +4173,8 @@ func (m model) overviewTab(b *strings.Builder, session Session) {
 	}
 	kv("state", strings.TrimSpace(style.Render(state))+liveNote)
 	kv("agent", session.Target)
-	if m.multiHome() && session.Target == "claude" {
-		kv("account", homeOf(session)+"  "+tildePath(targets.HomeFor(session.Home).Dir))
+	if m.multiHome() {
+		kv("account", homeOf(session)+"  "+tildePath(sessionHome(session).Dir))
 	}
 	kv("session", session.ID)
 	if session.RebuiltFrom != "" {

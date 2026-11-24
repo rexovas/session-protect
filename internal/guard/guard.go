@@ -191,6 +191,15 @@ func AccountMismatch(cwd string, configDir string) string {
 		return fmt.Sprintf("⚠ session-protect: this folder has sessions in several accounts (%s). Keep each folder on one account.",
 			strings.Join(owner.Conflict, ", "))
 	case owner.Owned() && owner.Owner.Label != active.Label:
+		if _, has := targets.HomeByLabel(owner.Owner.Label); !has {
+			// The owner has no claude dir, so the default is where its
+			// claude work runs (the launcher says the same).
+			if !active.IsDefault() {
+				return ""
+			}
+			return fmt.Sprintf("session-protect: this folder belongs to the %s account, which has no claude dir; this session runs on your default claude. To keep it separate, add one with `session-protect claude-dirs add DIR --label %s`.",
+				owner.Owner.Label, owner.Owner.Label)
+		}
 		return fmt.Sprintf("⚠ session-protect: this folder belongs to the %s account, but this session runs on %s (%s). "+
 			"Quit and relaunch with `claude` from the shell (or `claude --account %s`) unless this is intentional.",
 			owner.Owner.Label, active.Label, active.Dir, owner.Owner.Label)

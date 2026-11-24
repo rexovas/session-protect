@@ -102,8 +102,7 @@ func ResolveOwner(index FolderIndex, homes []ClaudeHome, folder string) Ownershi
 
 // FolderOwner resolves a folder's owner from the homes on disk.
 func FolderOwner(folder string) Ownership {
-	homes := ClaudeHomes()
-	return ResolveOwner(NewDiskIndex(homes), homes, folder)
+	return ResolveOwner(NewDiskIndex(ClaudeHomes()), Accounts(), folder)
 }
 
 // DiskIndex reads ownership facts lazily from each home's projects dir:
@@ -112,20 +111,38 @@ func FolderOwner(folder string) Ownership {
 // lossy, so every candidate's real path comes from its transcripts.
 type DiskIndex struct {
 	homes []ClaudeHome
-	paths map[string]string // slug dir → real project path ("" unknown)
+	paths map[string]string         // slug dir → real project path ("" unknown)
+	codex map[string]map[string]int // codex home label → folder → sessions (lazy)
 }
 
+// NewDiskIndex reads claude facts from homes (claude config dirs) and
+// codex facts from every codex home.
 func NewDiskIndex(homes []ClaudeHome) *DiskIndex {
 	return &DiskIndex{homes: homes, paths: map[string]string{}}
 }
 
+func (d *DiskIndex) codexFacts() map[string]map[string]int {
+	if d.codex == nil {
+		d.codex = map[string]map[string]int{}
+		for _, home := range CodexHomes() {
+			d.codex[home.Label] = codexFolders(home)
+		}
+	}
+	return d.codex
+}
+
 func (d *DiskIndex) HomesAt(dir string) map[string]int {
 	counts := map[string]int{}
+	for label, folders := range d.codexFacts() {
+		if n := folders[filepath.Clean(dir)]; n > 0 {
+			counts[label] += n
+		}
+	}
 	slug := ClaudeSlug(dir)
 	for _, home := range d.homes {
 		slugDir := filepath.Join(home.Dir, "projects", slug)
 		if n := countTranscripts(slugDir); n > 0 && d.pathOf(slugDir) == dir {
-			counts[home.Label] = n
+			counts[home.Label] += n
 		}
 	}
 	return counts
@@ -146,6 +163,16 @@ func (d *DiskIndex) OtherUnder(dir string, label string) bool {
 // its session count per home label.
 func (d *DiskIndex) Under(dir string) map[string]map[string]int {
 	out := map[string]map[string]int{}
+	for label, folders := range d.codexFacts() {
+		for path, n := range folders {
+			if n > 0 && isUnder(path, dir) {
+				if out[path] == nil {
+					out[path] = map[string]int{}
+				}
+				out[path][label] += n
+			}
+		}
+	}
 	prefix := ClaudeSlug(dir) + "-"
 	if dir == string(filepath.Separator) {
 		prefix = "-"

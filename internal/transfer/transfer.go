@@ -1,9 +1,12 @@
-// Package transfer moves claude sessions between claude homes (accounts)
-// without changing their project folder: each session's transcript and
-// everything the agent keys by its id (sidecar dir, file history, session
-// env, tasks) moves to the other home, along with the project's memory,
-// and its prompt history is copied so titles and lost-session records
-// follow. Paths inside transcripts are untouched: the folder is the same.
+// Package transfer moves sessions between accounts (agent homes sharing a
+// label) without changing their project folder. For claude, each
+// session's transcript and everything the agent keys by its id (sidecar
+// dir, file history, session env, tasks) moves to the other config dir,
+// with the project's memory. For codex, each rollout moves to the same
+// date path in the other codex home, with its subagent rollouts; codex
+// indexes it there on its next start. Prompt history (and codex thread
+// names) are copied so titles and lost-session records follow. Paths
+// inside transcripts are untouched: the folder is the same.
 package transfer
 
 import (
@@ -29,11 +32,12 @@ import (
 )
 
 type Options struct {
-	To        string // destination home label
-	From      string // source home label; default "default"
+	To        string // destination account label
+	From      string // source account label; default "default"
 	SessionID string // one session
 	Project   string // or every session of a project folder
 	Recursive bool   // with Project: its subfolders too
+	Agent     string // "claude", "codex", or "" for both
 }
 
 // Move is one file or directory changing homes.
@@ -59,10 +63,20 @@ type Memory struct {
 
 // Plan is everything a transfer will do.
 type Plan struct {
+	// From and To are the claude config dirs; a side without one has only
+	// its label set.
 	From     targets.ClaudeHome `json:"from"`
 	To       targets.ClaudeHome `json:"to"`
 	Sessions []Session          `json:"sessions"`
-	Memory   []Memory           `json:"memory,omitempty"`
+	// Lost lists lost claude sessions in scope: no transcript anywhere,
+	// only prompt history, which is copied so the account holds their
+	// record (rebuilds already land in the folder owner's dir).
+	Lost []string `json:"lost,omitempty"`
+	// CodexFrom, CodexTo and Codex are the codex side of the transfer.
+	CodexFrom targets.Home `json:"codex_from,omitempty"`
+	CodexTo   targets.Home `json:"codex_to,omitempty"`
+	Codex     []Session    `json:"codex,omitempty"`
+	Memory    []Memory     `json:"memory,omitempty"`
 	// Extras is whatever else a drained project dir holds (sidecars of
 	// sessions that moved projects, notes); it follows so nothing is left
 	// behind in the source home.
@@ -70,6 +84,9 @@ type Plan struct {
 	// Drained lists source project dirs the transfer empties; they are
 	// removed afterwards (only if nothing new appeared in them meanwhile).
 	Drained []string `json:"drained,omitempty"`
+	// NameWarnings lists codex threads whose name couldn't be restored in
+	// the destination (filled by Apply).
+	NameWarnings []string `json:"name_warnings,omitempty"`
 	// Unresolved lists project dirs that might be in scope but whose folder
 	// can't be determined (no transcripts, folder gone); they are skipped.
 	Unresolved []string `json:"unresolved,omitempty"`
@@ -82,9 +99,11 @@ type Plan struct {
 type FolderChange struct {
 	Path     string `json:"path"`
 	Sessions int    `json:"sessions"`
-	Before   string `json:"before"` // owner label before
-	After    string `json:"after"`  // owner label after
-	Left     int    `json:"left"`   // sessions of the source home left behind here
+	Codex    int    `json:"codex,omitempty"` // codex sessions (top-level)
+	Lost     int    `json:"lost,omitempty"`  // lost sessions whose history is copied
+	Before   string `json:"before"`          // owner label before
+	After    string `json:"after"`           // owner label after
+	Left     int    `json:"left"`            // sessions of the source home left behind here
 }
 
 // Build resolves a transfer plan without writing anything.
@@ -92,34 +111,53 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 	if (opts.SessionID == "") == (opts.Project == "") {
 		return nil, fmt.Errorf("exactly one of --session or --project is required")
 	}
-	to, ok := targets.HomeByLabel(opts.To)
-	if !ok {
-		return nil, fmt.Errorf("no claude dir labelled %q (see `session-protect claude-dirs`)", opts.To)
+	switch opts.Agent {
+	case "", targets.AgentClaude, targets.AgentCodex:
+	default:
+		return nil, fmt.Errorf("unknown agent %q (want claude or codex)", opts.Agent)
 	}
 	fromLabel := opts.From
 	if fromLabel == "" {
 		fromLabel = targets.DefaultHomeLabel
 	}
-	from, ok := targets.HomeByLabel(fromLabel)
-	if !ok {
-		return nil, fmt.Errorf("no claude dir labelled %q", fromLabel)
+	if !isAccount(opts.To) {
+		return nil, fmt.Errorf("no account labelled %q (see `session-protect claude-dirs` and `codex-dirs`)", opts.To)
 	}
-	if from.Label == to.Label {
-		return nil, fmt.Errorf("source and destination are the same claude dir (%s)", to.Label)
+	if !isAccount(fromLabel) {
+		return nil, fmt.Errorf("no account labelled %q", fromLabel)
+	}
+	if fromLabel == opts.To {
+		return nil, fmt.Errorf("source and destination are the same account (%s)", opts.To)
+	}
+	project := ""
+	if opts.Project != "" {
+		abs, err := filepath.Abs(opts.Project)
+		if err != nil {
+			return nil, err
+		}
+		project = filepath.Clean(abs)
 	}
 
+	// A side without a claude config dir gets a placeholder that holds
+	// nothing; any claude session needing it is refused below.
+	from, haveFrom := targets.HomeByLabel(fromLabel)
+	if !haveFrom {
+		from = targets.Home{Label: fromLabel, Dir: filepath.Join(os.TempDir(), "session-protect-no-claude-dir")}
+	}
+	to, haveTo := targets.HomeByLabel(opts.To)
+	if !haveTo {
+		to = targets.Home{Label: opts.To, Dir: filepath.Join(os.TempDir(), "session-protect-no-claude-dir")}
+	}
 	plan := &Plan{From: from, To: to}
 	fromProjects := filepath.Join(from.Dir, "projects")
 	toProjects := filepath.Join(to.Dir, "projects")
+	if !haveFrom || opts.Agent == targets.AgentCodex {
+		fromProjects = filepath.Join(os.TempDir(), "session-protect-no-claude-dir", "projects")
+	}
 
 	// Project dirs in scope, as slug → real project path.
 	scope := map[string]string{}
 	if opts.Project != "" {
-		project, err := filepath.Abs(opts.Project)
-		if err != nil {
-			return nil, err
-		}
-		project = filepath.Clean(project)
 		var onDisk map[string]string // slug → folder, for dirs with no transcripts
 		entries, _ := os.ReadDir(fromProjects)
 		for _, entry := range entries {
@@ -154,9 +192,6 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 				scope[slug] = path
 			}
 		}
-		if len(scope) == 0 {
-			return nil, fmt.Errorf("nothing of %s's for %s", from.Label, project)
-		}
 	}
 
 	live := guard.LiveAll()
@@ -165,12 +200,11 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 		slugs = append(slugs, slug)
 	}
 	if opts.SessionID != "" {
-		slug, err := findSession(fromProjects, opts.SessionID)
-		if err != nil {
-			return nil, fmt.Errorf("session %s is not in the %s claude dir", opts.SessionID, from.Label)
+		slugs = nil
+		if slug, err := findSession(fromProjects, opts.SessionID); err == nil {
+			scope[slug] = targets.TranscriptCwd(transcriptPath(fromProjects, slug, opts.SessionID))
+			slugs = []string{slug}
 		}
-		scope[slug] = targets.TranscriptCwd(transcriptPath(fromProjects, slug, opts.SessionID))
-		slugs = []string{slug}
 	}
 	sort.Strings(slugs)
 
@@ -245,8 +279,43 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 			plan.Folders = append(plan.Folders, FolderChange{Path: scope[slug], Sessions: moved, Left: total - moved})
 		}
 	}
-	if len(plan.Sessions) == 0 && len(plan.Memory) == 0 && len(plan.Extras) == 0 {
-		return nil, fmt.Errorf("nothing to transfer")
+	if haveFrom && opts.Agent != targets.AgentCodex {
+		lost := lostInScope(from, opts, project, plan.Sessions)
+		// A lost session whose history the destination already holds
+		// has nothing left to copy.
+		for id := range historyIDs(filepath.Join(to.Dir, "history.jsonl")) {
+			delete(lost, id)
+		}
+		for id, folder := range lost {
+			plan.Lost = append(plan.Lost, id)
+			found := false
+			for i := range plan.Folders {
+				if filepath.Clean(plan.Folders[i].Path) == folder {
+					plan.Folders[i].Lost++
+					found = true
+				}
+			}
+			if !found {
+				plan.Folders = append(plan.Folders, FolderChange{Path: folder, Lost: 1})
+			}
+		}
+		sort.Strings(plan.Lost)
+		sort.Slice(plan.Folders, func(i, j int) bool { return plan.Folders[i].Path < plan.Folders[j].Path })
+	}
+	if !haveTo && (len(plan.Sessions) > 0 || len(plan.Memory) > 0 || len(plan.Extras) > 0 || len(plan.Lost) > 0) {
+		return nil, fmt.Errorf("the %s account has no claude dir, but %d claude session(s) are in scope; add one with `session-protect claude-dirs add DIR --label %s`, or pass --agent codex",
+			opts.To, len(plan.Sessions), opts.To)
+	}
+	if opts.Agent != targets.AgentClaude {
+		if err := buildCodex(plan, opts, fromLabel, project); err != nil {
+			return nil, err
+		}
+	}
+	if len(plan.Sessions) == 0 && len(plan.Memory) == 0 && len(plan.Extras) == 0 && len(plan.Codex) == 0 && len(plan.Lost) == 0 {
+		if opts.SessionID != "" {
+			return nil, fmt.Errorf("session %s is not in the %s account", opts.SessionID, fromLabel)
+		}
+		return nil, fmt.Errorf("nothing of %s's to transfer", fromLabel)
 	}
 	for _, session := range plan.Sessions {
 		if session.Open {
@@ -256,17 +325,17 @@ func Build(cfg config.Config, opts Options) (*Plan, error) {
 
 	// Ownership: a folder another extra home owns can't take this
 	// account's sessions — that would mix accounts in an owned folder.
-	homes := targets.ClaudeHomes()
-	disk := targets.NewDiskIndex(homes)
+	homes := targets.Accounts()
+	disk := targets.NewDiskIndex(targets.ClaudeHomes())
 	for i := range plan.Folders {
 		change := &plan.Folders[i]
 		before := targets.FolderOwner(change.Path)
 		change.Before = ownerLabel(before)
 		if before.Owned() && before.Owner.Label != to.Label && before.Owner.Label != from.Label {
-			return nil, fmt.Errorf("%s belongs to the %s claude dir; its sessions can't move to %s", change.Path, before.Owner.Label, to.Label)
+			return nil, fmt.Errorf("%s belongs to the %s account; its sessions can't move to %s", change.Path, before.Owner.Label, to.Label)
 		}
 		if len(before.Conflict) > 0 {
-			return nil, fmt.Errorf("%s is claimed by several claude dirs (%s); resolve that first", change.Path, strings.Join(before.Conflict, ", "))
+			return nil, fmt.Errorf("%s is claimed by several accounts (%s); resolve that first", change.Path, strings.Join(before.Conflict, ", "))
 		}
 		change.After = ownerLabel(targets.ResolveOwner(afterIndex{plan: plan, disk: disk}, homes, change.Path))
 	}
@@ -304,6 +373,31 @@ func Apply(cfg config.Config, plan *Plan) error {
 			Detail: plan.From.Label + " → " + plan.To.Label,
 		})
 	}
+	codexMoved := map[string]bool{}
+	for _, session := range plan.Codex {
+		for _, move := range session.Moves {
+			if err := relocate(move.From, move.To); err != nil {
+				return fmt.Errorf("move %s: %w", move.From, err)
+			}
+		}
+		codexMoved[session.ID] = true
+		entries = append(entries, audit.Entry{
+			Time: time.Now(), Action: "transfer", Target: plan.CodexTo.TargetName(),
+			SessionID: session.ID, From: session.Moves[0].From, To: session.Moves[0].To,
+			Detail: plan.CodexFrom.Label + " → " + plan.CodexTo.Label,
+		})
+	}
+	if len(codexMoved) > 0 {
+		for _, file := range []struct{ name, key string }{{"history.jsonl", "session_id"}, {"session_index.jsonl", "id"}} {
+			if err := copyLines(filepath.Join(plan.CodexFrom.Dir, file.name), filepath.Join(plan.CodexTo.Dir, file.name), file.key, codexMoved); err != nil {
+				return fmt.Errorf("codex %s: %w", file.name, err)
+			}
+		}
+		// Codex keeps thread names in its database and indexes a moved
+		// rollout without one, then auto-titles it on next use: set each
+		// moved thread's latest name through the destination's codex.
+		plan.NameWarnings = setCodexNames(plan.CodexTo.Dir, threadNames(filepath.Join(plan.CodexFrom.Dir, "session_index.jsonl"), codexMoved))
+	}
 	for _, extra := range plan.Extras {
 		if err := relocate(extra.From, extra.To); err != nil {
 			return fmt.Errorf("move %s: %w", extra.From, err)
@@ -323,17 +417,22 @@ func Apply(cfg config.Config, plan *Plan) error {
 	for _, dir := range plan.Drained {
 		_ = os.Remove(dir) // fails, harmlessly, unless empty
 	}
-	if err := copyHistory(plan.From, plan.To, moved); err != nil {
-		return fmt.Errorf("prompt history: %w", err)
+	for _, id := range plan.Lost {
+		moved[id] = true
+	}
+	if len(moved) > 0 {
+		if err := copyLines(filepath.Join(plan.From.Dir, "history.jsonl"), filepath.Join(plan.To.Dir, "history.jsonl"), "sessionId", moved); err != nil {
+			return fmt.Errorf("prompt history: %w", err)
+		}
 	}
 	audit.Append(cfg.BackupRoot, entries)
 	return nil
 }
 
-// copyHistory appends the moved sessions' prompt-history lines to the
-// destination's history; the source history is never modified.
-func copyHistory(from, to targets.ClaudeHome, ids map[string]bool) error {
-	src, err := os.Open(filepath.Join(from.Dir, "history.jsonl"))
+// copyLines appends the JSONL lines of from whose key field names a moved
+// session to the destination file; the source is never modified.
+func copyLines(fromPath, toPath, key string, ids map[string]bool) error {
+	src, err := os.Open(fromPath)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -341,14 +440,28 @@ func copyHistory(from, to targets.ClaudeHome, ids map[string]bool) error {
 		return err
 	}
 	defer src.Close()
+	// Lines the destination already has are skipped, so a repeated
+	// transfer never duplicates history.
+	have := map[string]bool{}
+	if existing, err := os.Open(toPath); err == nil {
+		known := bufio.NewScanner(existing)
+		known.Buffer(make([]byte, 256*1024), 16*1024*1024)
+		for known.Scan() {
+			have[known.Text()] = true
+		}
+		existing.Close()
+	}
 	var lines bytes.Buffer
 	scanner := bufio.NewScanner(src)
 	scanner.Buffer(make([]byte, 256*1024), 16*1024*1024)
 	for scanner.Scan() {
-		var entry struct {
-			SessionID string `json:"sessionId"`
+		var entry map[string]json.RawMessage
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil {
+			continue
 		}
-		if json.Unmarshal(scanner.Bytes(), &entry) == nil && ids[entry.SessionID] {
+		var id string
+		if json.Unmarshal(entry[key], &id) == nil && ids[id] && !have[scanner.Text()] {
+			have[scanner.Text()] = true
 			lines.Write(scanner.Bytes())
 			lines.WriteByte('\n')
 		}
@@ -359,7 +472,10 @@ func copyHistory(from, to targets.ClaudeHome, ids map[string]bool) error {
 	if lines.Len() == 0 {
 		return nil
 	}
-	dst, err := os.OpenFile(filepath.Join(to.Dir, "history.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err := os.MkdirAll(filepath.Dir(toPath), 0o700); err != nil {
+		return err
+	}
+	dst, err := os.OpenFile(toPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -516,8 +632,8 @@ func (a afterIndex) apply(path string, counts map[string]int) map[string]int {
 	}
 	for _, change := range a.plan.Folders {
 		if filepath.Clean(change.Path) == filepath.Clean(path) {
-			out[a.plan.From.Label] -= change.Sessions
-			out[a.plan.To.Label] += change.Sessions
+			out[a.plan.From.Label] -= change.Sessions + change.Codex
+			out[a.plan.To.Label] += change.Sessions + change.Codex
 		}
 	}
 	return out
@@ -536,4 +652,238 @@ func (a afterIndex) OtherUnder(dir string, label string) bool {
 		}
 	}
 	return false
+}
+
+// isAccount reports whether a label names an account of either agent.
+func isAccount(label string) bool {
+	for _, home := range targets.Accounts() {
+		if home.Label == label {
+			return true
+		}
+	}
+	return false
+}
+
+// buildCodex adds the codex side: rollouts in scope (by their recorded
+// folder, or the one session) with the subagent rollouts they spawned,
+// each moving to the same date path in the destination codex home.
+func buildCodex(plan *Plan, opts Options, fromLabel string, project string) error {
+	from, ok := targets.HomeByLabelOf(targets.AgentCodex, fromLabel)
+	if !ok {
+		return nil
+	}
+	rollouts := targets.CodexRollouts(from)
+	picked := map[string]bool{} // rollout path
+	ids := map[string]bool{}    // session ids in scope
+	inScope := func(cwd string) bool {
+		return cwd == project || opts.Recursive && targets.IsUnder(cwd, project)
+	}
+	for path, entry := range rollouts {
+		if opts.SessionID != "" && entry.ID == opts.SessionID || opts.SessionID == "" && inScope(entry.Cwd) {
+			picked[path] = true
+			ids[entry.ID] = true
+		}
+	}
+	// Spawned subagents follow their parent wherever they worked, down
+	// every level of nesting.
+	for grew := true; grew; {
+		grew = false
+		for path, entry := range rollouts {
+			if !picked[path] && entry.Parent != "" && ids[entry.Parent] {
+				picked[path], ids[entry.ID], grew = true, true, true
+			}
+		}
+	}
+	if len(picked) == 0 {
+		return nil
+	}
+	to, ok := targets.HomeByLabelOf(targets.AgentCodex, opts.To)
+	if !ok {
+		return fmt.Errorf("the %s account has no codex home, but %d codex session file(s) are in scope; add one with `session-protect codex-dirs add DIR --label %s`, or pass --agent claude",
+			opts.To, len(picked), opts.To)
+	}
+	plan.CodexFrom, plan.CodexTo = from, to
+
+	// Codex's background app-server knows every conversation it has open,
+	// whichever client opened it; a process listing alone would miss those.
+	loaded, err := guard.CodexLoaded(from.Dir)
+	switch {
+	case errors.Is(err, guard.ErrNoCodexServer):
+	case err != nil:
+		return fmt.Errorf("couldn't ask codex which conversations are open (%v); quit codex and try again", err)
+	default:
+		for path := range picked {
+			if entry := rollouts[path]; loaded[entry.ID] {
+				return fmt.Errorf("codex session %s is open in codex; close it first", entry.ID)
+			}
+		}
+	}
+	liveIDs, liveCwds := guard.LiveCodex()
+	paths := make([]string, 0, len(picked))
+	for path := range picked {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	fromRoot := filepath.Join(from.Dir, "sessions")
+	toRoot := filepath.Join(to.Dir, "sessions")
+	byFolder := map[string]int{}
+	counted := map[string]bool{}
+	for _, path := range paths {
+		entry := rollouts[path]
+		if _, open := liveIDs[entry.ID]; open {
+			return fmt.Errorf("codex session %s is open in a running codex; close it first", entry.ID)
+		}
+		if _, open := liveCwds[entry.Cwd]; open && !entry.Subagent {
+			return fmt.Errorf("a codex process is running in %s; close it first", entry.Cwd)
+		}
+		rel, err := filepath.Rel(fromRoot, path)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return fmt.Errorf("rollout %s is outside %s", path, fromRoot)
+		}
+		dest := filepath.Join(toRoot, rel)
+		if _, err := os.Lstat(dest); err == nil {
+			return fmt.Errorf("%s already exists in the %s codex home", dest, to.Label)
+		}
+		plan.Codex = append(plan.Codex, Session{ID: entry.ID, Project: entry.Cwd, Moves: []Move{{From: path, To: dest}}})
+		if !entry.Subagent && !counted[entry.ID] {
+			counted[entry.ID] = true // plain + compressed copies count once
+			byFolder[entry.Cwd]++
+		}
+	}
+	// Fold the codex sessions into the per-folder preview.
+	left := map[string]int{}
+	leftIDs := map[string]bool{}
+	for path, entry := range rollouts {
+		if !picked[path] && !entry.Subagent && !ids[entry.ID] && !leftIDs[entry.ID] {
+			leftIDs[entry.ID] = true
+			left[entry.Cwd]++
+		}
+	}
+	for folder, n := range byFolder {
+		found := false
+		for i := range plan.Folders {
+			if filepath.Clean(plan.Folders[i].Path) == folder {
+				plan.Folders[i].Codex += n
+				plan.Folders[i].Left += left[folder]
+				found = true
+			}
+		}
+		if !found {
+			plan.Folders = append(plan.Folders, FolderChange{Path: folder, Codex: n, Left: left[folder]})
+		}
+	}
+	sort.Slice(plan.Folders, func(i, j int) bool { return plan.Folders[i].Path < plan.Folders[j].Path })
+	return nil
+}
+
+// lostInScope finds lost claude sessions whose recorded folder is in
+// scope: in the source home's prompt history, not being moved now, and
+// with no transcript in any claude home. It maps each to its folder (the
+// last one its history records).
+func lostInScope(from targets.Home, opts Options, project string, moving []Session) map[string]string {
+	file, err := os.Open(filepath.Join(from.Dir, "history.jsonl"))
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	skip := map[string]bool{}
+	for _, session := range moving {
+		skip[session.ID] = true
+	}
+	candidates := map[string]string{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 256*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var entry struct {
+			SessionID string `json:"sessionId"`
+			Project   string `json:"project"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.SessionID == "" || skip[entry.SessionID] {
+			continue
+		}
+		folder := ""
+		if entry.Project != "" {
+			folder = filepath.Clean(entry.Project)
+		}
+		switch {
+		case opts.SessionID != "":
+			if entry.SessionID == opts.SessionID {
+				candidates[entry.SessionID] = folder
+			}
+		case folder != "":
+			if folder == project || opts.Recursive && targets.IsUnder(folder, project) {
+				candidates[entry.SessionID] = folder
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	for _, home := range targets.ClaudeHomes() {
+		entries, _ := os.ReadDir(filepath.Join(home.Dir, "projects"))
+		for _, dir := range entries {
+			if !dir.IsDir() {
+				continue
+			}
+			names, _ := os.ReadDir(filepath.Join(home.Dir, "projects", dir.Name()))
+			for _, name := range names {
+				if !name.IsDir() && sessionfile.IsTranscript(name.Name()) {
+					delete(candidates, sessionfile.Stem(name.Name()))
+				}
+			}
+		}
+	}
+	return candidates
+}
+
+// historyIDs lists the session ids a claude prompt history mentions.
+func historyIDs(path string) map[string]bool {
+	ids := map[string]bool{}
+	file, err := os.Open(path)
+	if err != nil {
+		return ids
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 256*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var entry struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &entry) == nil && entry.SessionID != "" {
+			ids[entry.SessionID] = true
+		}
+	}
+	return ids
+}
+
+// setCodexNames is seamed so tests never start codex.
+var setCodexNames = guard.SetCodexNames
+
+// threadNames reads the latest thread name per id from a codex session
+// index, for the ids given.
+func threadNames(path string, ids map[string]bool) map[string]string {
+	names := map[string]string{}
+	latest := map[string]string{}
+	file, err := os.Open(path)
+	if err != nil {
+		return names
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 256*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var entry struct {
+			ID         string `json:"id"`
+			ThreadName string `json:"thread_name"`
+			UpdatedAt  string `json:"updated_at"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil || !ids[entry.ID] || entry.ThreadName == "" {
+			continue
+		}
+		if entry.UpdatedAt >= latest[entry.ID] {
+			names[entry.ID], latest[entry.ID] = entry.ThreadName, entry.UpdatedAt
+		}
+	}
+	return names
 }

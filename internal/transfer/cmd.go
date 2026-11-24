@@ -32,6 +32,8 @@ func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int
 			opts.SessionID, ok = value("--session")
 		case "--project":
 			opts.Project, ok = value("--project")
+		case "--agent":
+			opts.Agent, ok = value("--agent")
 		case "--recursive", "-r":
 			opts.Recursive = true
 		case "--dry-run":
@@ -71,7 +73,7 @@ func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int
 		return 0
 	}
 	if !yes {
-		fmt.Fprintf(stdout, "Transfer %d session(s) to %s? [y/N] ", len(plan.Sessions), plan.To.Label)
+		fmt.Fprintf(stdout, "Transfer %s to %s? [y/N] ", count(plan), plan.To.Label)
 		var answer string
 		_, _ = fmt.Fscanln(stdin, &answer)
 		if answer = strings.ToLower(strings.TrimSpace(answer)); answer != "y" && answer != "yes" {
@@ -92,7 +94,10 @@ func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int
 	if _, err := backup.Execute(cfg, backup.Options{AllowUnencrypted: true, Action: "post-transfer"}); err != nil {
 		fmt.Fprintf(stderr, "warning: post-transfer backup failed: %v\n", err)
 	}
-	fmt.Fprintf(stdout, "Transferred %d session(s) from %s to %s.\n", len(plan.Sessions), plan.From.Label, plan.To.Label)
+	fmt.Fprintf(stdout, "Transferred %s from %s to %s.\n", count(plan), plan.From.Label, plan.To.Label)
+	for _, warning := range plan.NameWarnings {
+		fmt.Fprintf(stderr, "warning: thread name not restored: %s\n", warning)
+	}
 	return 0
 }
 
@@ -104,19 +109,27 @@ func PrintPlan(out io.Writer, plan *Plan, dryRun bool) {
 		header += " (dry run, nothing written)"
 	}
 	fmt.Fprintln(out, header)
-	fmt.Fprintf(out, "  from  %s\n  to    %s\n\n", tilde(plan.From.Dir), tilde(plan.To.Dir))
+	if len(plan.Sessions) > 0 || len(plan.Memory) > 0 || len(plan.Extras) > 0 {
+		fmt.Fprintf(out, "  claude  %s → %s\n", tilde(plan.From.Dir), tilde(plan.To.Dir))
+	}
+	if len(plan.Codex) > 0 {
+		fmt.Fprintf(out, "  codex   %s → %s\n", tilde(plan.CodexFrom.Dir), tilde(plan.CodexTo.Dir))
+	}
+	fmt.Fprintln(out)
 
 	width := 0
 	for _, folder := range plan.Folders {
 		width = max(width, len(tilde(folder.Path)))
 	}
-	fmt.Fprintf(out, "  %-*s  %8s  %s\n", width, "FOLDER", "SESSIONS", "OWNER")
+	if len(plan.Folders) > 0 {
+		fmt.Fprintf(out, "  %-*s  %6s  %5s  %4s  %s\n", width, "FOLDER", "CLAUDE", "CODEX", "LOST", "OWNER")
+	}
 	for _, folder := range plan.Folders {
 		owner := folder.Before
 		if folder.After != folder.Before {
 			owner = folder.Before + " → " + folder.After
 		}
-		line := fmt.Sprintf("  %-*s  %8d  %s", width, tilde(folder.Path), folder.Sessions, owner)
+		line := fmt.Sprintf("  %-*s  %6d  %5d  %4d  %s", width, tilde(folder.Path), folder.Sessions, folder.Codex, folder.Lost, owner)
 		if folder.Left > 0 {
 			line += fmt.Sprintf("  (%d stay on %s)", folder.Left, plan.From.Label)
 		}
@@ -132,6 +145,9 @@ func PrintPlan(out io.Writer, plan *Plan, dryRun bool) {
 	if len(plan.Memory) > 0 {
 		fmt.Fprintln(out)
 	}
+	if len(plan.Lost) > 0 {
+		fmt.Fprintf(out, "\n  LOST: %d session(s) with only their prompt history left; it is copied to %s\n", len(plan.Lost), plan.To.Label)
+	}
 	if len(plan.Extras) > 0 {
 		fmt.Fprintf(out, "\n  %d other item(s) in drained project dirs move along (session sidecars, notes)\n", len(plan.Extras))
 	}
@@ -142,19 +158,25 @@ func PrintPlan(out io.Writer, plan *Plan, dryRun bool) {
 		fmt.Fprintln(out)
 	}
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "  Prompt history is copied; the source history is not changed. A backup")
-	fmt.Fprintln(out, "  is committed before and after. Folder paths inside sessions are unchanged.")
+	if subagents := len(plan.Codex) - codexTopLevel(plan); subagents > 0 {
+		fmt.Fprintf(out, "\n  %d codex subagent session(s) move with the sessions that spawned them\n", subagents)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "  Prompt history (and codex thread names) is copied; the source is not")
+	fmt.Fprintln(out, "  changed. A backup is committed before and after. Folder paths inside")
+	fmt.Fprintln(out, "  sessions are unchanged; codex indexes moved sessions on its next start.")
 	fmt.Fprintln(out)
 }
 
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  session-protect transfer --to LABEL (--session ID | --project PATH [--recursive])")
-	fmt.Fprintln(out, "                           [--from LABEL] [--dry-run] [--yes]")
+	fmt.Fprintln(out, "                           [--from LABEL] [--agent claude|codex] [--dry-run] [--yes]")
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Moves claude sessions to another claude config dir (account), keeping their")
-	fmt.Fprintln(out, "project folder. Sessions come from the default dir unless --from names")
-	fmt.Fprintln(out, "another. A folder owned by a third dir is refused, and so are open sessions.")
+	fmt.Fprintln(out, "Moves sessions to another account (its claude config dir and codex home),")
+	fmt.Fprintln(out, "keeping their project folder. Both agents' sessions move unless --agent")
+	fmt.Fprintln(out, "picks one. Sessions come from the default account unless --from names")
+	fmt.Fprintln(out, "another. A folder owned by a third account is refused, and so are open sessions.")
 }
 
 func tilde(path string) string {
@@ -162,4 +184,27 @@ func tilde(path string) string {
 		return "~" + path[len(home):]
 	}
 	return path
+}
+
+// count describes what moves, e.g. "70 claude + 4 codex session(s)".
+func count(plan *Plan) string {
+	codex := codexTopLevel(plan)
+	if len(plan.Sessions) == 0 && codex == 0 && len(plan.Lost) > 0 {
+		return fmt.Sprintf("%d lost session record(s)", len(plan.Lost))
+	}
+	switch {
+	case codex == 0:
+		return fmt.Sprintf("%d session(s)", len(plan.Sessions))
+	case len(plan.Sessions) == 0:
+		return fmt.Sprintf("%d codex session(s)", codex)
+	}
+	return fmt.Sprintf("%d claude + %d codex session(s)", len(plan.Sessions), codex)
+}
+
+func codexTopLevel(plan *Plan) int {
+	n := 0
+	for _, folder := range plan.Folders {
+		n += folder.Codex
+	}
+	return n
 }

@@ -161,7 +161,10 @@ var claudeHistory = &historyCache{apply: func(line []byte, sessions map[string]l
 	setTitle(titles, entry.SessionID, entry.Display)
 	info := sessions[entry.SessionID]
 	info.Count++
-	if info.Project == "" {
+	// The latest folder wins: a session that moved with its repo (or was
+	// continued elsewhere) belongs where the work ended up, which is also
+	// where a rebuild should land and whose account it counts for.
+	if entry.Project != "" {
 		info.Project = entry.Project
 	}
 	if info.Title == "" || isSlashCommand(info.Title) && !isSlashCommand(entry.Display) {
@@ -261,29 +264,64 @@ func claudeHistorySessions() map[string]lostInfo {
 	return merged
 }
 
-// codexHistorySessions indexes every session the codex prompt history
-// mentions. The returned map is shared: callers must not modify it.
+var (
+	codexHistoriesMu sync.Mutex
+	codexHistories   = map[string]*historyCache{}
+)
+
+func codexHistoryOf(home targets.Home) (map[string]lostInfo, map[string]string) {
+	path := filepath.Join(home.Dir, "history.jsonl")
+	codexHistoriesMu.Lock()
+	cache := codexHistories[path]
+	if cache == nil {
+		if home.IsDefault() {
+			cache = codexHistory
+		} else {
+			cache = &historyCache{apply: codexHistory.apply}
+		}
+		codexHistories[path] = cache
+	}
+	codexHistoriesMu.Unlock()
+	return cache.load(path)
+}
+
+func codexHistoriesByHome() []homeHistory {
+	var out []homeHistory
+	for _, home := range targets.CodexHomes() {
+		sessions, titles := codexHistoryOf(home)
+		out = append(out, homeHistory{home: home, sessions: sessions, titles: titles})
+	}
+	return out
+}
+
+// codexHistorySessions indexes every session the codex homes' prompt
+// histories mention. The returned map is shared: callers must not modify it.
 func codexHistorySessions() map[string]lostInfo {
-	sessions, _ := codexHistory.load(filepath.Join(targets.DetectCodex().Source, "history.jsonl"))
-	return sessions
+	histories := codexHistoriesByHome()
+	if len(histories) == 1 {
+		return histories[0].sessions
+	}
+	merged := map[string]lostInfo{}
+	for _, history := range histories {
+		for id, info := range history.sessions {
+			if _, ok := merged[id]; !ok {
+				merged[id] = info
+			}
+		}
+	}
+	return merged
 }
 
 // historyTitles maps session ids to the first substantive prompt recorded
 // for them in the agents' history files — a cheap title source that avoids
 // opening every session file.
 func historyTitles() map[string]string {
-	_, codex := codexHistory.load(filepath.Join(targets.DetectCodex().Source, "history.jsonl"))
-	titles := make(map[string]string, len(codex))
-	for _, history := range claudeHistoriesByHome() {
+	titles := map[string]string{}
+	for _, history := range append(claudeHistoriesByHome(), codexHistoriesByHome()...) {
 		for id, title := range history.titles {
 			if _, ok := titles[id]; !ok {
 				titles[id] = title
 			}
-		}
-	}
-	for id, title := range codex {
-		if _, ok := titles[id]; !ok {
-			titles[id] = title
 		}
 	}
 	return titles

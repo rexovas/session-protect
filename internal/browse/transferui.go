@@ -28,9 +28,10 @@ type xferState struct {
 }
 
 type transferMsg struct {
-	err   error
-	moved int
-	to    string
+	err      error
+	moved    int
+	to       string
+	warnings []string // codex thread names that couldn't be restored
 }
 
 // sessionIndex is ownership facts from scanned sessions: live transcripts
@@ -41,7 +42,7 @@ func newSessionIndex(projects []*Project) sessionIndex {
 	index := sessionIndex{}
 	for _, project := range projects {
 		for _, session := range project.Sessions {
-			if session.Target != "claude" || session.SourcePath == "" || !filepath.IsAbs(project.Path) {
+			if session.SourcePath == "" || !filepath.IsAbs(project.Path) {
 				continue
 			}
 			if index[project.Path] == nil {
@@ -135,8 +136,8 @@ func (m model) pressTransfer() model {
 	owner := targets.Ownership{}
 	if m.showSessions || m.showAll || m.showHits {
 		session := m.selectedSession()
-		if session == nil || session.Target != "claude" || session.SourcePath == "" {
-			m.notice, m.noticeErr = "only live claude sessions change accounts", true
+		if session == nil || session.SourcePath == "" {
+			m.notice, m.noticeErr = "only sessions with a transcript change accounts", true
 			return m
 		}
 		from = homeOf(*session)
@@ -218,7 +219,7 @@ func (m model) handleTransferKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return transferMsg{err: err}
 			}
 			_, _ = backup.Execute(cfg, backup.Options{AllowUnencrypted: true, Action: "post-transfer"})
-			return transferMsg{moved: len(plan.Sessions), to: plan.To.Label}
+			return transferMsg{moved: len(plan.Sessions) + len(plan.Codex), to: plan.To.Label, warnings: plan.NameWarnings}
 		})
 	}
 	return m, nil

@@ -35,7 +35,10 @@ func DetectAll() []Target {
 	for _, home := range ClaudeHomes() {
 		all = append(all, DetectClaudeHome(home))
 	}
-	return append(all, DetectCodex())
+	for _, home := range CodexHomes() {
+		all = append(all, DetectCodexHome(home))
+	}
+	return all
 }
 
 // DetectClaude is the default claude home, ~/.claude.
@@ -92,14 +95,18 @@ func DetectClaudeHome(home ClaudeHome) Target {
 	}
 }
 
+// DetectCodex is the default codex home.
 func DetectCodex() Target {
-	source := os.Getenv("CODEX_HOME")
-	if source == "" {
-		source = filepath.Join(homeDir(), ".codex")
-	}
+	return DetectCodexHome(CodexHomes()[0])
+}
+
+// DetectCodexHome is the backup target for one codex home.
+func DetectCodexHome(home Home) Target {
+	source := home.Dir
 	return Target{
-		Name:     "codex",
+		Name:     home.TargetName(),
 		Agent:    "codex",
+		Home:     home.Label,
 		Source:   source,
 		Detected: dirExists(source),
 		Mode:     "safe-default",
