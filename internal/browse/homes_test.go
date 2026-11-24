@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/rexovas/session-protect/internal/assist"
 	"github.com/rexovas/session-protect/internal/backup"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/targets"
@@ -297,5 +298,41 @@ func TestLostSessionUsesItsLatestFolder(t *testing.T) {
 	s := sessionByID(Scan(cfg), "ghost")
 	if s == nil || s.ProjectPath != moved || homeOf(*s) != "client" || s.Title != "old place" {
 		t.Fatalf("ghost = %+v", s)
+	}
+}
+
+// AI find shows the model the passage where the description's words
+// meet, and the user's own matching prompts, so a long session titled
+// after something else is still recognisable.
+func TestCandidatesShowBestPassageAndOwnPrompts(t *testing.T) {
+	cfg, home, _ := homesEnv(t)
+	long := strings.Repeat("photo sheet work on lot images for the nightingale collection\n", 400) +
+		"now drafting the html email template to promote the auction for nightingale\n" +
+		strings.Repeat("more photo sheet work\n", 400)
+	other := strings.Repeat("auction email auction email notification service\n", 2000)
+	writeFile(t, filepath.Join(cfg.BackupRoot, textCacheDir, "target.txt"), long)
+	writeFile(t, filepath.Join(cfg.BackupRoot, textCacheDir, "noisy.txt"), other)
+	writeFile(t, filepath.Join(home, ".claude", "history.jsonl"),
+		`{"display":"can you build an email for the artist to send their list","sessionId":"target","project":"/p","timestamp":1}`+"\n"+
+			`{"display":"can you build an email for the artist to send their list","sessionId":"target","project":"/p","timestamp":2}`+"\n")
+	sessions := []Session{
+		{ID: "target", Target: "claude", Home: "default", CustomName: "PHOTO-SESSION", State: "OK", SourcePath: "/x"},
+		{ID: "noisy", Target: "claude", Home: "default", CustomName: "AUCTION-SYSTEM", State: "OK", SourcePath: "/y"},
+	}
+	cands, _, _ := BuildCandidates(cfg, sessions, "email template for nightingale to promote the auction")
+	var target *assist.Candidate
+	for i := range cands {
+		if cands[i].ID == "target" {
+			target = &cands[i]
+		}
+	}
+	if target == nil || cands[0].ID != "target" {
+		t.Fatalf("target not first: %+v", cands)
+	}
+	if !strings.Contains(target.Excerpt, "html email template to promote") {
+		t.Errorf("excerpt = %q", target.Excerpt)
+	}
+	if len(target.Prompts) != 1 || !strings.Contains(target.Prompts[0], "email for the artist") {
+		t.Errorf("prompts = %q (duplicates must collapse)", target.Prompts)
 	}
 }
