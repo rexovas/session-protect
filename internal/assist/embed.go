@@ -97,3 +97,23 @@ func Embed(cfg config.Assist, model string, inputs []string) ([][]float32, error
 	}
 	return out.Embeddings, nil
 }
+
+// EmbedderReachable reports whether the Ollama server that computes
+// embeddings answers, so callers can tell "no index" from "index but the
+// embedder is down".
+func EmbedderReachable(cfg config.Assist) bool {
+	if cfg.Backend == "none" {
+		return false
+	}
+	url := cfg.URL
+	if url == "" {
+		url = "http://localhost:11434"
+	}
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url + "/api/version")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
