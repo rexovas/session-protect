@@ -3863,6 +3863,10 @@ func (m model) hitsView() string {
 		note = fmt.Sprintf("  \"%s\" · %d match(es) via %s ", m.hitsQuery, len(m.hits), m.hitsNote)
 		if m.hitsRetrieval != "" {
 			note += styleDim.Render("· semantic (" + m.hitsRetrieval + ") ")
+		} else {
+			// Keyword-only grounding misses sessions described in other
+			// words; say so, and how to add meaning-based matching.
+			note += styleDim.Render("· keyword only (ctrl+b builds the semantic index) ")
 		}
 		if !m.hitsCached.IsZero() {
 			note += styleStale.Render(fmt.Sprintf("· saved %s ago ", ago(m.hitsCached)))

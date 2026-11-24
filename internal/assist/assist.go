@@ -31,6 +31,9 @@ type Candidate struct {
 	Project  string `json:"project,omitempty"`
 	LastUsed string `json:"last_used,omitempty"`
 	Excerpt  string `json:"excerpt,omitempty"`
+	// Prompts are the developer's own messages in the session that best
+	// match the description.
+	Prompts []string `json:"their_prompts,omitempty"`
 }
 
 // Match is one session the model considers likely, with its reasoning.
@@ -354,7 +357,11 @@ func buildPrompt(query string, candidates []Candidate) string {
 	list, _ := json.Marshal(candidates)
 	return fmt.Sprintf(`You are helping a developer find a coding-agent session on their machine.
 They describe a session they half-remember; below are candidate sessions with
-metadata and content excerpts. Pick up to 5 likely matches, best first.
+metadata, an excerpt from the passage that best matches, and their_prompts: the
+developer's own messages in that session that best match. A long session is
+often titled after its main topic while the remembered work is one part of it,
+so weigh the excerpt and their_prompts over the title. Pick up to 5 likely
+matches, best first.
 Weigh last_used when the description implies recency ("yesterday", "recent").
 Respond with ONLY this JSON, no other text:
 {"matches":[{"id":"<session id>","reason":"<one short line why>"}]}
