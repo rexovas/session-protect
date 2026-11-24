@@ -3861,7 +3861,9 @@ func (m model) hitsView() string {
 	if m.hitsMode == "ask" {
 		heading = "Session Explorer ▸ ai find"
 		note = fmt.Sprintf("  \"%s\" · %d match(es) via %s ", m.hitsQuery, len(m.hits), m.hitsNote)
-		if m.hitsRetrieval != "" {
+		if m.hitsRetrieval == semanticUnavailable {
+			note += styleStale.Render("· keyword only: semantic index unusable, Ollama isn't running (brew services start ollama) ")
+		} else if m.hitsRetrieval != "" {
 			note += styleDim.Render("· semantic (" + m.hitsRetrieval + ") ")
 		} else {
 			// Keyword-only grounding misses sessions described in other

@@ -18,6 +18,10 @@ import (
 // embedFn is the embedding call, seamed for tests.
 var embedFn = assist.Embed
 
+// semanticUnavailable is the retrieval label when a semantic index exists
+// but the query couldn't be embedded (Ollama not running).
+const semanticUnavailable = "unavailable"
+
 // The vector cache holds one embedding per session under
 // <backup root>/.session-vec/index.bin, keyed by session id with the
 // content hash and model that produced it — so a session re-embeds only

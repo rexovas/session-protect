@@ -49,10 +49,13 @@ The only network call is an optional once-daily release check
   claude, codex, or fully local via ollama — enumerated live,
   auto-detected, optional). Opt in to **semantic search** with
   `sp index` (or `ctrl+b` in the browser) and a local embedder
-  (`ollama pull nomic-embed-text`): sessions are embedded once, then
-  AI find retrieves by meaning, not just shared words, so a paraphrase
-  still lands. Past searches replay instantly from saved results, no
-  repeat model calls
+  (`ollama pull nomic-embed-text`, with Ollama kept running, e.g.
+  `brew services start ollama`): sessions are embedded once, the daily
+  backup embeds new ones, and AI find retrieves by meaning, not just
+  shared words, so a paraphrase still lands. Results say when the index
+  can't be used (Ollama down) rather than quietly falling back, and
+  `sp doctor` checks it. Past searches replay instantly from saved
+  results, no repeat model calls
 - Lost-session detection: sessions recorded in agent history but missing
   from disk are surfaced permanently, so nothing disappears silently —
   and can be rescued: export their surviving prompts, or rebuild them
@@ -232,7 +235,8 @@ sp restore [--session ID]     bring deleted sessions back from backup
 sp transplant --session ID --to DIR [--copy]
                               relocate sessions + memory (also --project)
 sp browse                     the session explorer (alias: ui)
-sp index [--clear]            build the semantic-search index (opt-in)
+sp index [--clear]            build/refresh the semantic-search index (opt-in;
+                              kept current by the daily backup)
 sp hook install               realtime sync + session guard hooks
 sp claude-dirs [add PATH]     extra claude config dirs (accounts); which DIR
 sp codex-dirs [add PATH]      extra codex homes (accounts)

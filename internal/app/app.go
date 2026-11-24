@@ -47,6 +47,9 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	case "backup", "save":
 		code := backup.Run(args[1:], stdout, stderr, false)
 		recordWeekly(true)
+		if code == 0 && !hasFlag(args[1:], "--dry-run") {
+			refreshIndex(stdout, stderr)
+		}
 		return code
 	case "sync":
 		// The turn-end hook inherits the session's CLAUDE_CONFIG_DIR:
@@ -185,4 +188,22 @@ func recordWeekly(rebuild bool) {
 var heal = func() {
 	_, _ = hook.Repair()
 	_, _ = schedule.ReloadIfStale()
+}
+
+// refreshIndex keeps an existing semantic index current after a backup
+// (the daily one runs from launchd), so AI find never matches against a
+// stale index. It never builds one that wasn't asked for.
+func refreshIndex(stdout io.Writer, stderr io.Writer) {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	added, err := browse.RefreshVecIndex(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "semantic index refresh stopped: %v (partial index kept)\n", err)
+		return
+	}
+	if added > 0 {
+		fmt.Fprintf(stdout, "semantic index: %d new session(s) embedded\n", added)
+	}
 }

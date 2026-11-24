@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rexovas/session-protect/internal/assist"
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/hook"
 	"github.com/rexovas/session-protect/internal/schedule"
@@ -69,6 +70,9 @@ func Checks() []Check {
 		})
 	}
 	checks = append(checks, claudeDirChecks()...)
+	if check, ok := semanticCheck(time.Now()); ok {
+		checks = append(checks, check)
+	}
 
 	if runtime.GOOS == "darwin" {
 		checks = append(checks, scheduleCheck(schedule.Inspect(), lastBackup(), time.Now()))
@@ -191,4 +195,28 @@ func claudeDirChecks() []Check {
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// semanticCheck reports on the opt-in semantic index, when one was built:
+// AI find can only use it while Ollama answers, and the daily backup keeps
+// it current only then too.
+func semanticCheck(now time.Time) (Check, bool) {
+	cfg, err := config.Load()
+	if err != nil {
+		return Check{}, false
+	}
+	info, err := os.Stat(filepath.Join(cfg.BackupRoot, ".session-vec", "index.bin"))
+	if err != nil {
+		return Check{}, false // never built: semantic search is opt-in
+	}
+	check := Check{Name: "semantic index", Status: "ok", Detail: "updated " + info.ModTime().Format("2006-01-02")}
+	switch {
+	case !assist.EmbedderReachable(cfg.Assist):
+		check.Status = "warn"
+		check.Warning = "Ollama isn't running, so AI find falls back to keywords and the index isn't refreshed; run: brew services start ollama"
+	case now.Sub(info.ModTime()) > 7*24*time.Hour:
+		check.Status = "warn"
+		check.Warning = "not refreshed in over a week; run: session-protect index"
+	}
+	return check, true
 }

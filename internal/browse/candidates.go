@@ -112,6 +112,11 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]ass
 	// vocabulary. When an embedder is available the two blend; without
 	// one, this is pure keyword grounding exactly as before.
 	sem, retrieval := semanticScores(cfg, query)
+	if sem == nil && len(loadVecIndex(cfg)) > 0 {
+		// Built, but unusable right now: say so instead of quietly
+		// falling back to keywords.
+		retrieval = semanticUnavailable
+	}
 
 	// Keyword score, three parts so a focused session isn't buried under
 	// long ones that use the same words in passing:

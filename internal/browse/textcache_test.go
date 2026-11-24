@@ -1,6 +1,7 @@
 package browse
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,3 +242,59 @@ func TestHybridRetrievalSurfacesSemanticOnly(t *testing.T) {
 func mustTime(d string) time.Time { t, _ := time.Parse("2006-01-02", d); return t }
 
 var assistEmbed = embedFn
+
+// A semantic index that exists but can't be used right now (Ollama down)
+// is reported as unavailable, not silently treated as no index.
+func TestSemanticUnavailableIsReported(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Config{
+		BackupRoot: filepath.Join(home, "backup"),
+		Assist:     config.Assist{Backend: "ollama", EmbedModel: "fake-embed"},
+	}
+	sessions := []Session{{ID: "s1", Title: "notes", SourcePath: filepath.Join(home, "s.jsonl"), Modified: mustTime("2026-08-01")}}
+	writeFile(t, sessions[0].SourcePath, `{"type":"user","message":{"role":"user","content":"some words"}}`+"\n")
+	embedFn = func(_ config.Assist, _ string, inputs []string) ([][]float32, error) {
+		out := make([][]float32, len(inputs))
+		for i := range inputs {
+			out[i] = []float32{1, 0}
+		}
+		return out, nil
+	}
+	if _, err := BuildVecIndex(cfg, sessions, "fake-embed", nil); err != nil {
+		t.Fatal(err)
+	}
+	embedFn = func(config.Assist, string, []string) ([][]float32, error) {
+		return nil, errors.New("connection refused")
+	}
+	defer func() { embedFn = assistEmbed }()
+	if _, _, retrieval := BuildCandidates(cfg, sessions, "some words"); retrieval != semanticUnavailable {
+		t.Fatalf("retrieval = %q, want %q", retrieval, semanticUnavailable)
+	}
+	// No index at all stays plain keyword search.
+	if err := ClearVecIndex(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, retrieval := BuildCandidates(cfg, sessions, "some words"); retrieval != "" {
+		t.Fatalf("retrieval without an index = %q", retrieval)
+	}
+}
+
+// `index --help` prints usage and never starts a build.
+func TestIndexHelpDoesNotBuild(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.toml")
+	writeFile(t, configPath, "backup_root = \""+filepath.Join(home, "root")+"\"\n")
+	t.Setenv("SESSION_PROTECT_CONFIG", configPath)
+	var out, errOut strings.Builder
+	if code := RunIndex([]string{"--help"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "Usage:") {
+		t.Fatalf("code %d out %q err %q", code, out.String(), errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "root", vecCacheDir)); err == nil {
+		t.Fatal("--help built an index")
+	}
+	if code := RunIndex([]string{"--bogus"}, &out, &errOut); code != 2 {
+		t.Fatalf("unknown flag exit %d", code)
+	}
+}
