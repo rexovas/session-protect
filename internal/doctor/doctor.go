@@ -205,8 +205,12 @@ func semanticCheck(now time.Time) (Check, bool) {
 	if err != nil {
 		return Check{}, false
 	}
-	info, err := os.Stat(filepath.Join(cfg.BackupRoot, ".session-vec", "index.bin"))
+	info, err := os.Stat(filepath.Join(cfg.BackupRoot, ".session-vec", "passages.bin"))
 	if err != nil {
+		if legacy, lerr := os.Stat(filepath.Join(cfg.BackupRoot, ".session-vec", "index.bin")); lerr == nil {
+			return Check{Name: "semantic index", Status: "warn", Detail: "updated " + legacy.ModTime().Format("2006-01-02"),
+				Warning: "earlier format (one vector per session); rebuild by passage: session-protect index"}, true
+		}
 		return Check{}, false // never built: semantic search is opt-in
 	}
 	check := Check{Name: "semantic index", Status: "ok", Detail: "updated " + info.ModTime().Format("2006-01-02")}

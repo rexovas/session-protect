@@ -111,7 +111,7 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]ass
 	// precision engine — an exact name or file path outweighs vague
 	// vocabulary. When an embedder is available the two blend; without
 	// one, this is pure keyword grounding exactly as before.
-	sem, retrieval := semanticScores(cfg, query)
+	sem, semPassage, retrieval := semanticScores(cfg, query)
 	if sem == nil && len(loadVecIndex(cfg)) > 0 {
 		// Built, but unusable right now: say so instead of quietly
 		// falling back to keywords.
@@ -184,8 +184,20 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]ass
 				kwNorm = item.kw / maxKw
 			}
 			score = semanticWeight*sem[item.session.ID] + keywordWeight*kwNorm
-			// A session matched only semantically has no keyword excerpt;
-			// give the model the head of the conversation instead.
+			// Show the model the passage that matched by meaning: the only
+			// evidence for a session described in other words, and a
+			// second look when the keyword passage is elsewhere.
+			if at, ok := semPassage[item.session.ID]; ok && item.text != "" {
+				passages := sessionPassages(item.session, item.text)
+				if at < len(passages) {
+					closest := strings.Join(strings.Fields(passages[at]), " ")
+					if excerpt == "" {
+						excerpt = truncate(closest, 300)
+					} else if !strings.Contains(closest, strings.Trim(excerpt, "…")) {
+						excerpt = excerpt + " | closest passage: " + truncate(closest, 240)
+					}
+				}
+			}
 			if excerpt == "" && item.text != "" {
 				excerpt = headExcerpt(item.text)
 			}
@@ -227,7 +239,7 @@ func BuildCandidates(cfg config.Config, sessions []Session, query string) ([]ass
 			Title:    truncate(title, 80),
 			Project:  tildePath(entry.session.ProjectPath),
 			LastUsed: entry.session.Modified.Format("2006-01-02"),
-			Excerpt:  truncate(entry.excerpt, 300),
+			Excerpt:  truncate(entry.excerpt, 560),
 			Prompts:  entry.prompts,
 		})
 	}
