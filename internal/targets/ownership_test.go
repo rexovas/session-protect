@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // mapIndex is a FolderIndex over folder → home label → session count.
@@ -96,4 +98,35 @@ func TestFolderOwnerFromDisk(t *testing.T) {
 	if !strings.HasPrefix(FolderOwner(work).Owner.Label, "default") {
 		t.Error("an unclaimed parent was owned")
 	}
+}
+
+// A codex session with a plain rollout beside its compressed copy counts
+// once.
+func TestCodexFoldersCountSessionsOnce(t *testing.T) {
+	home := homesEnv(t)
+	codex := mkdir(t, filepath.Join(home, "acme-codex", "sessions", "2026", "09", "09"))
+	meta := `{"type":"session_meta","payload":{"id":"dup","cwd":"/w/app","source":"cli"}}` + "\n"
+	for _, name := range []string{"rollout-2026-09-09T23-01-59-dup.jsonl", "rollout-2026-09-09T23-01-59-dup.jsonl.zst"} {
+		path := filepath.Join(codex, name)
+		if strings.HasSuffix(name, ".zst") {
+			writeZstd(t, path, meta)
+		} else if err := os.WriteFile(path, []byte(meta), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := codexFolders(Home{Agent: AgentCodex, Label: "acme", Dir: filepath.Join(home, "acme-codex")})["/w/app"]; got != 1 {
+		t.Fatalf("counted %d sessions, want 1", got)
+	}
+}
+
+func writeZstd(t *testing.T, path, content string) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder, _ := zstd.NewWriter(file)
+	_, _ = encoder.Write([]byte(content))
+	_ = encoder.Close()
+	_ = file.Close()
 }

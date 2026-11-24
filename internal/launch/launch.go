@@ -1,5 +1,5 @@
-// Package launch starts the claude agent on the account (claude home) that
-// owns the current folder, for the shell function `shell-init` defines.
+// Package launch starts an agent (claude or codex) on the account that
+// owns the current folder, for the shell functions `shell-init` defines.
 package launch
 
 import (
@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/rexovas/session-protect/internal/binpath"
+	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/targets"
 )
 
@@ -19,8 +20,13 @@ import (
 const accountFlag = "--account"
 
 // Run resolves the home and replaces this process with the agent. args are
-// the agent's own arguments (after "--").
+// an optional agent name (claude by default) and then, after "--", the
+// agent's own arguments.
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
+	agent := targets.AgentClaude
+	if len(args) > 0 && (args[0] == targets.AgentClaude || args[0] == targets.AgentCodex) {
+		agent, args = args[0], args[1:]
+	}
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}
@@ -33,7 +39,11 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		dir = "."
 	}
-	env, note, err := Environment(os.Environ(), dir, label)
+	require := false
+	if cfg, err := config.Load(); err == nil {
+		require = cfg.Accounts.RequireClientHome
+	}
+	env, note, err := Environment(agent, os.Environ(), dir, label, require)
 	if err != nil {
 		fmt.Fprintf(stderr, "session-protect: %v\n", err)
 		return 2
@@ -41,53 +51,77 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	if note != "" {
 		fmt.Fprintln(stderr, "session-protect: "+note)
 	}
-	agent, err := exec.LookPath("claude")
+	binary, err := exec.LookPath(agent)
 	if err != nil {
-		fmt.Fprintln(stderr, "session-protect: claude is not on PATH")
+		fmt.Fprintf(stderr, "session-protect: %s is not on PATH\n", agent)
 		return 127
 	}
-	return run(agent, append([]string{"claude"}, rest...), env, stderr)
+	return run(binary, append([]string{agent}, rest...), env, stderr)
 }
 
 // Environment is the agent's environment for a launch in dir: an explicit
-// --account wins, then an explicit CLAUDE_CONFIG_DIR, then the folder's
-// owner. The default home runs with CLAUDE_CONFIG_DIR removed: the agent
-// keys its stored login on whether the variable is set at all, so setting
-// it to ~/.claude would ask for a different login.
-func Environment(environ []string, dir string, label string) ([]string, string, error) {
-	var home targets.ClaudeHome
+// --account wins, then an explicit home variable, then the folder's owner.
+// The default home runs with its variable removed (or, for codex, set to a
+// CODEX_HOME the user keeps for everything): claude keys its stored login
+// on whether CLAUDE_CONFIG_DIR is set at all, so setting it to ~/.claude
+// would ask for a different login.
+//
+// In a client's folder, when the client has no home for this agent, it
+// runs on the default home with a note, or is refused when require is set.
+func Environment(agent string, environ []string, dir string, label string, require bool) ([]string, string, error) {
+	variable := targets.EnvVarFor(agent)
 	note := ""
+	account := label
 	switch {
 	case label != "":
-		chosen, ok := targets.HomeByLabel(label)
-		if !ok {
-			return nil, "", fmt.Errorf("no claude dir labelled %q (see `session-protect claude-dirs`)", label)
-		}
-		home = chosen
-	case lookup(environ, "CLAUDE_CONFIG_DIR") != "":
+	case lookup(environ, variable) != "" && !isDefaultDir(agent, lookup(environ, variable)):
 		return environ, "", nil
 	default:
 		owner := targets.FolderOwner(dir)
 		if len(owner.Conflict) > 0 {
-			return nil, "", fmt.Errorf("this folder has sessions in several claude dirs (%s); pick one with %s LABEL",
+			return nil, "", fmt.Errorf("this folder has sessions in several accounts (%s); pick one with %s LABEL",
 				strings.Join(owner.Conflict, ", "), accountFlag)
 		}
 		if owner.BroadClaim != "" {
 			note = fmt.Sprintf("%s has %s sessions but also other accounts' work, so it isn't treated as %s's; using default (%s LABEL to choose)",
 				owner.BroadClaim, owner.BroadHome, owner.BroadHome, accountFlag)
 		}
-		home = owner.Owner
+		account = owner.Owner.Label
+	}
+	home, ok := targets.HomeByLabelOf(agent, account)
+	if !ok {
+		if label != "" {
+			return nil, "", fmt.Errorf("the %s account has no %s dir (see `session-protect %s-dirs`)", label, agent, agent)
+		}
+		hint := fmt.Sprintf("add one with `session-protect %s-dirs add DIR --label %s`", agent, account)
+		if require {
+			return nil, "", fmt.Errorf("this folder belongs to the %s account, which has no %s dir yet; %s, or run %s %s default",
+				account, agent, hint, agent, accountFlag)
+		}
+		home = targets.HomesOf(agent)[0]
+		note = fmt.Sprintf("%s has no %s dir; this session runs on your default %s (%s). To keep it separate, %s.",
+			account, agent, agent, home.Dir, hint)
 	}
 	out := make([]string, 0, len(environ)+1)
 	for _, entry := range environ {
-		if !strings.HasPrefix(entry, "CLAUDE_CONFIG_DIR=") {
+		if !strings.HasPrefix(entry, variable+"=") {
 			out = append(out, entry)
 		}
 	}
-	if !home.IsDefault() {
-		out = append(out, home.Env())
+	if value, unset := home.Pin(); !unset {
+		out = append(out, variable+"="+value)
 	}
 	return out, note, nil
+}
+
+// isDefaultDir reports whether value is the agent's default home, which
+// counts as no choice at all (a CODEX_HOME kept for everything).
+func isDefaultDir(agent string, value string) bool {
+	if agent != targets.AgentCodex {
+		return false
+	}
+	home, ok := targets.HomeForDirOf(agent, value)
+	return ok && home.IsDefault()
 }
 
 // takeAccount removes our --account flag from the agent's arguments.
@@ -141,13 +175,20 @@ func ShellInit(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	quoted := "'" + strings.ReplaceAll(binary, "'", `'\''`) + "'"
-	fmt.Fprintf(stdout, `# session-protect: run claude on the account that owns this folder
-# (claude --account LABEL picks one; "command claude" skips this).
+	fmt.Fprintf(stdout, `# session-protect: run claude and codex on the account that owns this
+# folder (--account LABEL picks one; "command claude" / "command codex" skip this).
 claude() {
   if [ -x %[1]s ]; then
-    %[1]s launch -- "$@"
+    %[1]s launch claude -- "$@"
   else
     command claude "$@"
+  fi
+}
+codex() {
+  if [ -x %[1]s ]; then
+    %[1]s launch codex -- "$@"
+  else
+    command codex "$@"
   fi
 }
 `, quoted)

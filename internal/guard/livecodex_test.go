@@ -7,6 +7,8 @@ func TestParseCodexProcs(t *testing.T) {
  74108 /usr/local/bin/codex resume 019f4aad-282c-7d53-8056-6b8b39a0f760
  90000 codexish something
  91000 vim codex-notes.txt
+ 47513 /Users/u/.codex-acme/packages/app-server-daemon/releases/0.171.0-aarch64-apple-darwin/bin/codex app-server --listen unix:// --managed-daemon
+ 41330 /Users/u/.codex/packages/app-server-daemon/releases/0.171.0-aarch64-apple-darwin/bin/codex app-server daemon pid-update-loop
 `
 	ids, pids := parseCodexProcs(ps)
 	if ids["019f4aad-282c-7d53-8056-6b8b39a0f760"] != "74108" || len(ids) != 1 {

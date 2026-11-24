@@ -220,3 +220,82 @@ func TestOwnershipBadgeAndTransferChooser(t *testing.T) {
 		t.Fatalf("transfer chooser = %+v", m.xfer)
 	}
 }
+
+// Codex homes are accounts too: sessions are tagged with their home, back
+// up to their own target, and resume pinned to it.
+func TestCodexHomesAreAccounts(t *testing.T) {
+	cfg, home, _ := homesEnv(t)
+	clientCodex := filepath.Join(home, "elsewhere", "client-codex")
+	if err := os.MkdirAll(clientCodex, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := targets.RegisterDir(targets.AgentCodex, clientCodex, "client"); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(home, "work", "app")
+	for dir, id := range map[string]string{filepath.Join(home, ".codex"): "cmine", clientCodex: "ctheirs"} {
+		writeFile(t, filepath.Join(dir, "sessions", "2026", "11", "01", "rollout-2026-11-01T10-00-00-"+id+".jsonl"),
+			`{"type":"session_meta","payload":{"id":"`+id+`","cwd":"`+project+`","source":"cli"}}`)
+	}
+	projects := Scan(cfg)
+	for id, want := range map[string]string{"cmine": "default", "ctheirs": "client"} {
+		// Live in its home whatever the home is named (not mistaken for a
+		// backup copy, which would offer to "recover" a session that's there).
+		if s := sessionByID(projects, id); s == nil || homeOf(*s) != want || s.Target != "codex" || s.SourcePath == "" || s.BackupPath != "" {
+			t.Errorf("%s = %+v, want live in home %s", id, s, want)
+		}
+	}
+	if _, err := backup.Execute(cfg, backup.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	repo, prefix := cfg.RepoFor("codex-client")
+	if _, err := os.Stat(filepath.Join(repo, prefix, "sessions", "2026", "11", "01", "rollout-2026-11-01T10-00-00-ctheirs.jsonl")); err != nil {
+		t.Fatalf("client codex session not backed up under codex-client: %v", err)
+	}
+	if s := sessionByID(Scan(cfg), "ctheirs"); s == nil || s.State != "OK" {
+		t.Errorf("backed-up client codex session = %+v, want OK", s)
+	}
+	if got := resumeCommand(Session{Target: "codex", Home: "client", ID: "ctheirs"}, "/p"); got != "cd '/p' && env CODEX_HOME='"+clientCodex+"' codex resume ctheirs" {
+		t.Errorf("client codex resume = %s", got)
+	}
+	if got := resumeCommand(Session{Target: "codex", Home: "default", ID: "cmine"}, "/p"); got != "cd '/p' && env -u CODEX_HOME codex resume cmine" {
+		t.Errorf("default codex resume = %s", got)
+	}
+}
+
+// A lost session is credited to the account that owns its folder, even
+// while its prompt history is only in the home it ran on; its detail still
+// loads.
+func TestLostSessionCreditedToFolderOwner(t *testing.T) {
+	cfg, home, client := homesEnv(t)
+	project := filepath.Join(home, "work", "app")
+	writeFile(t, filepath.Join(client, "projects", targets.ClaudeSlug(project), "live.jsonl"), `{"cwd":"`+project+`","type":"user"}`)
+	writeFile(t, filepath.Join(home, ".claude", "history.jsonl"),
+		`{"display":"gone prompt","sessionId":"ghost","project":"`+project+`","timestamp":2000}`+"\n"+
+			`{"display":"mine","sessionId":"ghost2","project":"`+filepath.Join(home, "personal")+`","timestamp":3000}`+"\n")
+	projects := Scan(cfg)
+	if s := sessionByID(projects, "ghost"); s == nil || s.State != "LOST" || homeOf(*s) != "client" {
+		t.Fatalf("ghost = %+v", s)
+	}
+	if s := sessionByID(projects, "ghost2"); s == nil || homeOf(*s) != "default" {
+		t.Fatalf("unowned lost session = %+v", s)
+	}
+	if detail := LoadLostDetail("client", "ghost"); detail.FirstPrompt != "gone prompt" {
+		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+// A lost session continued in another folder is filed (and credited)
+// where its history last puts it.
+func TestLostSessionUsesItsLatestFolder(t *testing.T) {
+	cfg, home, client := homesEnv(t)
+	moved := filepath.Join(home, "work", "app")
+	writeFile(t, filepath.Join(client, "projects", targets.ClaudeSlug(moved), "live.jsonl"), `{"cwd":"`+moved+`","type":"user"}`)
+	writeFile(t, filepath.Join(home, ".claude", "history.jsonl"),
+		`{"display":"old place","sessionId":"ghost","project":"`+filepath.Join(home, "old", "app")+`","timestamp":1000}`+"\n"+
+			`{"display":"new place","sessionId":"ghost","project":"`+moved+`","timestamp":2000}`+"\n")
+	s := sessionByID(Scan(cfg), "ghost")
+	if s == nil || s.ProjectPath != moved || homeOf(*s) != "client" || s.Title != "old place" {
+		t.Fatalf("ghost = %+v", s)
+	}
+}

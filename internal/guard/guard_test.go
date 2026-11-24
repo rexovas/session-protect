@@ -130,3 +130,29 @@ func TestAccountMismatch(t *testing.T) {
 		t.Errorf("unowned folder flagged: %q", msg)
 	}
 }
+
+// A folder owned by an account with only a codex home: a default claude
+// session there is told the account has no claude dir, not to relaunch
+// on an account that can't take it.
+func TestAccountMismatchWithoutClaudeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SESSION_PROTECT_CONFIG", filepath.Join(home, "cfg", "config.toml"))
+	codex := filepath.Join(home, "globex-codex")
+	project := filepath.Join(home, "work", "g")
+	dir := filepath.Join(codex, "sessions", "2026", "11", "01")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-11-01T10-00-00-g1.jsonl"),
+		[]byte(`{"type":"session_meta","payload":{"id":"g1","cwd":"`+project+`","source":"cli"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := targets.RegisterDir(targets.AgentCodex, codex, "globex"); err != nil {
+		t.Fatal(err)
+	}
+	msg := AccountMismatch(project, filepath.Join(home, ".claude"))
+	if !strings.Contains(msg, "has no claude dir") || strings.Contains(msg, "--account globex") {
+		t.Errorf("message = %q", msg)
+	}
+}

@@ -66,7 +66,9 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	case "hook":
 		return hook.Run(args[1:], stdout, stderr)
 	case "claude-dirs":
-		return claudedirs.Run(args[1:], stdout, stderr)
+		return claudedirs.Run("claude", args[1:], stdout, stderr)
+	case "codex-dirs":
+		return claudedirs.Run("codex", args[1:], stdout, stderr)
 	case "transfer":
 		return transfer.Run(args[1:], os.Stdin, stdout, stderr)
 	case "launch":
@@ -128,8 +130,9 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "  session-protect retention [--dry-run] [--keep all|policy|latest]")
 	fmt.Fprintln(out, "  session-protect hook install|status|uninstall [claude]")
 	fmt.Fprintln(out, "  session-protect claude-dirs [add PATH [--label L] | remove LABEL | which [DIR]]")
+	fmt.Fprintln(out, "  session-protect codex-dirs  [add PATH [--label L] | remove LABEL | which [DIR]]")
 	fmt.Fprintln(out, "  session-protect transfer --to LABEL (--session ID | --project PATH [--recursive])")
-	fmt.Fprintln(out, "                           [--from LABEL] [--dry-run] [--yes]")
+	fmt.Fprintln(out, "                           [--from LABEL] [--agent claude|codex] [--dry-run] [--yes]")
 	fmt.Fprintln(out, "  session-protect shell-init [zsh|bash]   (eval in your shell rc: claude runs on")
 	fmt.Fprintln(out, "                                          the account that owns the folder)")
 	fmt.Fprintln(out, "  session-protect browse   (interactive session browser; alias: ui)")

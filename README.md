@@ -151,7 +151,7 @@ directory is gone from disk (its sessions survive — `t` transplants
 them somewhere that exists). Session rows use the long form in the
 STATE column.
 
-## Several Claude accounts
+## Several accounts (Claude and Codex)
 
 Claude keeps its login, settings and sessions in its config dir:
 `~/.claude`, or wherever `CLAUDE_CONFIG_DIR` points. Running one dir per
@@ -196,12 +196,31 @@ default's. `sp claude-dirs which [DIR]` shows a folder's owner.
   `--session ID`) moves sessions to another account without changing
   their folder: transcripts and everything keyed by their id, project
   memory, and a copy of their prompt history, with a backup committed
-  before and after. The preview lists each folder with its owner before
+  before and after. Lost sessions there (only their prompt history
+  survives) have that history copied too; a lost session is credited to
+  the account that owns its folder, and rebuilding one lands in that
+  account. The preview lists each folder with its owner before
   and after. In the explorer, folder rows show `@owner` and `⇄N` for
   sessions on another account inside an owned folder; `A` transfers.
 
 Symlinks inside a config dir (shared hooks or skills, say) are followed,
 so each dir's backup holds real files and restores as plain files.
+
+**Codex works the same way.** Codex keeps its login, settings and sessions
+in its home, `~/.codex` or wherever `CODEX_HOME` points. `sp codex-dirs add
+PATH [--label L]` registers one (log it in with `CODEX_HOME=PATH codex
+login`). A claude dir and a codex home with the same label are the same
+account: folder ownership is learned from either agent's sessions, the
+explorer's ACCOUNT column and filter cover both, and `sp transfer` moves
+an account's codex sessions along with its claude ones (use `--agent` to
+pick one). Codex files sessions by date, so a transfer picks them by the
+folder recorded inside each one, takes the subagent sessions they spawned,
+and copies their prompt history and thread names; codex indexes the moved
+sessions on its next start. `shell-init` defines `codex` next to `claude`,
+and in a client's folder whose account has no codex home, codex runs on
+your default codex with a warning saying so. Set `require_client_home =
+true` under `[accounts]` in the config to refuse instead
+(`codex --account default` still overrides).
 
 ## CLI reference
 
@@ -216,9 +235,10 @@ sp browse                     the session explorer (alias: ui)
 sp index [--clear]            build the semantic-search index (opt-in)
 sp hook install               realtime sync + session guard hooks
 sp claude-dirs [add PATH]     extra claude config dirs (accounts); which DIR
+sp codex-dirs [add PATH]      extra codex homes (accounts)
 sp transfer --to LABEL --project PATH [--recursive]
                               move sessions to another account
-sp shell-init zsh             `claude` starts on the folder's account
+sp shell-init zsh             `claude` and `codex` start on the folder's account
 sp schedule install           daily backup (macOS launchd)
 sp schedule reload            re-register it after replacing the binary
 sp retention [--dry-run]      bound backup history (see [retention])
@@ -262,6 +282,11 @@ embed_model = ""         # ollama embedding model for semantic retrieval;
 
 [update]
 check = true             # daily new-release check + explorer prompt
+
+[accounts]
+require_client_home = false  # true: in a client's folder, refuse to start an
+                             # agent the client has no home for (else it runs
+                             # on your default home, with a warning)
 
 [targets.codex]
 enabled = true           # per-agent enable/source overrides

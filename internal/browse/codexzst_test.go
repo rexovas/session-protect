@@ -101,7 +101,7 @@ func TestDuplicateRolloutPrefersFullerCopy(t *testing.T) {
 		sub := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-"))
 		writeFile(t, filepath.Join(sub, "rollout-dup.jsonl"), tc.plain)
 		writeZst(t, filepath.Join(sub, "rollout-dup.jsonl.zst"), tc.zst)
-		sessions := merge("codex", listCodex(sub), nil)
+		sessions := merge("codex", listCodex(sub, false), nil)
 		if len(sessions) != 1 {
 			t.Fatalf("%s: %d sessions, want 1", tc.name, len(sessions))
 		}

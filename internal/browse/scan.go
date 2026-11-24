@@ -86,12 +86,26 @@ func Scan(cfg config.Config) []*Project {
 			}
 		}
 	}
+	// A lost claude session's history records its folder, so it is
+	// credited to the account that owns that folder now (its prompt
+	// history may still sit in the home it ran on).
+	liveProjects := make([]*Project, 0, len(byPath))
+	for _, project := range byPath {
+		liveProjects = append(liveProjects, project)
+	}
+	ownership, accounts := newSessionIndex(liveProjects), targets.Accounts()
 	for _, history := range claudeHistoriesByHome() {
 		for id, ghost := range history.sessions {
 			if seen[id] || ghost.Project == "" {
 				continue
 			}
 			seen[id] = true
+			home := history.home.Label
+			if filepath.IsAbs(ghost.Project) {
+				if owner := targets.ResolveOwner(ownership, accounts, ghost.Project); owner.Owned() {
+					home = owner.Owner.Label
+				}
+			}
 			project := byPath[ghost.Project]
 			if project == nil {
 				project = &Project{Path: ghost.Project}
@@ -99,7 +113,7 @@ func Scan(cfg config.Config) []*Project {
 			}
 			project.Sessions = append(project.Sessions, Session{
 				Target:      "claude",
-				Home:        history.home.Label,
+				Home:        home,
 				ID:          id,
 				Title:       ghost.Title,
 				State:       "LOST",
@@ -111,24 +125,28 @@ func Scan(cfg config.Config) []*Project {
 	}
 	// Codex history records no project path, so its lost sessions
 	// surface under one pseudo-folder at the start root.
-	for id, ghost := range codexHistorySessions() {
-		if seen[id] {
-			continue
+	for _, history := range codexHistoriesByHome() {
+		for id, ghost := range history.sessions {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			const bucket = "codex · lost sessions"
+			project := byPath[bucket]
+			if project == nil {
+				project = &Project{Path: bucket}
+				byPath[bucket] = project
+			}
+			project.Sessions = append(project.Sessions, Session{
+				Target:   "codex",
+				Home:     history.home.Label,
+				ID:       id,
+				Title:    ghost.Title,
+				State:    "LOST",
+				Modified: ghost.Last,
+				Prompts:  ghost.Count,
+			})
 		}
-		const bucket = "codex · lost sessions"
-		project := byPath[bucket]
-		if project == nil {
-			project = &Project{Path: bucket}
-			byPath[bucket] = project
-		}
-		project.Sessions = append(project.Sessions, Session{
-			Target:   "codex",
-			ID:       id,
-			Title:    ghost.Title,
-			State:    "LOST",
-			Modified: ghost.Last,
-			Prompts:  ghost.Count,
-		})
 	}
 
 	titles := historyTitles()
@@ -340,13 +358,19 @@ func scanClaudeHome(cfg config.Config, home targets.ClaudeHome, byPath map[strin
 }
 
 func scanCodex(cfg config.Config, byPath map[string]*Project) {
-	target := targets.DetectCodex()
-	repo, prefix := cfg.RepoFor("codex")
+	for _, home := range targets.CodexHomes() {
+		scanCodexHome(cfg, home, byPath)
+	}
+}
+
+func scanCodexHome(cfg config.Config, home targets.Home, byPath map[string]*Project) {
+	target := targets.DetectCodexHome(home)
+	repo, prefix := cfg.RepoFor(target.Name)
 	sourceRoot := filepath.Join(target.Source, "sessions")
 	backupRoot := filepath.Join(repo, prefix, "sessions")
 
-	source := listCodex(sourceRoot)
-	backup := listCodex(backupRoot)
+	source := listCodex(sourceRoot, false)
+	backup := listCodex(backupRoot, true)
 
 	byProject := map[string][]fileInfo{}
 	group := func(files []fileInfo) {
@@ -369,6 +393,9 @@ func scanCodex(cfg config.Config, byPath map[string]*Project) {
 		sessions := merge("codex", sourceFiles, backupFiles)
 		if len(sessions) == 0 {
 			continue
+		}
+		for i := range sessions {
+			sessions[i].Home = home.Label
 		}
 		project := byPath[path]
 		if project == nil {
@@ -467,10 +494,11 @@ func listJSONL(root string) []fileInfo {
 	return files
 }
 
-func listCodex(root string) []fileInfo {
+// listCodex lists the rollouts under root, a codex home's sessions dir
+// (fromBackup false) or its backup mirror (true). The caller says which:
+// a codex home can be named anything, so the path can't tell.
+func listCodex(root string, fromBackup bool) []fileInfo {
 	var files []fileInfo
-	fromBackup := strings.Contains(root, string(filepath.Separator)+"all"+string(filepath.Separator)) ||
-		!strings.Contains(root, string(filepath.Separator)+".codex"+string(filepath.Separator))
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		// Newer codex compresses older rollouts to .jsonl.zst in place.
 		if err != nil || entry.IsDir() || !sessionfile.IsTranscript(entry.Name()) {
@@ -1070,9 +1098,17 @@ func (info lostInfo) withWeek(t time.Time) lostInfo {
 func codexThreadNames() map[string]string {
 	names := map[string]string{}
 	latest := map[string]string{} // id -> updated_at of the winning entry
-	file, err := os.Open(filepath.Join(targets.DetectCodex().Source, "session_index.jsonl"))
+	for _, home := range targets.CodexHomes() {
+		readThreadNames(filepath.Join(home.Dir, "session_index.jsonl"), names, latest)
+	}
+	return names
+}
+
+// readThreadNames folds one codex session index into names.
+func readThreadNames(path string, names map[string]string, latest map[string]string) {
+	file, err := os.Open(path)
 	if err != nil {
-		return names
+		return
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
@@ -1093,14 +1129,29 @@ func codexThreadNames() map[string]string {
 			latest[entry.ID] = entry.UpdatedAt
 		}
 	}
-	return names
 }
 
 // LoadLostDetail builds inspector data for a LOST session from the prompt
 // history — the user's half of the conversation is all that survives.
 func LoadLostDetail(home string, id string) Detail {
+	// The session is credited to its folder's owner; its prompts may still
+	// be only in the home it ran on.
+	if detail := loadLostDetailFrom(targets.HomeFor(home), id); detail.Messages > 0 {
+		return detail
+	}
+	for _, other := range targets.ClaudeHomes() {
+		if other.Label != home {
+			if detail := loadLostDetailFrom(other, id); detail.Messages > 0 {
+				return detail
+			}
+		}
+	}
+	return Detail{}
+}
+
+func loadLostDetailFrom(home targets.Home, id string) Detail {
 	var detail Detail
-	file, err := os.Open(filepath.Join(targets.HomeFor(home).Dir, "history.jsonl"))
+	file, err := os.Open(filepath.Join(home.Dir, "history.jsonl"))
 	if err != nil {
 		return detail
 	}

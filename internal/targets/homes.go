@@ -9,83 +9,169 @@ import (
 	"strings"
 )
 
-// A ClaudeHome is one claude config dir. The agent reads its config dir
-// from CLAUDE_CONFIG_DIR (default ~/.claude), and each dir keeps its own
-// login, settings and sessions, so people run several to separate
-// accounts or clients. ~/.claude is always present as "default"; others
-// are registered by path, whatever they are named.
-type ClaudeHome struct {
+// A Home is one agent home dir: a claude config dir (CLAUDE_CONFIG_DIR,
+// default ~/.claude) or a codex home (CODEX_HOME, default ~/.codex). Each
+// keeps its own login, settings and sessions, so people run several to
+// separate accounts or clients. The default dir is always present as
+// "default"; others are registered by path, whatever they are named.
+//
+// A label names an account across agents: the "acme" claude dir and the
+// "acme" codex home are the same account, and folder ownership (see
+// ownership.go) is learned from either agent's sessions.
+type Home struct {
+	Agent string `json:"agent,omitempty"` // "claude" (empty in older files) or "codex"
 	Label string `json:"label"`
 	Dir   string `json:"dir"`
 }
 
-// DefaultHomeLabel names ~/.claude.
-const DefaultHomeLabel = "default"
+// ClaudeHome is a claude config dir.
+type ClaudeHome = Home
 
-// IsDefault reports whether this is ~/.claude.
-func (h ClaudeHome) IsDefault() bool { return h.Label == DefaultHomeLabel }
+const (
+	// DefaultHomeLabel names the default dir of either agent.
+	DefaultHomeLabel = "default"
+	AgentClaude      = "claude"
+	AgentCodex       = "codex"
+)
+
+// IsDefault reports whether this is the agent's default dir.
+func (h Home) IsDefault() bool { return h.Label == DefaultHomeLabel }
+
+func (h Home) agent() string {
+	if h.Agent == "" {
+		return AgentClaude
+	}
+	return h.Agent
+}
 
 // TargetName is the backup target (and repo prefix) for the home: the
-// default keeps the historical "claude" so existing backups are unchanged.
-func (h ClaudeHome) TargetName() string {
+// defaults keep the historical "claude" and "codex", so existing backups
+// are unchanged.
+func (h Home) TargetName() string {
 	if h.IsDefault() {
-		return "claude"
+		return h.agent()
 	}
-	return "claude-" + h.Label
+	return h.agent() + "-" + h.Label
+}
+
+// EnvVar is the variable that points the agent at a home.
+func (h Home) EnvVar() string { return EnvVarFor(h.agent()) }
+
+// EnvVarFor is the home variable of an agent.
+func EnvVarFor(agent string) string {
+	if agent == AgentCodex {
+		return "CODEX_HOME"
+	}
+	return "CLAUDE_CONFIG_DIR"
 }
 
 // Env is the environment entry that makes the agent use this home, or ""
-// for the default (which must run with CLAUDE_CONFIG_DIR unset).
-func (h ClaudeHome) Env() string {
+// for the default, which runs with the variable unset: claude keys its
+// stored login on whether CLAUDE_CONFIG_DIR is set at all.
+func (h Home) Env() string {
 	if h.IsDefault() {
 		return ""
 	}
-	return "CLAUDE_CONFIG_DIR=" + h.Dir
+	return h.EnvVar() + "=" + h.Dir
 }
 
-// DefaultClaudeDir is the agent's config dir when CLAUDE_CONFIG_DIR is unset.
+// Pin is how to start the agent on this home whatever the environment:
+// the variable set to the home, or for the default removed (claude) or set
+// only when the default is itself a CODEX_HOME override (codex). Unset
+// means remove the variable.
+func (h Home) Pin() (value string, unset bool) {
+	if !h.IsDefault() {
+		return h.Dir, false
+	}
+	if h.agent() == AgentCodex && h.Dir != filepath.Join(homeDir(), ".codex") {
+		return h.Dir, false
+	}
+	return "", true
+}
+
+// DefaultClaudeDir is claude's config dir when CLAUDE_CONFIG_DIR is unset.
 func DefaultClaudeDir() string {
 	return filepath.Join(homeDir(), ".claude")
 }
 
-// ActiveClaudeDir is the config dir an agent started from this process's
-// environment would use.
-func ActiveClaudeDir() string {
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		return cleanDir(dir)
+// DefaultCodexDir is codex's home when CODEX_HOME is unset, or the
+// CODEX_HOME a user sets for everything. A CODEX_HOME naming a registered
+// extra home is that home, not the default (it is set by our launcher).
+func DefaultCodexDir() string {
+	if dir := os.Getenv("CODEX_HOME"); dir != "" {
+		dir = cleanDir(dir)
+		registered := false
+		for _, home := range loadRegistered(AgentCodex) {
+			if cleanDir(home.Dir) == dir {
+				registered = true
+			}
+		}
+		if !registered {
+			return dir
+		}
+	}
+	return filepath.Join(homeDir(), ".codex")
+}
+
+func defaultDir(agent string) string {
+	if agent == AgentCodex {
+		return DefaultCodexDir()
 	}
 	return DefaultClaudeDir()
 }
 
-// homesFile lists the registered extra homes. It sits beside the config
-// file so a test (or a second install) pointing SESSION_PROTECT_CONFIG
-// elsewhere gets its own list.
-func homesFile() string {
-	if override := os.Getenv("SESSION_PROTECT_CONFIG"); override != "" {
-		return filepath.Join(filepath.Dir(override), "claude-dirs.json")
+// ActiveClaudeDir is the config dir a claude started from this process's
+// environment would use.
+func ActiveClaudeDir() string { return ActiveDir(AgentClaude) }
+
+// ActiveDir is the home an agent started from this environment would use.
+func ActiveDir(agent string) string {
+	if dir := os.Getenv(EnvVarFor(agent)); dir != "" {
+		return cleanDir(dir)
 	}
-	return filepath.Join(homeDir(), ".config", "session-protect", "claude-dirs.json")
+	return defaultDir(agent)
 }
 
-func loadRegistered() []ClaudeHome {
-	data, err := os.ReadFile(homesFile())
+// homesFile lists one agent's registered extra homes. It sits beside the
+// config file so a test (or a second install) pointing
+// SESSION_PROTECT_CONFIG elsewhere gets its own list.
+func homesFile(agent string) string {
+	dir := filepath.Join(homeDir(), ".config", "session-protect")
+	if override := os.Getenv("SESSION_PROTECT_CONFIG"); override != "" {
+		dir = filepath.Dir(override)
+	}
+	return filepath.Join(dir, agent+"-dirs.json")
+}
+
+func loadRegistered(agent string) []Home {
+	data, err := os.ReadFile(homesFile(agent))
 	if err != nil {
 		return nil
 	}
-	var homes []ClaudeHome
+	var homes []Home
 	if json.Unmarshal(data, &homes) != nil {
 		return nil
+	}
+	for i := range homes {
+		homes[i].Agent = agent
 	}
 	return homes
 }
 
-func saveRegistered(homes []ClaudeHome) error {
+func saveRegistered(agent string, homes []Home) error {
 	sort.Slice(homes, func(i, j int) bool { return homes[i].Label < homes[j].Label })
-	data, err := json.MarshalIndent(homes, "", "  ")
+	stored := make([]Home, len(homes))
+	for i, home := range homes {
+		stored[i] = Home{Label: home.Label, Dir: home.Dir}
+		if agent != AgentClaude {
+			stored[i].Agent = agent
+		}
+	}
+	data, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := homesFile()
+	path := homesFile(agent)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -96,14 +182,14 @@ func saveRegistered(homes []ClaudeHome) error {
 	return os.Rename(tmp, path)
 }
 
-// ClaudeHomes lists every home: the default first, then registered ones by
-// label. Registered homes stay listed after their dir is removed, so their
-// backups remain browsable and restorable.
-func ClaudeHomes() []ClaudeHome {
-	homes := []ClaudeHome{{Label: DefaultHomeLabel, Dir: DefaultClaudeDir()}}
-	defaultDir := DefaultClaudeDir()
-	for _, home := range loadRegistered() {
-		if home.Label == "" || home.Label == DefaultHomeLabel || cleanDir(home.Dir) == defaultDir {
+// HomesOf lists an agent's homes: the default first, then registered ones
+// by label. Registered homes stay listed after their dir is removed, so
+// their backups remain browsable and restorable.
+func HomesOf(agent string) []Home {
+	defaultHome := Home{Agent: agent, Label: DefaultHomeLabel, Dir: defaultDir(agent)}
+	homes := []Home{defaultHome}
+	for _, home := range loadRegistered(agent) {
+		if home.Label == "" || home.Label == DefaultHomeLabel || cleanDir(home.Dir) == defaultHome.Dir {
 			continue
 		}
 		home.Dir = cleanDir(home.Dir)
@@ -113,53 +199,86 @@ func ClaudeHomes() []ClaudeHome {
 	return homes
 }
 
-// HomeByLabel finds a home by its label.
-func HomeByLabel(label string) (ClaudeHome, bool) {
-	for _, home := range ClaudeHomes() {
+// ClaudeHomes lists the claude config dirs.
+func ClaudeHomes() []Home { return HomesOf(AgentClaude) }
+
+// CodexHomes lists the codex homes.
+func CodexHomes() []Home { return HomesOf(AgentCodex) }
+
+// Accounts lists one home per account label across agents, the default
+// first: the label set ownership resolves against.
+func Accounts() []Home {
+	accounts := ClaudeHomes()
+	seen := map[string]bool{}
+	for _, home := range accounts {
+		seen[home.Label] = true
+	}
+	for _, home := range CodexHomes() {
+		if !seen[home.Label] {
+			seen[home.Label] = true
+			accounts = append(accounts, home)
+		}
+	}
+	sort.SliceStable(accounts[1:], func(i, j int) bool { return accounts[1+i].Label < accounts[1+j].Label })
+	return accounts
+}
+
+// HomeByLabelOf finds an agent's home by label.
+func HomeByLabelOf(agent string, label string) (Home, bool) {
+	for _, home := range HomesOf(agent) {
 		if home.Label == label {
 			return home, true
 		}
 	}
-	return ClaudeHome{}, false
+	return Home{}, false
 }
 
-// HomeForDir finds the home whose dir is dir.
-func HomeForDir(dir string) (ClaudeHome, bool) {
+// HomeByLabel finds a claude home by label.
+func HomeByLabel(label string) (Home, bool) { return HomeByLabelOf(AgentClaude, label) }
+
+// HomeForDirOf finds the agent's home whose dir is dir.
+func HomeForDirOf(agent string, dir string) (Home, bool) {
 	dir = cleanDir(dir)
-	for _, home := range ClaudeHomes() {
+	for _, home := range HomesOf(agent) {
 		if home.Dir == dir {
 			return home, true
 		}
 	}
-	return ClaudeHome{}, false
+	return Home{}, false
 }
 
-// HomeFor finds a home by label, falling back to the default.
-func HomeFor(label string) ClaudeHome {
-	if home, ok := HomeByLabel(label); ok {
+// HomeForDir finds the claude home whose dir is dir.
+func HomeForDir(dir string) (Home, bool) { return HomeForDirOf(AgentClaude, dir) }
+
+// HomeForOf finds an agent's home by label, falling back to the default.
+func HomeForOf(agent string, label string) Home {
+	if home, ok := HomeByLabelOf(agent, label); ok {
 		return home
 	}
-	return ClaudeHomes()[0]
+	return HomesOf(agent)[0]
 }
 
-// RegisterClaudeDir adds dir as a home. An empty label is derived from the
-// dir's name. Registering a dir already known returns its existing entry.
-// A label is fixed once set: it names the home's backup folder. It
-// reports whether anything changed.
-func RegisterClaudeDir(dir string, label string) (ClaudeHome, bool, error) {
+// HomeFor finds a claude home by label, falling back to the default.
+func HomeFor(label string) Home { return HomeForOf(AgentClaude, label) }
+
+// RegisterDir adds dir as one of an agent's homes. An empty label is
+// derived from the dir's name. Registering a dir already known returns its
+// existing entry. A label is fixed once set: it names the home's backup
+// folder. It reports whether anything changed.
+func RegisterDir(agent string, dir string, label string) (Home, bool, error) {
 	dir = cleanDir(dir)
 	if dir == "" {
-		return ClaudeHome{}, false, fmt.Errorf("no directory given")
+		return Home{}, false, fmt.Errorf("no directory given")
 	}
-	if dir == DefaultClaudeDir() {
-		return ClaudeHomes()[0], false, nil
+	if dir == defaultDir(agent) {
+		return HomesOf(agent)[0], false, nil
 	}
 	if label != "" {
 		if err := validLabel(label); err != nil {
-			return ClaudeHome{}, false, err
+			return Home{}, false, err
 		}
 	}
-	registered := loadRegistered()
+	registered := loadRegistered(agent)
 	for _, home := range registered {
 		if cleanDir(home.Dir) != dir {
 			continue
@@ -167,30 +286,40 @@ func RegisterClaudeDir(dir string, label string) (ClaudeHome, bool, error) {
 		if label == "" || label == home.Label {
 			return home, false, nil
 		}
-		return ClaudeHome{}, false, fmt.Errorf("%s is already registered as %q (labels name the backup folder, so they don't change)", dir, home.Label)
+		return Home{}, false, fmt.Errorf("%s is already registered as %q (labels name the backup folder, so they don't change)", dir, home.Label)
 	}
 	if label == "" {
 		label = uniqueLabel(registered, DeriveLabel(dir))
 	} else if labelTaken(registered, label, -1) {
-		return ClaudeHome{}, false, fmt.Errorf("label %q is already used", label)
+		return Home{}, false, fmt.Errorf("label %q is already used", label)
 	}
-	home := ClaudeHome{Label: label, Dir: dir}
-	return home, true, saveRegistered(append(registered, home))
+	home := Home{Agent: agent, Label: label, Dir: dir}
+	return home, true, saveRegistered(agent, append(registered, home))
 }
 
-// UnregisterClaudeDir forgets a home by label or dir. Its files and its
-// backups are left alone.
-func UnregisterClaudeDir(labelOrDir string) (ClaudeHome, error) {
-	if labelOrDir == DefaultHomeLabel || cleanDir(labelOrDir) == DefaultClaudeDir() {
-		return ClaudeHome{}, fmt.Errorf("the default claude dir cannot be removed")
+// RegisterClaudeDir adds a claude config dir (see RegisterDir).
+func RegisterClaudeDir(dir string, label string) (Home, bool, error) {
+	return RegisterDir(AgentClaude, dir, label)
+}
+
+// UnregisterDir forgets one of an agent's homes by label or dir. Its files
+// and its backups are left alone.
+func UnregisterDir(agent string, labelOrDir string) (Home, error) {
+	if labelOrDir == DefaultHomeLabel || cleanDir(labelOrDir) == defaultDir(agent) {
+		return Home{}, fmt.Errorf("the default %s dir cannot be removed", agent)
 	}
-	registered := loadRegistered()
+	registered := loadRegistered(agent)
 	for i, home := range registered {
 		if home.Label == labelOrDir || cleanDir(home.Dir) == cleanDir(labelOrDir) {
-			return home, saveRegistered(append(registered[:i], registered[i+1:]...))
+			return home, saveRegistered(agent, append(registered[:i], registered[i+1:]...))
 		}
 	}
-	return ClaudeHome{}, fmt.Errorf("no registered claude dir %q", labelOrDir)
+	return Home{}, fmt.Errorf("no registered %s dir %q", agent, labelOrDir)
+}
+
+// UnregisterClaudeDir forgets a claude config dir (see UnregisterDir).
+func UnregisterClaudeDir(labelOrDir string) (Home, error) {
+	return UnregisterDir(AgentClaude, labelOrDir)
 }
 
 // NoteActiveClaudeDir registers the config dir of the agent session that
@@ -207,13 +336,14 @@ func NoteActiveClaudeDir() {
 	_, _, _ = RegisterClaudeDir(dir, "")
 }
 
-// DeriveLabel names a dir from its base name with the agent's name and
-// separators stripped: ".claude-work" → "work", "acme-claude" → "acme".
-// A dir named just "claude" takes its parent's name.
+// DeriveLabel names a dir from its base name with the agents' names and
+// separators stripped: ".claude-work" → "work", "acme-codex" → "acme".
+// A dir named just "claude" or "codex" takes its parent's name.
 func DeriveLabel(dir string) string {
 	dir = cleanDir(dir)
 	base := strings.ToLower(filepath.Base(dir))
-	label := sanitizeLabel(strings.ReplaceAll(base, "claude", ""))
+	base = strings.ReplaceAll(strings.ReplaceAll(base, "claude", ""), "codex", "")
+	label := sanitizeLabel(base)
 	if label == "" {
 		label = sanitizeLabel(strings.ToLower(filepath.Base(filepath.Dir(dir))))
 	}
@@ -243,7 +373,7 @@ func sanitizeLabel(s string) string {
 
 func validLabel(label string) error {
 	if label == DefaultHomeLabel {
-		return fmt.Errorf("%q is reserved for ~/.claude", label)
+		return fmt.Errorf("%q is reserved for the default dir", label)
 	}
 	if label != sanitizeLabel(label) {
 		return fmt.Errorf("label %q must be lowercase letters, digits and dashes", label)
@@ -251,7 +381,7 @@ func validLabel(label string) error {
 	return nil
 }
 
-func labelTaken(homes []ClaudeHome, label string, except int) bool {
+func labelTaken(homes []Home, label string, except int) bool {
 	for i, home := range homes {
 		if i != except && home.Label == label {
 			return true
@@ -260,7 +390,7 @@ func labelTaken(homes []ClaudeHome, label string, except int) bool {
 	return false
 }
 
-func uniqueLabel(homes []ClaudeHome, label string) string {
+func uniqueLabel(homes []Home, label string) string {
 	candidate := label
 	for n := 2; labelTaken(homes, candidate, -1); n++ {
 		candidate = fmt.Sprintf("%s-%d", label, n)

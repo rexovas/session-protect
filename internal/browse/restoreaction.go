@@ -8,7 +8,6 @@ import (
 	"github.com/rexovas/session-protect/internal/config"
 	"github.com/rexovas/session-protect/internal/lock"
 	"github.com/rexovas/session-protect/internal/restore"
-	"github.com/rexovas/session-protect/internal/targets"
 )
 
 // restoreDest resolves where a session's backup copy would land in the live
@@ -69,8 +68,5 @@ func RestoreSession(cfg config.Config, session Session) (string, error) {
 // backupTargetName is the backup target holding a session: its claude
 // home's target (claude, claude-<label>) or codex.
 func backupTargetName(session Session) string {
-	if session.Target != "claude" {
-		return session.Target
-	}
-	return targets.HomeFor(session.Home).TargetName()
+	return sessionHome(session).TargetName()
 }

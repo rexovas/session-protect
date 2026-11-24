@@ -23,6 +23,7 @@ type Config struct {
 	Schedule   Schedule                `toml:"schedule" json:"schedule"`
 	Assist     Assist                  `toml:"assist" json:"assist"`
 	Update     Update                  `toml:"update" json:"update"`
+	Accounts   Accounts                `toml:"accounts" json:"accounts"`
 	Targets    map[string]TargetConfig `toml:"targets" json:"targets"`
 }
 
@@ -47,6 +48,14 @@ type Assist struct {
 // Update controls the new-version check, run at launch and every few hours
 // while the explorer is open. It is the one outbound network call the tool
 // ever makes (GitHub's releases API) and can be disabled entirely.
+// Accounts governs launching agents in folders a client account owns.
+type Accounts struct {
+	// RequireClientHome refuses to start an agent in a client's folder when
+	// the client has no home for that agent (say, a claude dir but no codex
+	// home). Off, the agent runs on the default home with a warning.
+	RequireClientHome bool `toml:"require_client_home" json:"require_client_home"`
+}
+
 type Update struct {
 	Check *bool `toml:"check" json:"check,omitempty"` // default true
 }
