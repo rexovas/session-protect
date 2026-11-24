@@ -94,11 +94,15 @@ func indexUsage(out io.Writer) {
 // when no index was built (semantic search is opt-in) or when the
 // embedder can't be reached, and reports how many sessions it embedded.
 func RefreshVecIndex(cfg config.Config) (int, error) {
-	index := loadVecIndex(cfg)
-	if len(index) == 0 || !assist.EmbedderReachable(cfg.Assist) {
+	if !vecIndexWanted(cfg) || !assist.EmbedderReachable(cfg.Assist) {
 		return 0, nil
 	}
+	index := loadVecIndex(cfg)
+	model := indexModel(index)
+	if model == "" {
+		model = assist.EmbedModel(cfg.Assist) // replacing an earlier-format index
+	}
 	before := len(index)
-	total, err := BuildVecIndex(cfg, AllSessions(cfg), indexModel(index), func(int, int) {})
+	total, err := BuildVecIndex(cfg, AllSessions(cfg), model, func(int, int) {})
 	return max(0, total-before), err
 }

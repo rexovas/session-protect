@@ -50,7 +50,9 @@ The only network call is an optional once-daily release check
   auto-detected, optional). Opt in to **semantic search** with
   `sp index` (or `ctrl+b` in the browser) and a local embedder
   (`ollama pull nomic-embed-text`, with Ollama kept running, e.g.
-  `brew services start ollama`): sessions are embedded once, the daily
+  `brew services start ollama`): sessions are embedded in passages, so
+  work deep inside a long session is found too (about 13 minutes for a
+  few hundred sessions the first time, ~20 MB), the daily
   backup embeds new ones, and AI find retrieves by meaning, not just
   shared words, so a paraphrase still lands. Results say when the index
   can't be used (Ollama down) rather than quietly falling back, and
