@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -73,6 +74,7 @@ func Checks() []Check {
 	if check, ok := semanticCheck(time.Now()); ok {
 		checks = append(checks, check)
 	}
+	checks = append(checks, codexDaemonChecks()...)
 
 	if runtime.GOOS == "darwin" {
 		checks = append(checks, scheduleCheck(schedule.Inspect(), lastBackup(), time.Now()))
@@ -223,4 +225,89 @@ func semanticCheck(now time.Time) (Check, bool) {
 		check.Warning = "not refreshed in over a week; run: session-protect index"
 	}
 	return check, true
+}
+
+// codexInstalled is seamed for tests, like codexDaemonVersion.
+var codexInstalled = func() bool {
+	_, err := exec.LookPath("codex")
+	return err == nil
+}
+
+// codexDaemonVersion asks codex for a home's background server version;
+// seamed so tests never run codex.
+var codexDaemonVersion = func(home string) ([]byte, error) {
+	cmd := exec.Command("codex", "app-server", "daemon", "version")
+	cmd.Env = append(withoutEnv(os.Environ(), "CODEX_HOME"), "CODEX_HOME="+home)
+	done := make(chan struct{})
+	var out []byte
+	var err error
+	go func() {
+		out, err = cmd.Output()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return out, err
+	case <-time.After(10 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return nil, fmt.Errorf("timed out")
+	}
+}
+
+func withoutEnv(environ []string, key string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		if !strings.HasPrefix(entry, key+"=") {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// codexDaemonChecks warns about codex homes whose background server is
+// older (or newer) than the codex CLI. Each home runs its own server, and
+// when the CLI updates (e.g. by Homebrew) a server left behind breaks
+// things in that home's sessions, such as network approvals. Homes that
+// never started a server, or no codex at all, are skipped.
+func codexDaemonChecks() []Check {
+	if !codexInstalled() {
+		return nil
+	}
+	var checks []Check
+	for _, home := range targets.CodexHomes() {
+		if !dirExists(home.Dir) {
+			continue
+		}
+		out, err := codexDaemonVersion(home.Dir)
+		if err != nil {
+			continue // no server in this home yet
+		}
+		var version struct {
+			Status           string `json:"status"`
+			CLIVersion       string `json:"cliVersion"`
+			AppServerVersion string `json:"appServerVersion"`
+			ManagedVersion   string `json:"managedCodexVersion"`
+		}
+		if json.Unmarshal(out, &version) != nil || version.CLIVersion == "" {
+			continue
+		}
+		server := version.AppServerVersion
+		if server == "" {
+			server = version.ManagedVersion
+		}
+		check := Check{Name: home.TargetName() + " server", Status: "ok", Detail: "codex " + server}
+		if server != "" && server != version.CLIVersion {
+			command := "codex app-server daemon update --from-cli -y"
+			if !home.IsDefault() || os.Getenv("CODEX_HOME") != "" {
+				command = "CODEX_HOME=" + home.Dir + " " + command
+			}
+			check.Status = "warn"
+			check.Warning = fmt.Sprintf("server %s doesn't match the codex CLI %s, which can break network approvals in this home's sessions; run: %s (restarts it)",
+				server, version.CLIVersion, command)
+		}
+		checks = append(checks, check)
+	}
+	return checks
 }

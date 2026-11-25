@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rexovas/session-protect/internal/schedule"
+	"github.com/rexovas/session-protect/internal/targets"
 )
 
 func TestChecksAndRun(t *testing.T) {
@@ -64,5 +66,36 @@ func TestScheduleCheck(t *testing.T) {
 		if got.Status != tc.status || !strings.Contains(got.Warning, tc.warn) {
 			t.Errorf("%s: got %s %q; want %s containing %q", tc.name, got.Status, got.Warning, tc.status, tc.warn)
 		}
+	}
+}
+
+// A codex home whose background server doesn't match the CLI is flagged
+// with the command to fix it; a home with no server is skipped.
+func TestCodexDaemonChecks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SESSION_PROTECT_CONFIG", filepath.Join(home, "cfg", "config.toml"))
+	t.Setenv("CODEX_HOME", "")
+	acme := filepath.Join(home, "acme-codex")
+	for _, dir := range []string{filepath.Join(home, ".codex"), acme} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := targets.RegisterDir(targets.AgentCodex, acme, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	installed, version := codexInstalled, codexDaemonVersion
+	t.Cleanup(func() { codexInstalled, codexDaemonVersion = installed, version })
+	codexInstalled = func() bool { return true }
+	codexDaemonVersion = func(dir string) ([]byte, error) {
+		if dir == acme {
+			return []byte(`{"status":"running","cliVersion":"0.172.0","appServerVersion":"0.171.0"}`), nil
+		}
+		return nil, errors.New("no server")
+	}
+	checks := codexDaemonChecks()
+	if len(checks) != 1 || checks[0].Status != "warn" || !strings.Contains(checks[0].Warning, "CODEX_HOME="+acme+" codex app-server daemon update --from-cli -y") {
+		t.Fatalf("checks = %+v", checks)
 	}
 }
